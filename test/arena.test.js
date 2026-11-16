@@ -3,7 +3,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Arena, KICK } from '../server/arena.js';
 import { loadConfig } from '../server/server.js';
-import { validateReport, createEventRing } from '../server/debug.js';
+import { validateReport, createEventRing, createDebug } from '../server/debug.js';
+import { createServer } from 'node:http';
+import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as Sim from '../shared/sim.js';
 import { KEY, TICK_MS } from '../shared/constants.js';
 
@@ -92,6 +96,60 @@ test('a missing input repeats the last one briefly, then counts as no keys', () 
   tick(10); assert.equal(rec.lastKeys, 0);
 });
 
+test('late input bursts do not leave the player behind for good: the backlog drains to one', () => {
+  const { conn, tick, arena } = setup();
+  const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  tick(100);
+  const rec = arena.recs.get(1);
+  let seq = 0;
+  const send = (n, keys = KEY.RIGHT) => { for (let i = 0; i < n; i++) a.say({ t: 'input', seq: ++seq, keys }); };
+  for (let i = 0; i < 20; i++) { send(1); tick(1); }
+  assert.equal(rec.lastSeq, seq);
+  // jitter and stalls: inputs arrive 1 to 15 ticks late, in a burst, then steadily again
+  for (const gap of [1, 3, 5, 8, 15]) {
+    tick(gap); send(gap + 1); tick(1);
+    for (let i = 0; i < 70; i++) { send(1); tick(1); }
+    assert.ok(rec.inputs.length <= 1, `gap ${gap}: ${rec.inputs.length} inputs still queued`);
+    assert.ok(seq - rec.lastSeq <= 1, `gap ${gap}: acked seq ${rec.lastSeq} vs sent ${seq}`);
+    assert.ok(a.last('snapshot').seq >= seq - 2);
+  }
+  // a client sending 2 inputs every 2nd tick (30 fps) has no standing backlog: nothing is skipped
+  const applied = [];
+  for (let i = 0; i < 120; i++) { if (i % 2 === 0) send(2); tick(1); applied.push(rec.lastSeq); }
+  for (let i = 1; i < applied.length; i++) assert.equal(applied[i] - applied[i - 1], 1, 'one input per tick, none skipped');
+});
+
+test('a one-tick slash tap inside a skipped (drained) input still fires', () => {
+  const { conn, tick, arena } = setup();
+  const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  tick(100);
+  const rec = arena.recs.get(1), p = Sim.getPlayer(arena.state, 1);
+  let seq = 0;
+  const send = (keys = 0) => a.say({ t: 'input', seq: ++seq, keys });
+  for (let i = 0; i < 10; i++) { send(); tick(1); }
+  tick(10);                                          // a stall, then a burst of 11
+  const s0 = seq;
+  for (let i = 1; i <= 11; i++) send(i === 3 ? KEY.SLASH : 0);
+  tick(1);                                           // takes s0+1; s0+2..s0+11 wait
+  rec.qTicks = 29; rec.minQ = Infinity;              // make the drain window end on the next tick
+  const swing = p.swing;
+  send(); tick(1);                                   // takes s0+2, skips s0+3..s0+11 (the tap among them)
+  assert.equal(rec.lastSeq, s0 + 11); assert.equal(rec.inputs.length, 1);
+  send(); tick(1);
+  assert.equal(p.swing, swing + 1, 'the skipped tap is carried into the next tick');
+});
+
+test('after a long absence inputs are applied again at once', () => {
+  const { conn, tick, arena } = setup();
+  const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  tick(100);
+  const rec = arena.recs.get(1);
+  a.say({ t: 'input', seq: 1, keys: KEY.RIGHT }); tick(1);
+  tick(600);                                        // tab hidden for 10 s
+  assert.equal(rec.lastKeys, 0);
+  for (let s = 2; s <= 40; s++) { a.say({ t: 'input', seq: s, keys: KEY.LEFT }); tick(1); assert.equal(rec.lastSeq, s); }
+});
+
 test('12 slots, then a FIFO queue with automatic promotion', () => {
   const { conn, tick, arena, clock } = setup({ maxPlayers: 2, graceMs: 1000 });
   const [a, b, c, d] = [conn(), conn(), conn(), conn()];
@@ -130,6 +188,39 @@ test('resume within the grace period keeps the slot and score; after it the toke
   const a3 = conn(); a3.say({ t: 'hello', name: 'A', color: 2, token });
   assert.equal(a3.last('welcome').resumed, false);
   assert.notEqual(a3.last('welcome').id, id);
+});
+
+test('a queued player who resumes into a free slot is promoted at once', () => {
+  const { conn, tick, arena } = setup({ maxPlayers: 1 });
+  const a = conn(), b = conn();
+  a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  const { token, id } = b.last('welcome');
+  assert.equal(b.last('welcome').state, 'queue');
+  arena.disconnect(b.conn);                         // B drops while queued
+  arena.kick(a.conn, 'idle');                       // the slot frees; B is away, so nobody is promoted
+  assert.equal(arena.activeCount(), 0);
+  const b2 = conn(); b2.say({ t: 'hello', name: 'B', color: 1, token });
+  assert.equal(b2.last('welcome').resumed, true);
+  assert.equal(b2.last('welcome').state, 'play');
+  assert.equal(arena.recs.get(id).state, 'play');
+  tick(2); assert.ok(b2.last('snapshot').me);
+});
+
+test('one address churning connect + hello + close cannot hold more than maxPerIp records', () => {
+  const { conn, tick, arena } = setup({ maxPlayers: 12, maxPerIp: 3 });
+  for (let i = 0; i < 20; i++) { const c = conn(); c.say({ t: 'hello', name: 'X', color: 0 }); arena.disconnect(c.conn); }
+  assert.equal(arena.recs.size, 3, 'older away records from the same address are released');
+  assert.equal(arena.activeCount(), 3);
+  tick(1);
+  // connected players from one address are never evicted by this
+  const live = [conn(), conn(), conn()];
+  for (const c of live) c.say({ t: 'hello', name: 'Y', color: 0 });
+  assert.equal(arena.recs.size, 3);
+  assert.ok(live.every(c => c.last('welcome').id && arena.recs.get(c.last('welcome').id).conn === c.conn));
+  // another address is unaffected
+  const other = arena.connect({ ip: 'other', send() {}, close() {} });
+  arena.onMessage(other, JSON.stringify({ t: 'hello', name: 'Z', color: 0 }));
+  assert.equal(arena.recs.size, 4);
 });
 
 test('a resume while the old socket is still open replaces it', () => {
@@ -248,5 +339,45 @@ test('the admin listener binds 127.0.0.1 only and is read-only', async () => {
     assert.equal(st.tick, 0);
     assert.deepEqual(await (await fetch(base + '/reports')).json(), []);
     assert.equal((await fetch(base + '/reports/..%2f..%2fetc')).status, 404);
+  } finally { srv.close(); }
+});
+
+test('report storage stops at the size cap on every append, not only at the periodic prune', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'multisplat-cap-'));
+  const origin = 'http://game.invalid';
+  let ipN = 0;
+  const debug = createDebug({ dir, allowedOrigins: [origin], clientIp: () => 'ip' + ipN++, arena: null,
+    events: createEventRing(100), keepBytes: 20000 });
+  const srv = createServer(debug.handleReport);
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  try {
+    const body = JSON.stringify({ v: 1, kind: 'manual', reason: 'x'.repeat(300), entries: Array.from({ length: 10 }, () => ({ msg: 'y'.repeat(250) })) });
+    const codes = [];
+    for (let i = 0; i < 20; i++) {
+      const r = await fetch(`http://127.0.0.1:${srv.address().port}/debug/report`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body });
+      codes.push(r.status); await r.text();
+    }
+    const bytes = readdirSync(dir).reduce((a, n) => a + statSync(join(dir, n)).size, 0);
+    assert.ok(bytes <= 20000, `stored ${bytes} bytes`);
+    assert.ok(codes.includes(200) && codes.at(-1) === 503, codes.join(','));
+  } finally { srv.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('report strings lose control and bidi characters', () => {
+  const { report } = validateReport({ reason: 'a\u001b[31mb\u202ec\u2066d\u009be' });
+  assert.equal(report.reason, 'a[31mbcde');
+});
+
+test('tools/debug.js never prints terminal control characters from a report', async () => {
+  const { execFile } = await import('node:child_process');
+  const evil = { meta: { id: 'abcd1234' }, report: { reason: 'x\u009b31m\u001b]0;pwn\u0007‮ok' } };
+  const srv = createServer((req, res) => { const b = JSON.stringify(evil); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(b); });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  try {
+    const out = await new Promise((res, rej) => execFile(process.execPath, [new URL('../tools/debug.js', import.meta.url).pathname, '--port', String(srv.address().port), 'report', 'abcd1234'],
+      { encoding: 'utf8' }, (e, so) => (e ? rej(e) : res(so))));
+    assert.match(out, /UNTRUSTED/);
+    // JSON.stringify escapes C0 itself; C1 (0x9b is CSI) and bidi controls must be replaced too
+    assert.doesNotMatch(out, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f‮]/);
   } finally { srv.close(); }
 });

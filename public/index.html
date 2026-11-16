@@ -335,6 +335,14 @@
   #adm #admYes { border-color: #f9f871; color: #f9f871; }
   #adm button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   @media (max-height: 460px) { #lobby { align-items: flex-start; } #lobby .card { padding: 10px 14px; } #lobby h1 { font-size: 26px; margin-bottom: 4px; } }
+  /* a short, wide screen (a phone on its side) with a room open: two columns, so FIGHT / WATCH are
+     in view without scrolling: you and the room list on the left, the chosen room on the right */
+  @media (max-height: 520px) and (min-width: 600px) {
+    #lobby .card:has(#lRoom:not(.hidden)) { width: min(860px, calc(100vw - 24px)); display: grid; grid-template-columns: 1fr 1fr;
+                                            column-gap: 18px; align-items: start; }
+    #lobby .card:has(#lRoom:not(.hidden)) > * { grid-column: 1; }
+    #lobby .card:has(#lRoom:not(.hidden)) > #lRoom { grid-column: 2; grid-row: 1 / span 30; margin-top: 0; padding-top: 0; border-top: 0; }
+  }
 </style>
 </head>
 <body>

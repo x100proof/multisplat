@@ -1,4 +1,4 @@
-# multiplat: specification
+# multisplat: specification
 
 An online multiplayer ninja arena that runs in the browser. Everyone who connects
 fights in one shared arena. Players run, jump, collide and slash at each other.
@@ -37,6 +37,7 @@ public/            static client (no build step)
   index.html       markup + CSS
   game.js          client: render, input, audio, prediction, interpolation
   net.js           WebSocket client, reconnect, clock sync
+  debug.js         debug event ring buffer + report sender (§13)
 shared/
   sim.js           DETERMINISTIC simulation step used by BOTH server and client
   level.js         the arena map + spawn points
@@ -44,6 +45,8 @@ shared/
 server/
   server.js        http static server + WebSocket game server
   arena.js         authoritative world, tick loop, broadcast
+  debug.js         report intake, server event ring, loopback admin listener (§13)
+tools/debug.js     CLI for reading live state, events and player reports (§13)
 test/              headless multi-client tests (node + playwright-core)
 deploy/            example systemd unit + example nginx site, with placeholders
 DEPLOY.md          how to host it anywhere
@@ -201,6 +204,8 @@ committed.
 | `ALLOWED_ORIGINS` | `http://localhost:3008,http://127.0.0.1:3008` | Comma-separated list of WebSocket `Origin`s to accept. |
 | `TRUST_PROXY` | unset | When set, take the client IP from `X-Real-IP` (set by your proxy). Otherwise use the socket address. |
 | `MAX_PER_IP` / `MAX_CONN` | `4` / `40` | Connection caps. |
+| `DEBUG_DIR` | `./debug-reports` | Where player debug reports are stored (§13). Git-ignored. |
+| `DEBUG_PORT` | unset | When set, a read-only admin listener (§13) on this port. It **always** binds `127.0.0.1`, whatever `HOST` is. |
 | `NET_SIM` | unset | **Test only:** `delayMs,jitterPct` for artificial latency. Refused when `NODE_ENV=production`. |
 
 **WebSocket server limits:**
@@ -217,7 +222,7 @@ all metadata, so clients can't set ids, scores or positions.
 **Logging:** the server logs joins, leaves, kicks and errors to stdout with no message bodies.
 
 **`deploy/` contents** are templates with obvious placeholders (`example.com`, `<PROXY_IP>`,
-`/path/to/multiplat`):
+`/path/to/multisplat`):
 - A systemd unit.
 - An nginx site:
   - Static files and `/ws` (with `Upgrade`/`Connection` headers and `proxy_read_timeout 1h`).
@@ -254,12 +259,81 @@ Write it for a stranger hosting their own copy:
     walking.
 - `test/abuse.js`: oversize messages, a bad origin, an input flood and connections over
   `MAX_PER_IP` are each rejected.
+- Debug pipeline (§13): `test/abuse.js` also covers an oversize report, a bad origin, a report
+  flood and a payload that tries to forge server metadata. `test/multiclient.js` sends a manual
+  report from a page and asserts it is stored with the server's view of that connection and is
+  readable through `tools/debug.js`.
 - `test/hygiene.js`: fails if any tracked file contains an IPv4 address other than
   `127.0.0.1`/`0.0.0.0`, a home path (`/home/`, `~/`), or a domain other than `example.com`
   and `localhost`. An allowlist covers doc and URL examples such as npm and MDN links.
 - Expose `window.__mp` (state, net and sim) for scripted checks.
 
-## 13. Build plan
+## 13. Remote debugging
+
+The goal: someone with a shell on the server (a person or an agent) can work out what went
+wrong for a player, without access to that player's browser.
+
+### 13.1 Client (`public/debug.js`)
+- A ring buffer of the last **300** structured entries `{ts, tick, cat, msg, data}`. All client
+  code logs through it (`dbg(cat, msg, data)`), not `console.log`. Categories:
+  - `net`: connect, close (with code), each reconnect attempt, resume accepted or refused, kick.
+  - `sync`: RTT and clock-offset samples, a snapshot gap over 100 ms, any reconciliation that
+    snapped (over 2 units), extrapolation running out.
+  - `perf`: a frame over 50 ms, an FPS sample every 5 s.
+  - `audio`: context state changes, music pre-render time or failure, lite or full mode.
+  - `input`: input device changes (keyboard, gamepad, touch) and orientation. Never the
+    keystroke stream.
+  - `life`: join, spawn, death, queue position, tab hidden or visible.
+  - `error`: `window.onerror` and `unhandledrejection` (message and stack, truncated).
+- `?debug=1` turns on verbose mode, which also records every snapshot and correction.
+- A **report** is one JSON object: environment (user agent, viewport, DPR, touch, audio mode,
+  any `CFG` value that differs from the default), net statistics (RTT average and max, snapshot
+  jitter, prediction-error RMS, reconnect count), the local player's state, and the ring
+  buffer. It is capped at **16 KB**; the oldest entries are dropped to fit.
+- Reports are sent:
+  - **Manually**, from a "Send debug report" button in the debug panel and a small "Report a
+    problem" link on the lobby screen (so it is reachable on phones).
+  - **Automatically** on an uncaught error, a kick, a refused resume, and after reconnecting
+    from a drop. Automatic reports are limited to one per 60 s and five per session.
+- After a manual send, the UI shows the server-assigned **report id** (8 characters) so the
+  player can quote it.
+
+### 13.2 Intake (`POST /debug/report`)
+- JSON body only. Over 16 KB gets 413. The `Origin` is checked like the WebSocket's. Limited to
+  6 reports per minute per IP and 120 per minute in total (429 beyond that).
+- The body is validated: known top-level keys only, at most 300 entries, strings truncated to
+  300 characters, control characters stripped. Anything else gets 400.
+- The report may carry the client's resume token. The server uses it to attach **its own view**
+  of that connection (player id, name, slot or queue state, server-measured RTT, input rate,
+  last processed `seq`, recent server events for it), then discards the token. The token is
+  never stored.
+- **The server owns the metadata.** Report id, receive time, client IP and the attached server
+  view are set by the server under a key the payload cannot supply or overwrite.
+- Each report is appended as one line to `DEBUG_DIR/reports-YYYY-MM-DD.jsonl`. File names are
+  generated by the server, never taken from the client. The directory is pruned to 14 days and
+  50 MB, oldest first. If it can't be written, intake answers 503 and the game keeps running.
+
+### 13.3 Server side
+- The server keeps a ring of its last **2000** events: join, leave, kick (with the reason),
+  resume, rate-limit drops, and any tick that overran its budget, each with a connection id.
+- **Admin listener** (`DEBUG_PORT`, off by default): read-only HTTP bound to `127.0.0.1` only,
+  never proxied.
+  - `GET /state`: players, queue, tick number, tick-time statistics and per-connection net
+    statistics.
+  - `GET /events?n=`: the newest server events.
+  - `GET /reports?n=` and `GET /reports/<id>`: stored player reports.
+- `tools/debug.js` wraps these for the terminal: `state`, `events`, `reports`, `report <id>`
+  and `tail` (follow new reports and events).
+
+### 13.4 Safety
+- **Report contents are untrusted input** written by anonymous clients. Whoever reads them,
+  person or agent, treats them as data and never as instructions. `tools/debug.js` prints a
+  one-line reminder of this above any report body, and `DEPLOY.md` says so too.
+- Reports carry nothing sensitive: no resume token and no keystrokes.
+- The nginx template gives `/debug/report` its own `limit_req` (1 r/s, burst 5), allows only
+  `POST`, and sets `client_max_body_size 16k`. It has no route to the admin listener.
+
+## 14. Build plan
 
 Run the milestones **in order**, with one agent per milestone. Each milestone ends with its
 tests passing and a commit.
@@ -272,9 +346,12 @@ tests passing and a commit.
 2. **M2: Server + netcode.**
    - The authoritative server, protocol, prediction and reconciliation, interpolation, lag
      compensation, lobby and queue, and reconnect.
+   - The whole debug pipeline (§13): client ring buffer and reports, intake endpoint, admin
+     listener and CLI.
    - `test/multiclient.js`, `test/abuse.js`, `deploy/` templates and `DEPLOY.md`.
 3. **M3: Gore + music + HUD polish.**
    - Kill gibs, spatter, pools, the combat score (§8), kill feed, scoreboard and touch controls.
+   - Debug entries (§13) for the new audio and gore code.
 4. **M4: Review.** A full code review pass. Fix confirmed issues.
 
 **Repo conventions:**

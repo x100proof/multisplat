@@ -28,7 +28,7 @@ source separately. Port its code rather than reinventing it.
 | Theme | NinjaRunner's dark cyberpunk night city: parallax neon skylines, rain, neon rim light. Blood is **red** (not NinjaRunner's multi-colour neon blood). |
 | SFX | Same synthesised WebAudio style as NinjaRunner (slash, jump, bonk and so on). Port its `sfx`. |
 | Music | **New.** Original, fast-paced and combat-driven (see §8). It is not NinjaRunner's ambient score. |
-| Character | Pip the ninja from NinjaRunner (`drawPip`, `drawTails`, `drawSword`). Each player's headband, tails and rim glow are tinted with their chosen colour. |
+| Character | **Kanbei** the ninja. The art is ported from NinjaRunner's character (its `drawPip`, `drawTails`, `drawSword`), but in this game's code, docs and UI the character is always called Kanbei (`drawKanbei` and so on), never by the NinjaRunner name. Each player's headband, tails and rim glow are tinted with their chosen colour. |
 
 ## 2. Architecture
 
@@ -126,10 +126,10 @@ ARCHITECTURE.md    the code as implemented
 - **Protocol:** snapshots carry a `long` flag per player and the list of pickups (id, x, y).
   New events: `item` (a pickup appeared) and `pickup` (who took which).
 - **Look and sound:** the pickup is a glowing, slowly bobbing blade in the neon style. As in
-  NinjaRunner, Pip has no sword in hand between attacks: the sword is drawn only during a
+  NinjaRunner, Kanbei has no sword in hand between attacks: the sword is drawn only during a
   swing. A long sword keeps that rule, and its swing is drawn visibly longer (blade and arc
-  scaled to the real reach) with a brighter trail. Pip does carry a scabbard and
-  hilt over the shoulder (`drawPip`), so a holder's scabbard is drawn longer and glowing.
+  scaled to the real reach) with a brighter trail. Kanbei does carry a scabbard and
+  hilt over the shoulder (`drawKanbei`), so a holder's scabbard is drawn longer and glowing.
   That lets opponents read the threat before the swing. Pickup has its
   own SFX, and the kill feed marks long-sword kills.
 - **Prediction:** the client predicts its own longer reach only after the server confirms the
@@ -369,7 +369,7 @@ tests passing and a commit.
 
 1. **M1: Shared sim + level + offline client.**
    - `shared/` (physics, collision, combat), the arena map, and the client rendering one local
-     Pip with NinjaRunner art, theme and SFX.
+     Kanbei with NinjaRunner art, theme and SFX.
    - A second dummy player for collision and slash testing.
    - Unit tests for the sim.
 2. **M2: Server + netcode.**

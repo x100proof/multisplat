@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT } from './lib.js';
-import { createGore, goreKill, goreHit, stepGore, fingerprint, settled, killKey, hitSeed, prng, sinp, fadeOf, GORE } from '../public/gore.js';
+import { createGore, goreKill, goreHit, stepGore, fingerprint, settled, killKey, hitSeed, prng, sinp, fadeOf, GORE, BLOOD_TTL_TICKS } from '../public/gore.js';
 import { LEVEL } from '../shared/level.js';
 import { SPIKE_LEVEL } from './spikelevel.js';
 
@@ -107,7 +107,7 @@ test('caps hold: decals 6000 oldest first, particles, gibs', () => {
   assert.ok(S.stats.decalsEvicted > 0);
 });
 
-test('decals and pools fade and expire after about 4 minutes', () => {
+test('decals and pools fade and expire after BLOOD_TTL_TICKS (15 s)', () => {
   const G = createGore(LEVEL, { life: 600, fade: 200 });
   goreKill(G, kill());
   for (let i = 0; i < 300; i++) stepGore(G);
@@ -118,7 +118,7 @@ test('decals and pools fade and expire after about 4 minutes', () => {
   assert.ok(G.decals.length === 0 || G.decals[0].t > d.t, 'old decals gone');
   for (let i = 0; i < 700; i++) stepGore(G);
   assert.equal(G.decals.length, 0); assert.equal(G.pools.size, 0); assert.equal(G.bloody.size, 0);
-  assert.equal(GORE.life, 4 * 60 * 60);
+  assert.equal(GORE.life, 900); assert.equal(BLOOD_TTL_TICKS, 900);
 });
 
 test('prng and sinp are deterministic helpers', () => {

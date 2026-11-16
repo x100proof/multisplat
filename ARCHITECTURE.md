@@ -532,7 +532,7 @@ never runs it.
 | `goreKill(G, e, {meta})` | cuts the body up, launches the pieces, 240 drops of radial spatter (320 on spikes), starts the fountains. `meta` (the victim's colour) rides on the pieces |
 | `stepGore(G)` | one tick: pieces, then drops, then the decal cap, and every 64 ticks expiry |
 | `fingerprint(G, key)`, `settled(G, key)`, `killKey(e)` | key = `tick:victim`. The fingerprint is `count:hash`, where the hash is a commutative sum over every landing (decal or pool, position and colour) plus each piece's position at age 180 ticks |
-| `fadeOf(G, t)` | 1 → 0 over the last 90 s of the 4 min life |
+| `fadeOf(G, t)` | 1 → 0 over the last 2 s of the 15 s life (`BLOOD_TTL_TICKS` = 900) |
 
 **Pieces** (Kanbei's local space, clip polygons with a centroid, a cut face with an outward normal and
 a collision radius):
@@ -553,7 +553,7 @@ trail drops. Halves (and the hood, briefly) pump a pulsing fountain from the cut
 - a ceiling or underside: a decal, often with a hanging drip;
 - spikes: a decal, and the spike tile is stained (`G.bloody`).
 
-**Persistence and caps** (`GORE`): decals, pools and stains live 4 min (fading over the last 90 s).
+**Persistence and caps** (`GORE`): decals, pools and stains live 15 s = `BLOOD_TTL_TICKS` = 900 gore ticks from creation, per entry (fading over the last 2 s; a pool column's clock starts when the column is created).
 Decals are capped at 6000, oldest first; drops at 4000 (new ones are skipped); pieces at 64 (oldest
 dropped). `onCap(what, n)` reports a cap; `stats` counts evictions and skips. A late joiner starts
 with an empty world (it only sees later events).

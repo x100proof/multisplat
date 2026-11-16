@@ -1261,7 +1261,7 @@ function stripRows(rows) {
 // ---------- gore drawing ----------
 // Decals and pools are painted into one offscreen canvas covering the whole arena, so a frame costs
 // one drawImage however much blood there is. New blood is painted in as it lands; the layer is
-// rebuilt from scratch only to fade old blood out or drop what a cap or its 4 min life removed.
+// rebuilt from scratch only to fade old blood out or drop what a cap or its 15 s life (BLOOD_TTL_TICKS) removed.
 const GL = { c: null, g: null, s: 1, built: -1e9, scale: 0, rebuilds: 0, lastMs: 0 };
 function goreLayerScale() { return Math.min(SCALE, LITE_AUDIO ? 2 : 3); }
 function paintDecal(g, d) {
@@ -1297,7 +1297,7 @@ function rebuildGoreLayer() {
 function updateGoreLayer() {
   const now = performance.now();
   let need = !GL.c || GL.scale !== goreLayerScale() || (G.dirty && now - GL.built > 1000);
-  if (!need && now - GL.built > 3000) {            // anything old enough to be fading? redraw it fainter
+  if (!need && now - GL.built > 250) {             // anything old enough to be fading? redraw it fainter (10 steps over the 2 s fade)
     const edge = G.t - (G.cfg.life - G.cfg.fade);
     need = (G.decals.length && G.decals[0].t < edge);
     if (!need) for (const p of G.pools.values()) if (p.t < edge) { need = true; break; }

@@ -244,8 +244,8 @@ blood already on the arena.
   - The screen shakes for any player within 120 units.
 - Gore is cosmetic and simulated on the client, seeded by the server's `kill.seed`, so every
   client sees the same spatter. The server never simulates blood.
-- **Persistence:** decals and pools stay through respawns and fade slowly, with about 4 min of
-  life. Cap decals at 6000 and drop the oldest first. A late joiner starts with a clean arena.
+- **Persistence:** decals and pools stay through respawns and fade out, each piece vanishing
+  15 s (`BLOOD_TTL_TICKS` = 900 gore ticks) after it was created, fading smoothly over the last 2 s. Cap decals at 6000 and drop the oldest first. A late joiner starts with a clean arena.
 - A `CFG.gore` toggle is available in the debug panel and is on by default.
 
 ## 8. Music (new, combat style)

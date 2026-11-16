@@ -13,9 +13,13 @@
 import { T } from '../shared/constants.js';
 import { tileAt } from '../shared/level.js';
 
+// How long blood persists: every decal, pool column and spike stain vanishes this many gore ticks
+// (stepGore calls, 60 Hz) after it was created, so all clients agree. It fades over the last BLOOD_FADE_TICKS.
+export const BLOOD_TTL_TICKS = 15 * 60;
+export const BLOOD_FADE_TICKS = 2 * 60;
 export const GORE = {
-  life: 4 * 60 * 60,      // decals, pools and stained spikes last about 4 minutes (ticks)...
-  fade: 90 * 60,          // ...fading out over the last 90 s
+  life: BLOOD_TTL_TICKS,  // decals, pools and stained spikes last 15 s (ticks)...
+  fade: BLOOD_FADE_TICKS, // ...fading out over the last 2 s
   decalCap: 6000,         // oldest dropped first
   partCap: 4000,          // flying blood particles; new ones are skipped past this
   gibCap: 64,             // body pieces (5-6 per kill); the oldest is dropped past this
@@ -256,7 +260,7 @@ function addDecal(G, rec, x, y, c, s, drip) {
 function addPool(G, rec, b, px, sy) {
   for (const [dx, amt] of [[0, .45], [-1, .25], [1, .25], [-2, .1], [2, .1], [-3, .04], [3, .04]]) {
     const key = (px + dx) + ',' + sy, pl = G.pools.get(key);
-    if (pl) { pl.h = Math.min(4, pl.h + amt); if (dx === 0) pl.c = b.c; pl.t = G.t; G.newPools.add(pl); }
+    if (pl) { pl.h = Math.min(4, pl.h + amt); if (dx === 0) pl.c = b.c; G.newPools.add(pl); }
     else { const n = { x: px + dx, y: sy, h: amt, c: b.c, t: G.t }; G.pools.set(key, n); G.newPools.add(n); }
   }
   if (rec) { rec.hash = (rec.hash + landHash(px, sy, b.c + 8)) >>> 0; rec.n++; }
@@ -324,7 +328,7 @@ export function stepGore(G) {
 const strHash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = mix(h, s.charCodeAt(i)); return h; };
 const hashKey = g => mix(strHash(g.rec ? g.rec.key : ''), g.id.charCodeAt(0) * 31 + (g.id.charCodeAt(1) || 0));
 
-// Drop decals, pools and stains past their life (every 64 ticks).
+// A pool column's timer starts when it is created (more blood adds height, not time). Drop decals, pools and stains past their life (every 64 ticks).
 function expire(G) {
   const old = G.t - G.cfg.life;
   let i = 0;

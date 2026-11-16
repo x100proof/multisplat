@@ -33,7 +33,8 @@ export function createEventRing(size = 2000) {
 // Strip control characters, truncate strings, bound depth/keys/array sizes. Returns the cleaned
 // value, or throws on something that is not plain JSON data.
 // eslint-disable-next-line no-control-regex
-const CTRL = new RegExp('[\\u0000-\\u0008\\u000e-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
+// (and the bidi controls, which can make a terminal show text in a misleading order)
+const CTRL = new RegExp('[\\u0000-\\u0008\\u000e-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028-\\u202e\\u2066-\\u2069]', 'g');
 const SPACE = /[\t\n\v\f\r]+/g;   // line breaks and tabs become one space
 function clean(v, depth = 0) {
   if (v === null || typeof v === 'boolean') return v;
@@ -65,10 +66,12 @@ export function validateReport(body) {
 }
 
 // ---------- intake + storage ----------
-export function createDebug({ dir, allowedOrigins, clientIp, arena, events, log = () => {}, now = () => Date.now() }) {
+export function createDebug({ dir, allowedOrigins, clientIp, arena, events, log = () => {}, now = () => Date.now(),
+  keepBytes = KEEP_BYTES }) {
   const perIp = new Map();     // ip -> [timestamps]
   let total = [];
   let pruneAt = 0;
+  let used = 0;                // bytes in the report files, as of the last prune plus appends since
 
   function limited(ip) {
     const t = now(), cut = t - 60000;
@@ -96,7 +99,7 @@ export function createDebug({ dir, allowedOrigins, clientIp, arena, events, log 
     }
     let sum = files.reduce((a, f) => a + f.size, 0);
     for (const f of files) {
-      if (sum <= KEEP_BYTES) break;
+      if (sum <= keepBytes) break;
       if (f.day === today) break;               // never delete the file being written
       await unlink(join(dir, f.n)).catch(() => {});
       sum -= f.size;
@@ -104,14 +107,18 @@ export function createDebug({ dir, allowedOrigins, clientIp, arena, events, log 
     return sum;
   }
 
+  // The size cap is checked on every append against a running total, not only at the (10-minute)
+  // prune: otherwise today's file, which prune never deletes, could grow without bound.
   async function store(record) {
     await mkdir(dir, { recursive: true });
     if (now() - pruneAt > 10 * 60000) {
       pruneAt = now();
-      const sum = await prune();
-      if (sum > KEEP_BYTES) throw new Error('debug dir full');
+      used = (await prune()) || 0;
     }
-    await appendFile(fileFor(new Date(now())), JSON.stringify(record) + '\n', { mode: 0o600 });
+    const line = JSON.stringify(record) + '\n', size = Buffer.byteLength(line);
+    if (used + size > keepBytes) throw new Error('debug dir full');
+    await appendFile(fileFor(new Date(now())), line, { mode: 0o600 });
+    used += size;
   }
 
   // POST /debug/report

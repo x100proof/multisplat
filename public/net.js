@@ -34,7 +34,7 @@ const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).
 // Rooms (SPEC §17): onRefused({what, why}) for a request the server turned down, onClosed({room, name,
 // why}) when the room we looked at closed, onRoom(id) when the room whose world we see changes (the
 // game then clears what it drew of the old one).
-export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {} } = {}) {
+export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {}, onMadeAdmin = () => {} } = {}) {
   const net = {
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
@@ -334,6 +334,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         net.lobby.admin = e.id; net.lobby.mine = e.id != null && e.id === net.id;
         if (e.id === net.id) dbg('life', 'made admin', { why: e.why });
         onLobby(net.lobby);
+        if (e.id != null && e.id === net.id) onMadeAdmin(e);   // tell them, in the lobby or in game
       } else if (e.type === 'room') {     // the admin renamed the room
         net.lobby.rname = e.name;
         for (const r of net.lobby.rooms) if (r.id === e.id) r.name = e.name;

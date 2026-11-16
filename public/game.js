@@ -425,7 +425,7 @@ addEventListener('keydown', e => {
   if (chatKey(e)) return;   // the chat box owns the keyboard while open; C opens it
   if (admOpen) { if (e.code === 'Escape') { e.preventDefault(); admDialog(null); } return; }   // the confirm dialog: Enter presses the focused button (Cancel by default)
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') {   // Enter in a lobby or menu field does that field's job
-    if (e.code === 'Enter') ({ lRoomName: createRoom, lRenameIn: () => renameRoom('lRenameIn'), lvRenameIn: () => renameRoom('lvRenameIn') }[e.target.id] || fight)();
+    if (e.code === 'Enter') ({ lRoomName: createRoom, lRenameIn: () => renameRoom('lRenameIn') }[e.target.id] || fight)();
     else if (e.code === 'Escape' && leaveOpen) leaveMenu(false);
     return;
   }
@@ -1628,7 +1628,14 @@ function frame(t) {
 
 // ---------- online: connection, lobby screen ----------
 const net = ONLINE ? createNet({ onLobby: () => { renderLobby(); if (leaveOpen) renderLeave(); }, onStatus: s => onNetStatus(s),
-  onRefused: m => onRefused(m), onClosed: m => onRoomClosed(m), onRoom: () => clearRoomView() }) : null;
+  onRefused: m => onRefused(m), onClosed: m => onRoomClosed(m), onRoom: () => clearRoomView(),
+  onMadeAdmin: e => toast(`You are now the admin of ${net.lobby.rname || 'this room'}` + (e.why === 'auto' ? '\n(the previous admin left)' : '')) }) : null;
+// A short notice over the lobby or the game (#toast), gone after a few seconds.
+function toast(text, ms = 5000) {
+  const el = document.getElementById('toast');
+  el.textContent = text; el.style.whiteSpace = 'pre-line'; el.classList.remove('hidden');
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.add('hidden'), ms);
+}
 let lobbyOpen = ONLINE;
 const LS_NAME = 'multisplat-name', LS_COLOR = 'multisplat-color';
 const lobbyEl = document.getElementById('lobby');
@@ -1659,7 +1666,6 @@ function setupLobby() {
   document.getElementById('lBack').addEventListener('click', backToRooms);
   document.getElementById('lCreate').addEventListener('click', createRoom);
   document.getElementById('lRenameBtn').addEventListener('click', () => renameRoom('lRenameIn'));
-  document.getElementById('lvRenameBtn').addEventListener('click', () => renameRoom('lvRenameIn'));
   // AI players (SPEC §15): − / + ask the server (admin only); the count shown is always the server's
   for (const [id, d] of [['lBotDec', -1], ['lBotInc', 1], ['lvBotDec', -1], ['lvBotInc', 1]]) document.getElementById(id).addEventListener('click', () => net.bots(d));
   // "Make admin" buttons (lobby roster, Esc menu): each opens the confirm dialog
@@ -1935,7 +1941,6 @@ function renderLeave() {
   else if (admin) note += ' You stay the admin, on the room\'s screen.';
   document.getElementById('lvNote').textContent = note;
   setText('lvRName', net.lobby.rname || '');
-  document.getElementById('lvRenameRow').classList.toggle('hidden2', !admin);
   renderBots('lv');
   const ul = document.getElementById('lvPlayers');
   const { players = [], queue = [] } = net.lobby;

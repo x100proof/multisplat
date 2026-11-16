@@ -1197,20 +1197,15 @@ async function renameRoomTest() {
   await A.page.fill('#lRenameIn', 'New Name'); await A.page.click('#lRenameBtn');
   for (const p of [A, B, V]) await seen(p, 'New Name');
   assert.equal(await A.page.inputValue('#lRenameIn'), '', 'the field is cleared');
-  // from the Esc menu (Ann fights first, and stays admin)
-  await A.page.click('#lFight');
-  await A.page.waitForFunction(() => __mp.net.mode === 'play' && !__mp.lobbyOpen && __mp.net.isAdmin(), null, { timeout: 10000 });
-  await A.page.keyboard.press('Escape');
-  await waitFor(() => A.page.evaluate(() => __mp.leaveOpen), { what: 'Esc menu' });
-  assert.equal(await A.page.textContent('#lvRName'), 'New Name');
-  await A.page.fill('#lvRenameIn', "Third's-Try"); await A.page.click('#lvRenameBtn');
+  // a second rename, then a bad name is refused with its rule and changes nothing; the Esc menu has
+  // no rename (the user asked: renaming is a lobby thing)
+  await A.page.fill('#lRenameIn', "Third's-Try"); await A.page.click('#lRenameBtn');
   for (const p of [A, B, V]) await seen(p, "Third's-Try");
-  await waitFor(async () => (await A.page.textContent('#lvRName')) === "Third's-Try", { what: 'the menu shows the new name' });
-  // a bad name is refused with its rule and changes nothing
-  await A.page.fill('#lvRenameIn', 'a<b>'); await A.page.click('#lvRenameBtn');
+  await A.page.fill('#lRenameIn', 'a<b>'); await A.page.click('#lRenameBtn');
   await sleep(300);
   assert.equal(await B.page.evaluate(() => __mp.net.lobby.rname), "Third's-Try");
-  log('rooms: renames from the lobby and from the Esc menu show on every page, list included');
+  assert.equal(await A.page.evaluate(() => document.getElementById('lvRenameIn')), null, 'no rename in the Esc menu');
+  log('rooms: renames from the lobby show on every page, list included; none in the Esc menu');
   for (const p of [A, B, V]) await p.page.context().close();
   await srv.stop();
 }

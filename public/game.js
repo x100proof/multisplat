@@ -1,0 +1,819 @@
+// multisplat client (M1: offline). Renders the shared simulation with NinjaRunner's art, theme
+// and sound: one local Pip plus a dummy player to collide with and cut down.
+// The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
+// screen's full resolution. All art is vector-drawn: paths, gradients and glows.
+import * as Sim from '/shared/sim.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS } from '/shared/constants.js';
+import { LEVEL } from '/shared/level.js';
+const { swordBoxOf } = Sim;
+
+const QS = new URLSearchParams(location.search);
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let SCALE = 1;   // device pixels per world unit
+
+// ---------- tunables (edited live by the debug panel, D) ----------
+// Sim tunables come from shared/constants.js; the rest are client-only view and dummy switches.
+const CLIENT_DEFAULTS = { gameSpeed: 1, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
+const ALL_DEFAULTS = { ...DEFAULTS, ...CLIENT_DEFAULTS };
+const CFG = { ...ALL_DEFAULTS };
+const CFG_KEY = 'multisplat-cfg';
+try {
+  const saved = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
+  for (const k in saved) if (k in ALL_DEFAULTS && typeof saved[k] === typeof ALL_DEFAULTS[k]) CFG[k] = saved[k];
+} catch (e) { /* ignore */ }
+
+// ---------- drawing helpers (NinjaRunner) ----------
+const TAU = Math.PI * 2;
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+function rng(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
+const NEON = { pink: '#ff2a6d', cyan: '#05d9e8', yellow: '#f9f871', purple: '#b026ff', green: '#39ff14', magenta: '#ff6ec7' };
+const NEON_LIST = Object.values(NEON);
+function rrect(g, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  g.beginPath(); g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function oval(g, x, y, rx, ry) { g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, TAU); g.fill(); }
+function line(g, x1, y1, x2, y2) { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); }
+const blur = b => b * SCALE;   // shadowBlur is in device pixels, so scale it with the view
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16), f = v => Math.min(255, Math.round(v * k));
+  return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
+}
+
+// ---------- tiles: vector-drawn once per resize at native resolution ----------
+const TILE = {};
+function tileCanvas(draw) {
+  const n = Math.ceil(T * SCALE), c = mk(n, n), g = c.getContext('2d');
+  g.scale(n / T, n / T); draw(g); return c;
+}
+function drawSpikes(g) {
+  for (let i = 0; i < 4; i++) {
+    const bx = i * 4, grd = g.createLinearGradient(bx, 0, bx + 4, 0);
+    grd.addColorStop(0, '#f4f6ff'); grd.addColorStop(.5, '#b4bce0'); grd.addColorStop(1, '#5a6088');
+    g.fillStyle = grd; g.beginPath(); g.moveTo(bx + .25, 15.2); g.lineTo(bx + 2, 8.2); g.lineTo(bx + 3.75, 15.2); g.closePath(); g.fill();
+    g.strokeStyle = 'rgba(20,16,40,.6)'; g.lineWidth = .3; g.stroke();
+  }
+  g.fillStyle = '#2a2440'; g.fillRect(0, 15, T, 1);
+  g.fillStyle = '#4a4468'; g.fillRect(0, 15, T, .3);
+}
+function buildTiles() {
+  TILE.dirt = tileCanvas(g => {
+    g.fillStyle = '#0f0c18'; g.fillRect(0, 0, T, T);
+    const grd = g.createLinearGradient(0, 0, 0, T); grd.addColorStop(0, '#241d3c'); grd.addColorStop(1, '#16112a');
+    g.fillStyle = grd; rrect(g, .6, .6, T - 1.2, T - 1.2, 1.6); g.fill();
+    g.strokeStyle = 'rgba(120,100,200,.2)'; g.lineWidth = .4;
+    g.beginPath(); g.moveTo(1.6, 8); g.lineTo(14.4, 8); g.moveTo(8, 1.6); g.lineTo(8, 8); g.stroke();
+    g.fillStyle = '#3a3058';
+    for (const [a, b] of [[2.4, 2.4], [13.6, 2.4], [2.4, 13.6], [13.6, 13.6]]) { g.beginPath(); g.arc(a, b, .55, 0, TAU); g.fill(); }
+  });
+  TILE.top = tileCanvas(g => {
+    g.drawImage(TILE.dirt, 0, 0, T, T);
+    const grd = g.createLinearGradient(0, 0, 0, 3.6); grd.addColorStop(0, '#4c4474'); grd.addColorStop(1, '#241e3c');
+    g.fillStyle = grd; g.fillRect(0, 0, T, 3.6);
+    g.fillStyle = 'rgba(249,248,113,.85)';
+    for (const sx of [2, 10]) { g.beginPath(); g.moveTo(sx, 3); g.lineTo(sx + 1.2, 1.4); g.lineTo(sx + 4, 1.4); g.lineTo(sx + 2.8, 3); g.closePath(); g.fill(); }
+  });
+  TILE.block = tileCanvas(g => {
+    const grd = g.createLinearGradient(0, 0, T, T); grd.addColorStop(0, '#2c1b4c'); grd.addColorStop(1, '#120b22');
+    g.fillStyle = grd; rrect(g, .4, .4, T - .8, T - .8, 2.2); g.fill();
+    g.strokeStyle = '#3a2668'; g.lineWidth = .8; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(3.4, 3.4); g.lineTo(12.6, 12.6); g.moveTo(12.6, 3.4); g.lineTo(3.4, 12.6); g.stroke();
+    g.shadowColor = NEON.pink; g.shadowBlur = blur(3);
+    g.strokeStyle = NEON.pink; g.lineWidth = .7; rrect(g, 1.3, 1.3, T - 2.6, T - 2.6, 1.6); g.stroke();
+    g.shadowBlur = 0;
+  });
+  TILE.plank = tileCanvas(g => {
+    const grd = g.createLinearGradient(0, 0, 0, 3.4);
+    grd.addColorStop(0, '#9a94c8'); grd.addColorStop(.3, '#4a4470'); grd.addColorStop(1, '#2a2444');
+    g.fillStyle = grd; g.fillRect(0, 0, T, 3.4);
+    g.fillStyle = '#120e1e'; for (let i = 2; i < T; i += 4) oval(g, i, 1.9, 1, .5);
+    g.shadowColor = NEON.cyan; g.shadowBlur = blur(3);
+    g.fillStyle = NEON.cyan; g.fillRect(0, 3.4, T, .6);
+    g.shadowBlur = 0;
+  });
+  TILE.spike = tileCanvas(drawSpikes);
+  TILE.spikeBloody = tileCanvas(g => {
+    drawSpikes(g);
+    g.lineCap = 'round';
+    for (let i = 0; i < 4; i++) {
+      const tx = i * 4 + 2, c1 = NEON_LIST[(i * 2) % 6], c2 = NEON_LIST[(i * 2 + 3) % 6];
+      g.shadowBlur = blur(2.5);
+      g.shadowColor = g.fillStyle = g.strokeStyle = c1;
+      oval(g, tx, 9.5, .9, 1.4);
+      g.lineWidth = .55; g.beginPath(); g.moveTo(tx - .2, 9.6); g.quadraticCurveTo(tx - 1, 12, tx - .5, 12.6 + (i % 3)); g.stroke();
+      g.shadowColor = g.fillStyle = g.strokeStyle = c2;
+      g.beginPath(); g.moveTo(tx + .3, 10.5); g.quadraticCurveTo(tx + 1.2, 12.5, tx + .9, 13.8 + (i % 2)); g.stroke();
+      g.beginPath(); g.arc(tx + .9, 14 + (i % 2), .45, 0, TAU); g.fill();
+    }
+    g.shadowBlur = 0;
+    g.globalAlpha = .7; g.fillStyle = NEON.purple; g.fillRect(0, 15, T, 1); g.globalAlpha = 1;
+  });
+}
+
+// ---------- background: night city (vector, cached; capped resolution for memory) ----------
+// Each skyline layer is one cached canvas. For speed, the sky is baked into the far layer
+// (its horizontal scroll is invisible apart from the slow drift of moon and stars), the purple
+// haze is baked into the layers instead of drawn over the screen each frame, and each layer
+
+let BG_S = 1, CITY = [];
+const CITY_W = 960;
+function paintSky(g) {
+  const grd = g.createLinearGradient(0, 0, 0, VH);
+  grd.addColorStop(0, '#04020a'); grd.addColorStop(.5, '#140a26'); grd.addColorStop(.8, '#2e0c3c'); grd.addColorStop(1, '#4a0f4a');
+  g.fillStyle = grd; g.fillRect(0, 0, CITY_W, VH);
+  const r = rng(5);
+  for (let i = 0; i < 135; i++) { g.fillStyle = `rgba(255,255,255,${.15 + r() * .4})`; g.beginPath(); g.arc(r() * CITY_W, r() * 75, .25 + r() * .35, 0, TAU); g.fill(); }
+  g.shadowColor = '#ffb8f0'; g.shadowBlur = 30 * BG_S; g.fillStyle = 'rgba(255,214,250,.22)';   // hazy moon
+  g.beginPath(); g.arc(250, 40, 13, 0, TAU); g.fill();
+  g.shadowBlur = 0; g.fillStyle = 'rgba(255,230,255,.12)'; g.beginPath(); g.arc(247, 37, 9, 0, TAU); g.fill();
+}
+function cityLayer(o) {
+  const c = mk(Math.ceil(CITY_W * BG_S), Math.ceil(VH * BG_S)), x = c.getContext('2d'), r = rng(o.seed), signs = [];
+  x.scale(BG_S, BG_S); x.lineCap = 'round';
+  if (o.sky) paintSky(x);
+  const pick = a => a[(r() * a.length) | 0];
+  const glow = (col, b) => { x.shadowColor = col; x.shadowBlur = b * BG_S; };
+  let bx = 0, minTop = VH;
+  while (bx < CITY_W) {
+    let w = (o.minW + r() * (o.maxW - o.minW)) | 0;
+    w = CITY_W - bx < o.minW * 1.5 ? CITY_W - bx : Math.min(w, CITY_W - bx);
+    const h = (o.minH + r() * (o.maxH - o.minH)) | 0, top = o.base - h, body = pick(o.body);
+    minTop = Math.min(minTop, top);
+    // facade, lit slightly from above, with a crown on top
+    const grd = x.createLinearGradient(0, top, 0, VH); grd.addColorStop(0, shade(body, 1.5)); grd.addColorStop(.4, body); grd.addColorStop(1, shade(body, .7));
+    x.fillStyle = grd; x.fillRect(bx, top, w, VH - top);
+    const roof = r();
+    if (roof < .3 && w > 10) { x.fillRect(bx + w * .18, top - 6, w * .64, 6.2); x.fillRect(bx + w * .35, top - 10, w * .3, 4.2); }
+    else if (roof < .55) { x.beginPath(); x.moveTo(bx, top + .2); x.lineTo(bx + w, top - Math.min(12, w * .4)); x.lineTo(bx + w, top + .2); x.closePath(); x.fill(); }
+    else if (roof < .7 && w > 12) { x.beginPath(); x.moveTo(bx + 2, top + .2); x.lineTo(bx + w / 2, top - 9); x.lineTo(bx + w - 2, top + .2); x.closePath(); x.fill(); }
+    x.fillStyle = 'rgba(255,255,255,.05)'; x.fillRect(bx, top, .8, VH - top);   // edge highlight
+    if (r() < .45) {                                                                // antenna + beacon
+      const ah = 8 + r() * 14, ax = bx + w / 2;
+      x.strokeStyle = shade(body, 1.6); x.lineWidth = .5; line(x, ax, top - 8, ax, top - 8 - ah);
+      glow('#ff3040', 4); x.fillStyle = '#ff3040'; x.beginPath(); x.arc(ax, top - 8 - ah, .7, 0, TAU); x.fill(); x.shadowBlur = 0;
+    }
+    const wc = pick(o.win);                                                         // window grid
+    for (let wy = top + 4; wy < VH - 2; wy += o.wy) for (let wx = bx + 2; wx < bx + w - 2; wx += o.wx) if (r() < o.density) {
+      x.globalAlpha = .3 + r() * .55; x.fillStyle = r() < .85 ? wc : pick(o.win);
+      x.fillRect(wx, wy, o.ww * .85, .9);
+    }
+    x.globalAlpha = 1;
+    if (o.neon) {
+      if (r() < .7) {                                                               // neon trim
+        const nc = pick(NEON_LIST); glow(nc, o.glow); x.strokeStyle = nc; x.lineWidth = .7;
+        if (r() < .5) line(x, bx + .5, top + .4, bx + w - .5, top + .4);
+        else { const ex = bx + (r() < .5 ? .5 : w - .5); line(x, ex, top + .5, ex, VH); }
+        x.shadowBlur = 0;
+      }
+      if (w >= 10 && r() < .65) {                                                   // vertical sign
+        const sw = 5 + r() * 4, sh = 14 + r() * 22, sx = bx + 2 + r() * Math.max(1, w - sw - 4), sy = top + 6 + r() * 20, nc = pick(NEON_LIST);
+        x.fillStyle = '#07040c'; rrect(x, sx, sy, sw, sh, 1.2); x.fill();
+        glow(nc, o.glow); x.strokeStyle = nc; x.lineWidth = .6; rrect(x, sx + .4, sy + .4, sw - .8, sh - .8, 1); x.stroke();
+        x.lineWidth = .45; x.beginPath();
+        for (let gy = sy + 3; gy < sy + sh - 3; gy += 3.6) {                        // made-up glyphs
+          const gx = sx + 1.6, gw = sw - 3.2;
+          x.moveTo(gx + r() * gw * .3, gy); x.lineTo(gx + gw * (.6 + r() * .4), gy + r() * .8);
+          x.moveTo(gx + gw * (.3 + r() * .4), gy - .6); x.lineTo(gx + gw * (.3 + r() * .4), gy + 1.4);
+        }
+        x.stroke(); x.shadowBlur = 0;
+        signs.push({ x: sx - 1, y: sy - 1, w: sw + 2, h: sh + 2, seed: r() * 1000 | 0 });
+      }
+      if (w >= 26 && r() < .4) {                                                    // billboard
+        const bw = w - 8, bh = 9, bxx = bx + 4, by = top + 30 + r() * 24, nc = pick(NEON_LIST), nc2 = pick(NEON_LIST);
+        x.fillStyle = '#0a0612'; rrect(x, bxx, by, bw, bh, 1.5); x.fill();
+        glow(nc, o.glow); x.strokeStyle = nc; x.lineWidth = .6; rrect(x, bxx + .4, by + .4, bw - .8, bh - .8, 1.2); x.stroke();
+        glow(nc2, o.glow * .6); x.strokeStyle = nc2; x.lineWidth = .8; x.beginPath();
+        for (let i = bxx + 2.5; i < bxx + bw - 3; i += 3 + r() * 3) { const y0 = by + 2.5 + r() * 2; x.moveTo(i, y0); x.lineTo(i + 1.2 + r(), y0 + r() * 2.5); }
+        x.stroke(); x.shadowBlur = 0;
+        signs.push({ x: bxx - 1, y: by - 1, w: bw + 2, h: bh + 2, seed: r() * 1000 | 0 });
+      }
+    }
+    bx += w + (r() * 3 | 0);
+  }
+  // bake in the atmospheric haze (only over what this layer has drawn)
+  x.globalCompositeOperation = 'source-atop';
+  for (let i = 0; i < o.haze; i++) {
+    const hz = x.createLinearGradient(0, 40, 0, VH);
+    hz.addColorStop(0, 'rgba(60,10,70,0)'); hz.addColorStop(1, 'rgba(90,15,90,.45)');
+    x.fillStyle = hz; x.fillRect(0, 0, CITY_W, VH);
+  }
+  x.globalCompositeOperation = 'source-over';
+  return { c, signs, k: o.k, top: o.sky ? 0 : Math.max(0, Math.floor(minTop - 34)) };
+}
+function buildCity() {
+  CITY = [
+    cityLayer({ seed: 3, base: VH, minH: 80, maxH: 160, minW: 12, maxW: 26, body: ['#0e0a1c', '#110c22', '#0c0d20'],
+                win: ['#05d9e8', '#ff6ec7', '#7a6cff'], density: .1, wx: 3, wy: 3, ww: 1, neon: false, glow: 0, k: .08, sky: true, haze: 2 }),
+    cityLayer({ seed: 9, base: VH, minH: 70, maxH: 145, minW: 18, maxW: 38, body: ['#170f2c', '#1a1030', '#10142c', '#1e0d2a'],
+                win: ['#05d9e8', '#f9f871', '#ff2a6d', '#b026ff'], density: .16, wx: 4, wy: 4, ww: 2, neon: true, glow: 4, k: .2, haze: 1 }),
+    cityLayer({ seed: 21, base: VH, minH: 45, maxH: 115, minW: 24, maxW: 48, body: ['#0a0614', '#0d0818', '#100a1c'],
+                win: ['#05d9e8', '#ff2a6d', '#f9f871'], density: .12, wx: 5, wy: 5, ww: 2, neon: true, glow: 6, k: .38, haze: 0 }),
+  ];
+}
+const RAIN = (() => { const r = rng(4242); for (let i = 0; i < 10; i++) r(); return Array.from({ length: 110 }, () => ({ x: r() * (VW + 40), y: r() * VH, s: 3 + r() * 2 })); })();
+const CARS = [{ y: 34, v: .5, o: 0 }, { y: 58, v: -.35, o: 400 }, { y: 22, v: .8, o: 700 }, { y: 75, v: -.6, o: 150 }];
+
+// ---------- sizing: canvas matches the screen's real pixels ----------
+const stage = document.getElementById('stage');
+function resize() {
+  // Phones held upright get the whole game turned sideways, so it is always played in landscape.
+  const rot = matchMedia('(pointer: coarse)').matches && innerHeight > innerWidth;
+  const W = rot ? innerHeight : innerWidth, H = rot ? innerWidth : innerHeight;
+  stage.classList.toggle('rot', rot);
+  Object.assign(stage.style, rot ? { width: W + 'px', height: H + 'px', left: innerWidth + 'px' } : { width: '', height: '', left: '' });
+  const s = Math.min(W / VW, H / VH), dpr = QS.has('lowdpr') ? 1 : Math.min(window.devicePixelRatio || 1, 2.5);
+  cv.style.width = VW * s + 'px'; cv.style.height = VH * s + 'px';
+  cv.width = Math.round(VW * s * dpr); cv.height = Math.round(VH * s * dpr);
+  SCALE = cv.width / VW;
+  BG_S = Math.min(SCALE, 3);
+  buildTiles(); buildCity();
+}
+let resizeTimer = 0;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 120); });
+addEventListener('orientationchange', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 250); });
+resize();
+
+// ---------- audio: NinjaRunner's synthesised SFX (no music in M1) ----------
+let AC = null, muted = false;
+// Touch devices get a bigger audio buffer ('playback' latency), as in NinjaRunner.
+// ?full forces the desktop version, ?lite the phone version, ?latency= overrides the buffer.
+const LITE_AUDIO = QS.has('lite') || (!QS.has('full') && matchMedia('(pointer: coarse)').matches);
+function initAudio() {
+  if (!AC) {
+    const opts = {};
+    opts.latencyHint = QS.get('latency') || (LITE_AUDIO ? 'playback' : 'interactive');
+    if (+QS.get('rate')) opts.sampleRate = +QS.get('rate');
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(opts); } catch (e) { /* no audio */ }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+// Everything plays through one master gain.
+let MASTER = null;
+function audioOut() {
+  if (!MASTER) { MASTER = AC.createGain(); MASTER.connect(AC.destination); }
+  return MASTER;
+}
+function tone(f, d, type = 'square', f2 = null, v = .06, delay = 0) {
+  if (!AC || muted || QS.has('nosfx')) return;
+  const t = AC.currentTime + delay, o = AC.createOscillator(), gn = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
+  gn.gain.setValueAtTime(v, t); gn.gain.exponentialRampToValueAtTime(.001, t + d);
+  o.connect(gn).connect(audioOut()); o.start(t); o.stop(t + d + .02);
+}
+function noise(d, v = .15, delay = 0, freq = 1200) {
+  if (!AC || muted || QS.has('nosfx')) return;
+  const t = AC.currentTime + delay, n = AC.sampleRate * d | 0, buf = AC.createBuffer(1, n, AC.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / n) ** 2;
+  const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
+  src.buffer = buf; f.type = 'lowpass'; f.frequency.value = freq; gn.gain.value = v;
+  src.connect(f).connect(gn).connect(audioOut()); src.start(t);
+}
+const sfx = {
+  slash: () => { noise(.12, .12, 0, 5000); tone(1200, .09, 'sawtooth', 300, .02); },
+  slice: () => { noise(.15, .25, 0, 3000); tone(300, .15, 'square', 70, .07); },
+  gush: () => { noise(1.2, .12, .05, 700); noise(.6, .08, .3, 400); },
+  impale: () => { noise(.18, .35, 0, 2500); tone(120, .35, 'square', 35, .09); noise(.5, .15, .1, 500); },
+  jump: () => tone(320, .16, 'square', 640, .05),
+  stomp: () => tone(260, .12, 'square', 80, .07),
+  bonk: () => tone(140, .08, 'triangle', 90, .1),
+  die: () => [523, 392, 330, 262].forEach((f, i) => tone(f, .16, 'square', null, .05, i * .15)),
+  check: () => { tone(660, .1, 'triangle', null, .08); tone(880, .2, 'triangle', null, .08, .1); },
+};
+
+// ---------- input: keyboard and gamepad -> one bitmask per tick ----------
+// Keys are level-triggered bits. A press that starts and ends between two ticks is latched so it
+// still reaches the sim for one tick (NinjaRunner queued jump and slash presses the same way).
+const keys = {};
+let latch = 0;
+const JUMP_KEYS = ['ArrowUp', 'KeyZ'];
+const KEYMAP = {
+  ArrowLeft: KEY.LEFT, ArrowRight: KEY.RIGHT, ArrowUp: KEY.JUMP, KeyZ: KEY.JUMP,
+  ShiftLeft: KEY.RUN, ShiftRight: KEY.RUN, KeyX: KEY.RUN, Space: KEY.SLASH,
+};
+function padBits() {
+  let b = 0;
+  for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
+    if (!gp) continue;
+    const btn = i => gp.buttons[i] && gp.buttons[i].pressed, ax = gp.axes[0] || 0;
+    if (ax < -.4 || btn(14)) b |= KEY.LEFT;
+    if (ax > .4 || btn(15)) b |= KEY.RIGHT;
+    if (btn(0) || btn(12)) b |= KEY.JUMP;               // A / d-pad up
+    if (btn(2) || btn(1)) b |= KEY.SLASH;               // X / B
+    if (btn(4) || btn(5) || btn(6) || btn(7)) b |= KEY.RUN;   // bumpers / triggers
+  }
+  return b;
+}
+function heldBits() {
+  let b = 0;
+  for (const code in KEYMAP) if (keys[code]) b |= KEYMAP[code];
+  return b | padBits();
+}
+addEventListener('keydown', e => {
+  if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') e.target.blur(); // keep keys driving the game
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  initAudio();
+  if (!keys[e.code] && KEYMAP[e.code]) latch |= KEYMAP[e.code];
+  keys[e.code] = true;
+  if (e.code === 'KeyM' && !e.repeat) muted = !muted;
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+addEventListener('pointerdown', () => initAudio());
+
+// ---------- world ----------
+const S = { tick: 0, camX: 0, camY: 0, shake: 0 };   // view state (the sim state is `state`)
+const L = { ...LEVEL, bloody: new Set() };          // the arena plus spikes that have drawn blood
+const ME = 1, DUMMY = 2;
+const colorOf = id => (id === ME ? COLORS[0] : COLORS[(id * 3) % COLORS.length]);
+let state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
+const eventLog = [];          // recent sim events, for scripted checks
+let corpses = [], popups = [];
+const forced = {};            // window.__mp.input: per-id bitmask overrides for scripted checks
+
+function onEvents(evs) {
+  for (const e of evs) {
+    eventLog.push(e); if (eventLog.length > 200) eventLog.shift();
+    const near = e.id === ME || e.attacker === ME || e.victim === ME;
+    if (e.type === 'hit') {
+      sfx.slice();
+      popups.push({ x: e.x + 5, y: e.y - 4, t: 40, s: String(e.dmg) });
+      if (near) S.shake = Math.max(S.shake, 4);
+    } else if (e.type === 'kill') {
+      const v = Sim.getPlayer(state, e.victim);
+      corpses.push({ id: e.victim, x: e.x, y: e.y, vx: e.vx * .5, vy: Math.min(e.vy, -2.5), face: e.face, t: 50, impaled: e.move === 'spikes', w: v ? v.w : 10 });
+      if (e.move === 'spikes') {
+        sfx.impale();
+        const ty = Math.floor((e.y + 13) / T);
+        for (let tx = Math.floor(e.x / T); tx <= Math.floor((e.x + 9) / T); tx++) if (L.grid[ty]?.[tx] === '^') L.bloody.add(tx + ',' + ty);
+      } else { sfx.gush(); }
+      if (e.victim === ME) sfx.die();
+      if (near) S.shake = 8;
+    } else if (e.type === 'spawn') {
+      if (e.id === ME) { sfx.check(); snapCamera(); }
+    }
+  }
+}
+
+// The dummy: stands or wanders, and (debug switch) slashes when the local player is close.
+const dummyAI = { dir: 0, until: 0, jumpAt: 0, slashAt: 0 };
+function dummyKeys(d, me) {
+  if (!d || !d.alive) return 0;
+  let k = 0;
+  if (CFG.dummyWander) {
+    if (S.tick >= dummyAI.until) {
+      dummyAI.dir = [-1, 0, 1, 1, -1][Math.random() * 5 | 0];
+      dummyAI.until = S.tick + 40 + (Math.random() * 100 | 0);
+      if (Math.random() < .35) dummyAI.jumpAt = S.tick + (Math.random() * 30 | 0);
+    }
+    if (d.x < 20) dummyAI.dir = 1; else if (d.x > L.w * T - 30) dummyAI.dir = -1;
+    // like NinjaRunner's bugs, turn back before walking into spikes
+    const ahead = Math.floor((d.x + 5 + dummyAI.dir * 14) / T), row = Math.floor((d.y + d.h - 1) / T);
+    if (dummyAI.dir && d.onGround && L.grid[row]?.[ahead] === '^') dummyAI.dir = -dummyAI.dir;
+    if (dummyAI.dir < 0) k |= KEY.LEFT; else if (dummyAI.dir > 0) k |= KEY.RIGHT;
+    if (S.tick - dummyAI.jumpAt >= 0 && S.tick - dummyAI.jumpAt < 12) k |= KEY.JUMP;
+  }
+  if (CFG.dummySlash && me && me.alive) {
+    const dx = me.x - d.x;
+    if (Math.abs(dx) < 34 && Math.abs(me.y - d.y) < 16) {
+      k = (k & ~(KEY.LEFT | KEY.RIGHT)) | (dx < 0 ? KEY.LEFT : KEY.RIGHT);
+      if (S.tick >= dummyAI.slashAt) { k |= KEY.SLASH; dummyAI.slashAt = S.tick + 24; }
+    }
+  }
+  return k;
+}
+
+function update() {
+  S.tick++;
+  if (S.shake > 0) S.shake--;
+  const me = Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
+  const inputs = { [ME]: heldBits() | latch, [DUMMY]: dummyKeys(d, me) };
+  latch = 0;
+  for (const id in forced) inputs[id] = forced[id];
+  if (CFG.invincible && me) me.iframes = Math.max(me.iframes, 2);
+  onEvents(Sim.step(state, inputs, { cfg: CFG }));
+  for (const p of state.players) {
+    if (!p.alive || !p.fx) continue;
+    if (p.fx & FX.JUMP) sfx.jump();
+    if (p.fx & FX.SLASH) sfx.slash();
+    if (p.fx & FX.BONK) sfx.bonk();
+    if (p.fx & FX.LAND && p.standOn != null) sfx.stomp();
+  }
+  corpses = corpses.filter(c => { c.vy += .3; c.x += c.vx; c.y += c.vy; if (c.impaled) c.vx = c.vy = 0; return --c.t > 0; });
+  popups = popups.filter(p => (p.y -= .5, --p.t > 0));
+  followCamera();
+}
+
+// ---------- camera: follows the local player, clamped to the arena ----------
+const clampCam = x => Math.max(0, Math.min(L.w * T - VW, x));
+const clampCamY = y => Math.max(0, Math.min(L.h * T - VH, y));
+const focus = () => Sim.getPlayer(state, ME) || { x: L.w * T / 2, y: L.h * T / 2, w: 10, h: 13 };
+const camTargetX = () => focus().x + 5 - VW / 2;
+const camTargetY = () => focus().y + focus().h / 2 - VH * .55;
+function snapCamera() { S.camX = clampCam(camTargetX()); S.camY = clampCamY(camTargetY()); }
+// Follow with easing, but never let the player leave the screen (NinjaRunner followY).
+function followCamera() {
+  const P = focus();
+  S.camX = clampCam(S.camX + (camTargetX() - S.camX) * .15);
+  let y = S.camY + (camTargetY() - S.camY) * .12;
+  y = Math.min(y, P.y - 24);
+  y = Math.max(y, P.y + P.h + 40 - VH);
+  S.camY = clampCamY(y);
+}
+
+function resetWorld() {
+  state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
+  corpses = []; popups = []; L.bloody.clear();
+  onEvents(Sim.addPlayer(state, ME, { cfg: CFG }));
+  onEvents(Sim.addPlayer(state, DUMMY, { cfg: CFG }));
+  snapCamera();
+}
+
+// ---------- rendering ----------
+let SHX = 0, SHY = 0, CY = 0;
+const world = () => ctx.setTransform(SCALE, 0, 0, SCALE, SHX, SHY - CY * SCALE);
+const screen = () => ctx.setTransform(SCALE, 0, 0, SCALE, SHX, SHY);
+const device = () => ctx.setTransform(1, 0, 0, 1, SHX, SHY);
+function blitTile(img, tx, ty, cx) {
+  const dx = Math.round((tx * T - cx) * SCALE), dy = Math.round((ty * T - CY) * SCALE);
+  ctx.drawImage(img, dx, dy, Math.round(((tx + 1) * T - cx) * SCALE) - dx, Math.round(((ty + 1) * T - CY) * SCALE) - dy);
+}
+const isWall = c => c === '#' || c === 'B';
+const STARS = (() => { const r = rng(77); return Array.from({ length: 90 }, () => ({ x: r() * VW, y: r() * 400, a: .15 + r() * .5, s: .2 + r() * .35 })); })();
+const BG_DROP = [.025, .12, .25];   // how fast each skyline layer sinks as you climb
+
+function drawCars(cx) {
+  for (const car of CARS) {
+    const x = (((S.tick * car.v + car.o - cx * .12) % 1100) + 1100) % 1100 - 100, y = car.y, d = Math.sign(car.v);
+    ctx.fillStyle = '#2a2240'; rrect(ctx, x - 2.6, y - .75, 5.2, 1.5, .75); ctx.fill();
+    ctx.shadowBlur = blur(4);
+    ctx.shadowColor = ctx.fillStyle = '#fff7c0'; ctx.beginPath(); ctx.arc(x + d * 2.7, y, .45, 0, TAU); ctx.fill();
+    ctx.shadowColor = ctx.fillStyle = NEON.pink; ctx.beginPath(); ctx.arc(x - d * 2.7, y, .4, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+// Pip, drawn for player P. The headband, belt, tails and rim glow take the player's colour col.
+function drawPip(P, x, y, face, opt, col) {
+  const air = !P.onGround && !opt.impaled, run = Math.abs(P.vx) > .2 && P.onGround && !opt.impaled, ph = P.walk * .35;
+  ctx.save();
+  ctx.translate(x + 5, y + 13);
+  if (opt.flip) { ctx.translate(0, -6.5); ctx.scale(1, -1); ctx.translate(0, 6.5); }
+  if (air && !opt.flip) { const s = Math.max(-.12, Math.min(.12, -P.vy * .02)); ctx.scale(1 - s * .6, 1 + s); }
+  drawTails(face, opt.impaled || opt.flip ? 0 : P.vx, opt.impaled ? 0 : P.vy, col);
+  ctx.scale(face, 1);
+  ctx.lineCap = 'round';
+  // feet
+  ctx.fillStyle = '#4a4468';
+  if (air) { oval(ctx, -2.4, -1.7, 1.7, 1.1); oval(ctx, 2.6, -1.3, 1.7, 1.1); }
+  else {
+    const step = run ? Math.sin(ph) * 1.6 : 0;
+    oval(ctx, -2.4 + step, -1.05 - (run ? Math.max(0, Math.cos(ph)) * .9 : 0), 1.9, 1.15);
+    oval(ctx, 2.6 - step, -1.05 - (run ? Math.max(0, -Math.cos(ph)) * .9 : 0), 1.9, 1.15);
+  }
+  // scabbard and hilt over the shoulder (behind the body)
+  ctx.strokeStyle = '#120e1e'; ctx.lineWidth = 1.5; line(ctx, -5.6, -14.2, 3.5, -1.8);
+  ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.1; line(ctx, -6.4, -15.3, -4.6, -12.6);
+  ctx.lineWidth = .7; line(ctx, -5.8, -12.1, -3.9, -13.3);
+  // body with a cyan rim glow
+  ctx.shadowColor = col; ctx.shadowBlur = blur(4);
+  const g = ctx.createRadialGradient(-2, -10, 1, 0, -6.5, 8);
+  g.addColorStop(0, '#6c60aa'); g.addColorStop(.45, '#342c60'); g.addColorStop(1, '#17132c');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, -6.8, 5.4, 6.2, 0, 0, TAU); ctx.fill();
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#0b0912'; ctx.lineWidth = .5; ctx.stroke();
+  // headband, belt and eye slit, clipped to the body
+  ctx.save(); ctx.beginPath(); ctx.ellipse(0, -6.8, 5.4, 6.2, 0, 0, TAU); ctx.clip();
+  ctx.fillStyle = col; ctx.fillRect(-6, -10.5, 12, 1.5); ctx.fillRect(-6, -3.7, 12, 1.1);
+  ctx.fillStyle = '#f2c79a'; rrect(ctx, -2.2, -8.9, 8, 2.6, 1.3); ctx.fill();
+  ctx.restore();
+  if (opt.impaled || opt.flip) {
+    ctx.strokeStyle = '#1a1020'; ctx.lineWidth = .45;
+    for (const ex of [1, 3.4]) { line(ctx, ex - .6, -8.2, ex + .6, -7); line(ctx, ex + .6, -8.2, ex - .6, -7); }
+  } else {
+    ctx.fillStyle = '#fff'; oval(ctx, .9, -7.6, .95, .8); oval(ctx, 3.35, -7.6, .9, .8);
+    ctx.fillStyle = '#1a1020'; oval(ctx, 1.3, -7.5, .45, .55); oval(ctx, 3.7, -7.5, .42, .55);
+    ctx.strokeStyle = '#1a1020'; ctx.lineWidth = .5; line(ctx, -.3, -8.75, 2, -8.25); line(ctx, 2.6, -8.25, 4.6, -8.7);
+  }
+  ctx.strokeStyle = 'rgba(190,180,255,.35)'; ctx.lineWidth = .6;
+  ctx.beginPath(); ctx.arc(0, -6.8, 4.4, -2.6, -1.7); ctx.stroke();
+  ctx.fillStyle = col; oval(ctx, -5.3, -9.75, .9, .75);   // headband knot
+  ctx.restore();
+}
+
+// Headband tails: two tapered ribbons streaming behind the head. Longer and flatter when
+// running, drooping when still, lifting when falling. Drawn in Pip's local space.
+function drawTails(face, vx, vy, col) {
+  const speed = Math.min(1, Math.abs(vx) / 2.4), len = 6 + speed * 5, lift = Math.max(-1.5, Math.min(1.5, vy * .3));
+  ctx.save(); ctx.lineCap = 'round'; ctx.shadowColor = col; ctx.shadowBlur = blur(3);
+  for (let s = 0; s < 2; s++) {
+    ctx.strokeStyle = s ? shade(col, .62) : col;
+    let px = -5.1 * face, py = -9.75;
+    for (let i = 1; i <= 8; i++) {
+      const k = i / 8, d = k * len;
+      const wave = Math.sin(S.tick * (.15 + speed * .2) + k * 6 + s * 1.7) * k * (1 + speed);
+      const nx = -5.1 * face - face * d, ny = -9.75 + s * .8 + wave + (1 - speed) * d * .55 - lift * k * 2 + s * k;
+      ctx.lineWidth = 1.25 * (1 - k * .55);
+      line(ctx, px, py, nx, ny);
+      px = nx; py = ny;
+    }
+  }
+  ctx.restore();
+}
+
+// Sword swing: chop = blade sweeps from up-behind to down-in-front; sweep = flat horizontal swing.
+// (swordBoxOf, the hitbox, lives in shared/sim.js.)
+function drawSword(P, px, py) {
+  const t = 1 - P.atk / ATK_LEN, e = 1 - (1 - t) ** 3, f = P.face;
+  const ax = px + 5 + f * 3.5, ay = py + 7.5;
+  let a, len;
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.shadowColor = ctx.strokeStyle = NEON.cyan; ctx.shadowBlur = blur(6);
+  if (P.atkType === 'sweep') {
+    ctx.globalAlpha = .55 * (1 - t * .5); ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.ellipse(ax + f * 6, ay, 13, 3.2, 0, f > 0 ? -1.6 : Math.PI - 1.6 * e, f > 0 ? -1.6 + 1.6 * e + .8 : Math.PI + 1.6); ctx.stroke();
+    a = .25 - e * .45; len = 4 + 13 * Math.sin(e * Math.PI * .5 + .15);
+  } else {
+    const a0 = -2, a1 = 1; a = a0 + (a1 - a0) * e; len = 14;
+    ctx.globalAlpha = .55 * (1 - t * .6); ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    if (f > 0) ctx.arc(ax, ay, 11.5, a0 + (a - a0) * .3, a); else ctx.arc(ax, ay, 11.5, Math.PI - a, Math.PI - (a0 + (a - a0) * .3));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const dx = Math.cos(a) * f, dy = Math.sin(a), hx = ax + dx * 3, hy = ay + dy * 3;
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#d4a84a';
+  ctx.lineWidth = 1.3; line(ctx, ax, ay, hx, hy);                                   // grip
+  ctx.lineWidth = .8; line(ctx, hx + dy * 1.4, hy - dx * 1.4, hx - dy * 1.4, hy + dx * 1.4);   // guard
+  ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(6); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1;
+  line(ctx, hx, hy, ax + dx * len, ay + dy * len);                                  // glowing blade
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .4;
+  line(ctx, hx, hy, ax + dx * len, ay + dy * len);
+  ctx.restore();
+}
+
+
+function render() {
+  const cx = Math.round(S.camX * SCALE) / SCALE;
+  CY = Math.round(S.camY * SCALE) / SCALE;
+  SHX = S.shake > 0 ? (Math.random() - .5) * S.shake * .4 * SCALE : 0;
+  SHY = S.shake > 0 ? (Math.random() - .5) * S.shake * .4 * SCALE : 0;
+  screen();
+  if (SHX || SHY) { ctx.fillStyle = '#04020a'; ctx.fillRect(-4, -4, VW + 8, VH + 8); }   // edges exposed by shake
+  // The arena is taller than the view: the skyline sinks as you climb, leaving open night sky above.
+  const climb = Math.max(0, L.h * T - VH) - CY;
+  if (climb > 0) {
+    const top = Math.min(VH, climb * BG_DROP[0] + 1);
+    ctx.fillStyle = '#04020a'; ctx.fillRect(-4, -4, VW + 8, top + 4);
+    for (const s of STARS) {
+      const y = s.y - 400 + climb * .03;
+      if (y < top && y > -2) { ctx.fillStyle = `rgba(255,255,255,${s.a})`; ctx.fillRect(s.x, y, s.s * 2, s.s * 2); }
+    }
+  }
+  CITY.forEach((layer, i) => {
+    const o = -((cx * layer.k) % CITY_W), sy = layer.top * BG_S, dy = climb * BG_DROP[i];
+    if (layer.top + dy < VH) for (const off of [o, o + CITY_W]) {
+      if (off > VW || off + CITY_W < 0) continue;
+      const sx0 = Math.max(0, -off), sx1 = Math.min(CITY_W, VW - off);
+      const vis = Math.min(VH - layer.top, VH - layer.top - dy);
+      ctx.drawImage(layer.c, sx0 * BG_S, sy, (sx1 - sx0) * BG_S, vis * BG_S, off + sx0, layer.top + dy, sx1 - sx0, vis);
+      for (const s of layer.signs) {                 // some signs flicker and buzz off
+        if (s.seed % 3 || off + s.x > VW || off + s.x + s.w < 0) continue;
+        const fr = Math.abs(Math.sin(s.seed + Math.floor(S.tick / 5) * 12.9898) * 43758.5453) % 1;
+        if (fr > .8) { ctx.fillStyle = 'rgba(5,3,10,.78)'; rrect(ctx, off + s.x, s.y + dy, s.w, s.h, 1.2); ctx.fill(); }
+      }
+    }
+    if (i === 0) drawCars(cx);
+  });
+
+  // tiles
+  const x0 = Math.max(0, Math.floor(cx / T)), x1 = Math.min(L.w - 1, Math.floor((cx + VW) / T));
+  const y0 = Math.max(0, Math.floor(CY / T)), y1 = Math.min(L.h - 1, Math.floor((CY + VH) / T));
+  device();
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const c = L.grid[ty][tx];
+    if (c === '#') blitTile(ty > 0 && !isWall(L.grid[ty - 1][tx]) ? TILE.top : TILE.dirt, tx, ty, cx);
+    else if (c === 'B') blitTile(TILE.block, tx, ty, cx);
+    else if (c === '=') blitTile(TILE.plank, tx, ty, cx);
+    else if (c === '^') blitTile(L.bloody.has(tx + ',' + ty) ? TILE.spikeBloody : TILE.spike, tx, ty, cx);
+  }
+  world();
+  // one continuous glowing neon edge along each run of walkable floor
+  ctx.save();
+  ctx.strokeStyle = NEON.cyan; ctx.lineWidth = .8; ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(5);
+  ctx.beginPath();
+  for (let ty = y0; ty <= y1; ty++) {
+    let run = -1;
+    for (let tx = x0; tx <= x1 + 1; tx++) {
+      const top = tx <= x1 && L.grid[ty][tx] === '#' && !(ty > 0 && isWall(L.grid[ty - 1][tx]));
+      if (top && run < 0) run = tx;
+      if (!top && run >= 0) { ctx.moveTo(run * T - cx, ty * T + .4); ctx.lineTo(tx * T - cx, ty * T + .4); run = -1; }
+    }
+  }
+  ctx.stroke(); ctx.restore();
+
+  // the dead: flipped over and falling (impaled ones stay on the spikes), fading out
+  for (const c of corpses) {
+    ctx.globalAlpha = Math.min(1, c.t / 20);
+    drawPip({ onGround: false, vx: 0, vy: 0, walk: 0 }, c.x - cx, c.y, c.face, c.impaled ? { impaled: true } : { flip: true }, colorOf(c.id));
+    ctx.globalAlpha = 1;
+    if (c.impaled) {                     // redraw the bloody spikes on top so the points go through
+      const ty = Math.floor((c.y + 13) / T);
+      device();
+      for (let tx = Math.floor(c.x / T); tx <= Math.floor((c.x + c.w - 1) / T); tx++)
+        if (L.grid[ty]?.[tx] === '^') blitTile(TILE.spikeBloody, tx, ty, cx);
+      world();
+    }
+  }
+
+  // players: the local one last, so it is drawn on top
+  const order = state.players.filter(p => p.alive).sort((a, b) => (a.id === ME) - (b.id === ME));
+  for (const p of order) {
+    const px = p.x - cx, py = p.y, col = colorOf(p.id);
+    if (!(p.iframes > 0 && (p.iframes >> 2) % 2)) {
+      if (p.stun > 0 && (p.stun >> 1) % 2) ctx.filter = 'brightness(2.2)';   // hit flash
+      drawPip(p, px, py, p.face, {}, col);
+      ctx.filter = 'none';
+      if (p.atk > 0) drawSword(p, px, py);
+    }
+    drawHpBar(p, px, py, col);
+  }
+
+  if (CFG.hitboxes) {
+    ctx.lineWidth = .5;
+    const box = (b, c) => { ctx.strokeStyle = c; ctx.strokeRect(b.x - cx, b.y, b.w, b.h); };
+    for (const p of state.players) if (p.alive) {
+      box(p, p.id === ME ? '#00ff66' : '#ff3355');
+      if (Sim.swordLive(p)) box(swordBoxOf(p), '#ffffff');
+      else if (p.atk > 0) { ctx.setLineDash([1, 1]); box(swordBoxOf(p), 'rgba(255,255,255,.5)'); ctx.setLineDash([]); }
+    }
+    ctx.fillStyle = 'rgba(249,248,113,.8)';
+    for (const s of L.spawns) ctx.fillRect(s.x - cx - 1, s.y - 2, 2, 2);
+  }
+
+  // rain slanting across everything
+  screen();
+  ctx.strokeStyle = 'rgba(160,210,255,.3)'; ctx.lineWidth = .35; ctx.lineCap = 'round'; ctx.beginPath();
+  for (const d of RAIN) {
+    const x = (((d.x - S.tick * 1.2 - cx * .7) % (VW + 40)) + VW + 40) % (VW + 40) - 20;
+    const y = (d.y + S.tick * d.s) % (VH + 10) - 10;
+    ctx.moveTo(x, y); ctx.lineTo(x - 1.3, y + 6);
+  }
+  ctx.stroke();
+
+  world();
+  ctx.font = '800 7px system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.shadowColor = NEON.pink; ctx.shadowBlur = blur(4); ctx.fillStyle = NEON.yellow;
+  for (const p of popups) ctx.fillText(p.s, p.x - cx, p.y);
+  ctx.shadowBlur = 0;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // HUD (DOM)
+  const me = Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
+  if (me) {
+    setText('hHp', `HP ${Math.max(0, me.hp)}`);
+    document.getElementById('hHp').classList.toggle('low', me.alive && me.hp <= 34);
+    setText('hScore', `SCORE ${me.score}` + (d ? ` · DUMMY ${d.score}` : ''));
+    setText('msg', me.alive ? '' : `SPLAT · respawn in ${(me.respawn / 60).toFixed(1)}`);
+  }
+  if (S.tick > 600) document.getElementById('help').classList.add('gone');
+}
+
+// HP bar floating above a player's head, in the player's colour, red when low.
+function drawHpBar(p, px, py, col) {
+  const w = 14, x = px + p.w / 2 - w / 2, y = py - 7, k = Math.max(0, p.hp) / CFG.maxHp;
+  ctx.fillStyle = 'rgba(5,3,10,.75)'; rrect(ctx, x - .5, y - .5, w + 1, 2.6, .8); ctx.fill();
+  ctx.save(); ctx.shadowColor = ctx.fillStyle = k > .34 ? col : NEON.pink; ctx.shadowBlur = blur(2);
+  if (k > 0) { rrect(ctx, x, y, w * k, 1.6, .6); ctx.fill(); }
+  ctx.restore();
+}
+
+const hudCache = {};
+function setText(id, s) { if (hudCache[id] !== s) { hudCache[id] = s; document.getElementById(id).textContent = s; } }
+
+// ---------- debug panel (D): NinjaRunner's, with combat tunables and dummy switches ----------
+const DBG_SPEC = [
+  ['Jump', [
+    ['jumpVel', 'Jump strength', 2, 12, .1],
+    ['jumpSpeedBonus', 'Run-jump bonus', 0, 1, .05],
+    ['gravity', 'Gravity', .1, 1, .01],
+    ['releaseGravity', 'Short-hop gravity', .1, 2, .05],
+    ['maxFall', 'Max fall speed', 2, 15, .5],
+    ['coyote', 'Coyote time (frames)', 0, 20, 1],
+    ['jumpBuffer', 'Jump buffer (frames)', 0, 20, 1],
+  ]],
+  ['Movement', [
+    ['walkSpeed', 'Walk speed', .5, 5, .1],
+    ['runSpeed', 'Run speed', .5, 6, .1],
+    ['groundAccel', 'Ground accel', .02, 1, .02],
+    ['airAccel', 'Air accel', .02, 1, .02],
+    ['groundFriction', 'Ground friction', .5, 1, .01],
+    ['airFriction', 'Air friction', .8, 1, .01],
+    ['pushDamp', 'Body contact damping', 0, 1, .05],
+  ]],
+  ['Combat', [
+    ['chopDmg', 'Chop damage', 0, 100, 1],
+    ['sweepDmg', 'Sweep damage', 0, 100, 1],
+    ['knockX', 'Knockback x', 0, 8, .25],
+    ['knockY', 'Knockback y', -8, 0, .25],
+    ['hitStun', 'Hit-stun (ticks)', 0, 40, 1],
+    ['spawnIframes', 'Spawn protection (ticks)', 0, 240, 5],
+    ['respawnTicks', 'Respawn delay (ticks)', 10, 300, 5],
+  ]],
+  ['World', [
+    ['gameSpeed', 'Game speed', .1, 2, .05],
+  ]],
+];
+const dbg = document.getElementById('dbg');
+function saveCfg() {
+  const changed = {};
+  for (const k in CFG) if (CFG[k] !== ALL_DEFAULTS[k]) changed[k] = CFG[k];
+  try { localStorage.setItem(CFG_KEY, JSON.stringify(changed)); } catch (e) { /* ignore */ }
+}
+function fmt(v, step) { return step >= 1 ? String(v) : (+v).toFixed(step < .1 ? 2 : 1); }
+function jumpInfo() {
+  const h = CFG.jumpVel ** 2 / (2 * CFG.gravity) / T;
+  const air = 2 * CFG.jumpVel / CFG.gravity;
+  return `Jump height ≈ ${h.toFixed(1)} tiles · walk-jump ≈ ${(air * CFG.walkSpeed / T).toFixed(1)} tiles · run-jump ≈ ${(air * CFG.runSpeed / T).toFixed(1)} tiles`;
+}
+let fpsEl = null;
+function buildDebug() {
+  dbg.innerHTML = '';
+  const h = document.createElement('h2'); h.innerHTML = '<span>Debug</span><span style="color:#bbb;font-weight:400">D to close</span>';
+  dbg.appendChild(h);
+  fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; dbg.appendChild(fpsEl);
+  const info = document.createElement('div'); info.className = 'info'; dbg.appendChild(info);
+  const refresh = () => { info.textContent = jumpInfo(); };
+  for (const [group, items] of DBG_SPEC) {
+    const g = document.createElement('h3'); g.textContent = group; dbg.appendChild(g);
+    for (const [key, name, min, max, step] of items) {
+      const lab = document.createElement('label');
+      const n = document.createElement('span'); n.textContent = name;
+      const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(CFG[key], step);
+      const r = document.createElement('input');
+      Object.assign(r, { type: 'range', min, max, step, value: CFG[key] });
+      r.addEventListener('input', () => { CFG[key] = +r.value; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
+      r.addEventListener('dblclick', () => { CFG[key] = ALL_DEFAULTS[key]; r.value = CFG[key]; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
+      lab.append(n, v, r); dbg.appendChild(lab);
+    }
+  }
+  const g = document.createElement('h3'); g.textContent = 'Cheats & view'; dbg.appendChild(g);
+  for (const [key, name] of [['hitboxes', 'Show hitboxes'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']]) {
+    const lab = document.createElement('label'); lab.className = 'chk';
+    const c = document.createElement('input'); c.type = 'checkbox'; c.checked = CFG[key];
+    c.addEventListener('change', () => { CFG[key] = c.checked; saveCfg(); });
+    lab.append(c, document.createTextNode(name)); dbg.appendChild(lab);
+  }
+  const btns = document.createElement('div'); btns.className = 'btns';
+  const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); btns.appendChild(b); return b; };
+  mkBtn('Reset defaults', () => { Object.assign(CFG, ALL_DEFAULTS); saveCfg(); buildDebug(); });
+  const copy = mkBtn('Copy values', async () => {
+    try { await navigator.clipboard.writeText(JSON.stringify(CFG, null, 2)); copy.textContent = 'Copied!'; }
+    catch (e) { copy.textContent = 'Copy failed'; }
+    setTimeout(() => { copy.textContent = 'Copy values'; }, 1200);
+  });
+  mkBtn('Restart', () => resetWorld());
+  dbg.appendChild(btns);
+  const tip = document.createElement('div'); tip.className = 'info'; tip.style.marginTop = '6px';
+  tip.textContent = 'Double-click a slider to reset it. Settings are saved in this browser.';
+  dbg.appendChild(tip);
+  refresh();
+}
+function toggleDebug() {
+  if (dbg.classList.toggle('hidden')) return;
+  buildDebug();
+}
+
+// ---------- loop: fixed 60 Hz steps, render every frame ----------
+let acc = 0, last = performance.now(), fpsN = 0, fpsT = last, fps = 0;
+let paused = false;   // window.__mp.pause() stops the clock so a script can step by hand
+function frame(t) {
+  if (!paused) {
+    acc += Math.min(100, t - last) * CFG.gameSpeed;
+    while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  }
+  last = t;
+  render();
+  fpsN++;
+  if (t - fpsT >= 500) {
+    fps = fpsN * 1000 / (t - fpsT); fpsN = 0; fpsT = t;
+    if (fpsEl && !dbg.classList.contains('hidden')) {
+      const me = Sim.getPlayer(state, ME);
+      fpsEl.textContent = `FPS ${fps.toFixed(0)} · tick ${state.tick}` + (me ? ` · x ${me.x.toFixed(1)} y ${me.y.toFixed(1)}` : '');
+    }
+  }
+  requestAnimationFrame(frame);
+}
+resetWorld();
+requestAnimationFrame(frame);
+
+// Scripted checks: state, sim and helpers. input[id] = bitmask overrides that player's keys.
+window.__mp = {
+  get state() { return state; }, sim: Sim, cfg: CFG, level: L, localId: ME, dummyId: DUMMY,
+  events: eventLog, input: forced, get fps() { return fps; },
+  pause() { paused = true; }, resume() { paused = false; last = performance.now(); acc = 0; },
+  step(n = 1) { for (let i = 0; i < n; i++) update(); },
+  reset: resetWorld,
+};

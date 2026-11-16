@@ -46,6 +46,19 @@ test('same seed gives identical particles, gibs, decals and pools', () => {
   }
 });
 
+test("the dead ninja's sword comes to rest lying flat and goes with the other pieces", () => {
+  for (const move of ['chop', 'sweep', 'quarter', 'spikes']) for (const seed of [1, 2, 123456, 98765]) {
+    const G = createGore(levelFor(move));
+    goreKill(G, kill({ move, seed, x: move === 'spikes' ? 196 : 100, vx: move === 'spikes' ? 0 : 4.9 }));
+    for (let i = 0; i < 400; i++) stepGore(G);
+    const s = G.gibs.find(g => g.id === 'S');
+    assert.ok(s && s.rest, `${move}/${seed}: the sword has come to rest`);
+    assert.ok(Math.abs(s.c) === 1 && s.s === 0, `${move}/${seed}: the sword lies flat (c ${s.c}, s ${s.s})`);
+    for (let i = 0; i < GORE.gibLife + 60; i++) stepGore(G);
+    assert.ok(!G.gibs.some(g => g.id === 'S'), `${move}/${seed}: the sword is gone with the gibs`);
+  }
+});
+
 test('different seeds give different spatter', () => {
   const a = run(kill({ seed: 1 })), b = run(kill({ seed: 2 }));
   assert.notEqual(decalSig(a), decalSig(b));

@@ -237,7 +237,9 @@ blood already on the arena.
 - **On kill:**
   - The body is cut in two along the slash line: a chop splits it vertically, a sweep
     horizontally. The halves tumble as physics gibs, with the head and hood piece and the
-    sword flying separately.
+    sword flying separately. The standard sword lands lying flat on the surface below and
+    fades with the other pieces. A long-sword holder's body throws no sword piece: only the
+    real long-sword pickup (§5.1) lies where they fell.
   - A pulsing blood fountain gushes from both halves (as in `bleedEnemy`).
   - A heavy radial spatter paints walls, platforms and ceilings, and growing pools form
     wherever the blood lands.

@@ -215,7 +215,12 @@ function gibStep(G, g, r) {
         ny = top - g.r;
         if (c === '^') stain(G, tx, by);
         if (g.vy > 1.2) { g.vy = -g.vy * .32; g.vx *= .7; g.w *= .6; }
-        else { g.vy = 0; g.vx *= .8; g.w *= .7; if (Math.abs(g.vx) < .05 && Math.abs(g.w) < .01) { g.rest = true; g.vx = g.w = 0; } }
+        else {
+          g.vy = 0; g.vx *= .8; g.w *= .7;
+          // the sword stops tumbling once it lands and lies flat on the surface (blade horizontal)
+          if (g.id === 'S') { g.w = 0; g.c = g.c < 0 ? -1 : 1; g.s = 0; }
+          if (Math.abs(g.vx) < .05 && Math.abs(g.w) < .01) { g.rest = true; g.vx = g.w = 0; }
+        }
       }
     } else if (g.vy < 0 && blocks(tileAt(L, tx, Math.floor((ny - g.r) / T)))) {
       ny = (Math.floor((ny - g.r) / T) + 1) * T + g.r + .01; g.vy = -g.vy * .3;

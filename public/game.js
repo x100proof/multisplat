@@ -588,8 +588,9 @@ function onEvents(evs) {
       if (CFG.gore) {
         const t0 = performance.now();
         goreKill(G, e, { meta: colorOf(e.victim) });
-        // a holder's sword piece is drawn long (drawing only: its physics and the fingerprint are unchanged)
-        if (e.held) for (const g of G.gibs) if (g.id === 'S' && g.victim === e.victim && g.age === 0) g.long = true;
+        // a holder's sword piece is not drawn: the server's real long-sword pickup lies there instead
+        // (drawing only: its physics and the fingerprint are unchanged)
+        if (e.held) for (const g of G.gibs) if (g.id === 'S' && g.victim === e.victim && g.age === 0) g.hidden = true;
         dbg('perf', 'gore: kill', { kill: killKey(e), move: e.move, parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, ms: +(performance.now() - t0).toFixed(2) });
         sfx.gush();
         if (e.move === 'spikes') sfx.impale();
@@ -1320,17 +1321,17 @@ const DEAD_KANBEI = { onGround: true, vx: 0, vy: 0, walk: 0 };
 const BODY = new Path2D(); BODY.ellipse(0, -6.8, 5.4, 6.2, 0, 0, TAU);
 function drawGib(g, cx) {
   const x = g.x - cx;
-  if (x < -24 || x > VW + 24 || g.y < CY - 24 || g.y > CY + VH + 24) return;
+  if (g.hidden || x < -24 || x > VW + 24 || g.y < CY - 24 || g.y > CY + VH + 24) return;
   const a = g.age > GORE.gibLife ? Math.max(0, 1 - (g.age - GORE.gibLife) / 60) : 1;
   if (a <= 0) return;
   ctx.save(); ctx.globalAlpha = a;
-  ctx.transform(g.c, g.s, -g.s, g.c, x, g.y);
+  ctx.transform(g.c, g.s, -g.s, g.c, x, g.y - (g.id === 'S' && g.s === 0 ? .3 : 0));   // a flat sword's guard sits on the surface
   if (g.id === 'S') {                                   // the sword: grip, guard and glowing blade
     ctx.lineCap = 'round';
     ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.3; line(ctx, -7, 0, -4, 0);
     ctx.lineWidth = .8; line(ctx, -4, -1.4, -4, 1.4);
-    const tip = g.long ? -4 + 12 * LONG_REACH : 8;          // a long sword's piece is drawn long
-    ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(g.long ? 7 : 5); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1; line(ctx, -4, 0, tip, 0);
+    const tip = 8;
+    ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(5); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1; line(ctx, -4, 0, tip, 0);
     ctx.shadowBlur = 0; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .4; line(ctx, -4, 0, tip, 0);
     ctx.strokeStyle = BLOOD[0]; ctx.lineWidth = .8; line(ctx, tip - 4, 0, tip, 0);   // blood on the tip
   } else {

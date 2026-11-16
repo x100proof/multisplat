@@ -32,6 +32,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   };
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
+  // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
+  // and the server (which restarts seq at the hello) would take those numbers and then ignore the
+  // restarted ones as stale, freezing the player.
+  let live = false;
   const rtts = [];
   let seq = 0, pending = [], unsent = [];
   const snaps = [];                                    // [{tick, at, players: Map}]
@@ -49,7 +53,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     clearTimeout(retryTimer);
     if (ws) { try { ws.onclose = null; ws.close(); } catch { /* ignore */ } }
     status('connecting');
-    kicked = false;
+    kicked = false; live = false;
     const sock = ws = new WebSocket(url());
     sock.onopen = () => {
       if (sock !== ws) return;
@@ -127,7 +131,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     net.id = m.id; net.token = m.token; net.mode = m.state; net.queuePos = m.queuePos;
     net.kickReason = null;
     want.name = m.name.replace(/#\d+$/, '');
-    seq = 0; pending = []; unsent = []; net.me = null;
+    seq = 0; pending = []; unsent = []; net.me = null; live = true;
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
@@ -253,7 +257,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   // Called once per 60 Hz client tick with this tick's key mask.
   net.localTick = function localTick(keys) {
     if (smooth.n > 0) smooth.n--;
-    if (net.mode !== 'play' || !ws || ws.readyState !== 1) return;
+    if (net.mode !== 'play' || !live || !ws || ws.readyState !== 1) return;
     seq++;
     unsent.push(keys);
     if (net.me) {

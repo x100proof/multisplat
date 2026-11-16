@@ -170,6 +170,17 @@ async function predictionTest() {
   assert.ok(r.n > 150, 'enough samples');
   assert.ok(r.rtt > 200, 'NET_SIM delay is in effect');
   assert.ok(r.rms < 3, `prediction error RMS ${r.rms} < 3`);
+  // A resume under latency: inputs sent between the socket opening and the welcome must not leave
+  // the server ignoring the restarted seq numbers (the player would freeze for a long time).
+  await sleep(3000);                                  // let seq grow well past what a few ticks cover
+  await P.page.evaluate(() => __mp.net.drop());
+  await waitFor(() => P.page.evaluate(() => __mp.net.state === 'open' && __mp.net.mode === 'play' && !!__mp.net.me), { timeout: 15000, what: 'resume under NET_SIM' });
+  await sleep(1000);
+  const xs = [];
+  for (let i = 0; i < 6; i++) { xs.push(await P.page.evaluate(() => __mp.net.me && __mp.net.me.x)); await sleep(300); }
+  const moved = Math.max(...xs) - Math.min(...xs);
+  log(`after a resume under NET_SIM the pacing player moved ${moved.toFixed(1)} units in 1.5 s`);
+  assert.ok(moved > 10, `server applies inputs after a resume (moved ${moved})`);
   await P.page.context().close(); await Q.page.context().close();
   await srv.stop();
 }

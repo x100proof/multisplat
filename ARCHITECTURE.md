@@ -198,6 +198,7 @@ Client → server:
 { t: 'hello', name, color /* 0-7 */, token? /* resume */ }
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }
+{ t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
 ```
 
 Server → client:
@@ -279,6 +280,11 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   stops working. A kick always releases at once.
 - **Idle kick.** A playing record with no non-zero input for `idleMs` (120 s) is kicked with
   `idle`, and the client goes back to the lobby.
+- **Leave.** A `leave` message releases the record at once (`leave` event, reason `left`, token
+  dead, queue promoted) and keeps the connection as a viewer; a later `hello` on it joins afresh.
+  On the client, Escape (or ✕ on touch) opens the `#leave` confirm menu (`leaveMenu`, `leaveGame`
+  in `game.js`): inputs are zeroed while it is open, "Stay" has the focus, and "Leave" calls
+  `net.leave()` and reopens the lobby. In `?offline` it reloads to the lobby.
 - **Inputs.** They are queued per record, at most 12, with older ones dropped. Each tick takes
   one input per playing record. If none is queued, the last keys repeat for up to 8 ticks, then 0.
   A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Every starved tick

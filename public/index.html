@@ -69,6 +69,17 @@
   #tbar button { width: 38px; height: 38px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
                  background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
   #tbar button.off { opacity: .45; }
+  #leave { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
+    background: rgba(5,3,14,.6); }
+  #leave.hidden { display: none; }
+  #leave .box { padding: 18px 22px; border: 2px solid #ff2a6d; border-radius: 10px; background: rgba(13,8,32,.94);
+    box-shadow: 0 0 24px rgba(255,42,109,.45); text-align: center; color: #d1f7ff; font: 16px ui-monospace, Menlo, Consolas, monospace; }
+  #leave h2 { margin: 0 0 6px; font-size: 20px; color: #ff2a6d; text-shadow: 0 0 10px #ff2a6d; }
+  #leave p { margin: 0 0 14px; opacity: .8; font-size: 13px; }
+  #leave button { margin: 0 6px; padding: 8px 18px; border-radius: 6px; border: 2px solid #05d9e8; background: transparent;
+    color: #d1f7ff; font: inherit; cursor: pointer; }
+  #leave #lvYes { border-color: #ff2a6d; }
+  #leave button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   body.touchui #touch, body.touchui #tbar { display: flex; }
   body.touchui.inlobby #touch, body.touchui.inlobby #tbar { display: none; }
   body.touchui #help { display: none; }
@@ -147,13 +158,20 @@
   <div id="feed"></div>
   <div id="mini"></div>
   <div id="board" class="hidden"></div>
-  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tFull" aria-label="Full screen">⛶</button></div>
-  <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · Tab scores · D debug · M mute</div>
+  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tFull" aria-label="Full screen">⛶</button><button id="tLeave" aria-label="Leave">✕</button></div>
+  <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · Tab scores · D debug · M mute · Esc leave</div>
 </div>
 <div id="touch">
   <div class="grp"><button id="tL" aria-label="Left">◀</button><button id="tR" aria-label="Right">▶</button></div>
   <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
+</div>
+<div id="leave" class="hidden" role="dialog" aria-modal="true" aria-labelledby="lvTitle">
+  <div class="box">
+    <h2 id="lvTitle">Leave the fight?</h2>
+    <p id="lvNote">Your score will be lost.</p>
+    <button id="lvYes">Leave</button><button id="lvNo">Stay</button>
+  </div>
 </div>
 <div id="lobby">
   <div class="card">
@@ -169,7 +187,7 @@
     <ul id="lPlayers"></ul>
     <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
     <div id="lStatus"></div>
-    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · Tab scores</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · » run on/off</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
+    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · Tab scores · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · » run on/off</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
   </div>
 </div>
 <div id="dbg" class="hidden"></div>

@@ -275,12 +275,44 @@ async function longSwordTest() {
   await srv.stop();
 }
 
+// Escape opens a confirm menu; Stay keeps playing, Leave frees the slot and returns to the lobby.
+async function leaveTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPlayer(srv, 'Quit', 2), B = await openPlayer(srv, 'Stay', 5);
+  const ui = p => p.page.evaluate(() => ({ menu: __mp.leaveOpen, lobby: __mp.lobbyOpen, id: __mp.net.id, mode: __mp.net.mode,
+    ids: __mp.state.players.map(q => q.id), shown: !document.getElementById('leave').classList.contains('hidden') }));
+  await waitFor(async () => (await ui(B)).ids.length === 2, { what: 'both players in the arena' });
+  await A.page.keyboard.press('Escape');
+  let u = await ui(A);
+  assert.ok(u.menu && u.shown && !u.lobby, 'Escape opens the leave menu');
+  await A.page.keyboard.press('Enter');             // Stay has the focus, so Enter does not quit
+  u = await ui(A);
+  assert.ok(!u.menu && !u.lobby && u.id === A.id, 'Stay closes the menu and keeps the slot');
+  await A.page.keyboard.press('Escape'); await A.page.keyboard.press('Escape');
+  assert.ok(!(await ui(A)).menu, 'Escape again closes the menu');
+  await A.page.keyboard.press('Escape');
+  await A.page.click('#lvYes');
+  u = await ui(A);
+  assert.ok(u.lobby && !u.menu && u.id == null && u.mode === 'viewer', 'Leave returns to the lobby as a viewer');
+  await waitFor(async () => { const v = await ui(B); return v.ids.length === 1 && v.ids[0] === B.id; }, { what: 'the leaver vanishes for the other player' });
+  await waitFor(async () => (await ui(A)).ids.length === 1, { what: 'the lobby view still follows the arena' });
+  await A.page.keyboard.press('Escape');
+  assert.ok(!(await ui(A)).menu, 'Escape does nothing in the lobby');
+  await A.page.click('#lFight');                    // and the leaver can join again on the same connection
+  await waitFor(async () => { const v = await ui(A); return !v.lobby && v.id != null && v.id !== A.id; }, { what: 'rejoin after leaving' });
+  log('escape menu: stay keeps the slot, leave frees it and returns to the lobby, rejoin works');
+  for (const p of [A, B]) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
     await fightTest();
     await predictionTest();
     await longSwordTest();
+    await leaveTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

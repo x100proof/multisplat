@@ -232,6 +232,28 @@ test('a resume while the old socket is still open replaces it', () => {
   assert.equal(b.last('welcome').id, id); assert.equal(b.last('welcome').resumed, true);
 });
 
+test('leave frees the slot at once, keeps the connection as a viewer, and promotes the queue', () => {
+  const { conn, tick, arena } = setup({ maxPlayers: 1 });
+  const [a, b] = [conn(), conn()];
+  a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  assert.equal(b.last('welcome').state, 'queue');
+  tick(5);
+  const token = a.last('welcome').token;
+  a.say({ t: 'leave' });
+  assert.equal(a.closed, null, 'the connection stays open');
+  assert.equal(arena.recs.has(1), false);
+  assert.ok(b.events().some(e => e.type === 'leave' && e.id === 1 && e.reason === 'left'));
+  assert.equal(arena.recs.get(2).state, 'play', 'the queued player takes the slot');
+  a.msgs.length = 0; tick(4);
+  assert.ok(a.last('snapshot'), 'still gets snapshots as a viewer'); assert.equal(a.last('snapshot').me, undefined);
+  a.say({ t: 'leave' }); assert.equal(a.closed, null, 'a second leave is harmless');
+  a.say({ t: 'hello', name: 'A', color: 0, token });   // the old token is dead: a fresh record, queued behind B
+  const w = a.last('welcome');
+  assert.equal(w.resumed, false); assert.equal(w.id, 3); assert.equal(w.state, 'queue');
+  a.say({ t: 'leave' });
+  assert.equal(arena.queue.length, 0, 'leaving the queue gives up the place');
+});
+
 test('idle for 120 s goes back to the lobby', () => {
   const { conn, tick, clock, arena } = setup();
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });

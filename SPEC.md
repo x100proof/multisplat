@@ -139,7 +139,7 @@ ARCHITECTURE.md    the code as implemented
 
 ### 6.1 Protocol
 - Messages are JSON over WebSocket. Every message has a `t` type field.
-  Client → server: `hello`, `input`, `ping`. Server → client: `welcome`, `snapshot`, `event`,
+  Client → server: `hello`, `input`, `ping`, `leave`. Server → client: `welcome`, `snapshot`, `event`,
   `lobby`, `pong`, `kick`.
 - **Inputs:** each tick the client sends `{t:'input', seq, keys}`, where `keys` is a bitmask
   (left, right, jump, run, slash). Inputs may be batched, at most 3 ticks per message.
@@ -165,6 +165,10 @@ ARCHITECTURE.md    the code as implemented
   its slot and score back. After that, the slot is released.
 - A clock offset is estimated from `ping`/`pong`, and RTT is shown in the debug panel.
 - **Idle kick:** a player with no input for 120 s goes back to the lobby.
+- **Leaving:** Escape (or the ✕ button on touch) opens a menu asking the player to confirm.
+  "Stay" is the default and the game carries on behind the menu. "Leave" sends `leave`: the
+  server frees the slot or queue place at once, with no resume, and the connection stays open
+  as a lobby viewer. A player who leaves soon after being hit still counts as a kill (§5).
 
 ## 7. Gore (wanted in quantity)
 

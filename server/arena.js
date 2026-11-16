@@ -97,6 +97,7 @@ export class Arena {
       case 'input': return this.onInput(conn, m);
       case 'ping': return this.onPing(conn, m);
       case 'hello': return this.onHello(conn, m);
+      case 'leave': return this.onLeave(conn);
       default: return this.kick(conn, 'unknown');
     }
   }
@@ -116,6 +117,15 @@ export class Arena {
     if (conn.drops.length === 1 || conn.dropCount % 50 === 0) this.event('ratelimit', conn.id, { dropped: conn.dropCount });
     if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
     return false;
+  }
+
+  // The player chose to leave: the slot (or queue place) is released at once, with no resume, and
+  // the connection stays open as a lobby viewer. A recently hit leaver still counts as a kill.
+  onLeave(conn) {
+    const rec = conn.rec;
+    if (!rec) return;   // already a viewer: nothing to do
+    this.release(rec, 'left');
+    conn.rec = null;
   }
 
   onPing(conn, m) {

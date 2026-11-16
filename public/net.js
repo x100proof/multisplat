@@ -105,6 +105,14 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     dbg('life', 'join', { color });
     if (net.state === 'open') hello(); else if (net.state !== 'connecting') net.connect();
   };
+  // Leave the arena on purpose: the server frees the slot at once (no resume) and this connection
+  // carries on as a lobby viewer.
+  net.leave = function leave() {
+    dbg('life', 'leave');
+    send({ t: 'leave' });
+    net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
+    live = false; dropped = false; seq = 0; pending = []; unsent = [];
+  };
   // Test hook: drop the connection as if the network failed (the token is kept for resume).
   net.drop = function drop() { if (ws) ws.close(); };
 

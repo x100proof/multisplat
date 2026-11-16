@@ -352,6 +352,8 @@ function heldBits() {
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') { if (e.code === 'Enter') fight(); return; }
   if (lobbyOpen && e.code === 'Enter') { fight(); return; }
+  if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen) leaveMenu(!leaveOpen); return; }
+  if (leaveOpen) { if (e.code === 'Tab') e.preventDefault(); return; }   // the menu owns the keyboard (Enter presses the focused button)
   if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
   noteDevice('keyboard');
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') e.target.blur(); // keep keys driving the game
@@ -407,6 +409,7 @@ addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preve
 // the small top bar on touch screens: sound and full screen
 const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
 tapBtn('tMute', () => { setMuted(!muted); document.getElementById('tMute').classList.toggle('off', muted); });
+tapBtn('tLeave', () => leaveMenu(true));
 tapBtn('tFull', () => { triedLandscape = false; goLandscape(true); });
 // On phones that allow it (Android), joining the fight goes full screen and locks landscape.
 let triedLandscape = false;
@@ -554,7 +557,7 @@ function playFx(p) {
 // Online: sample input, predict our player and queue the input for the server (sent per frame).
 function updateOnline() {
   ME = net.id ?? -1;
-  let k = lobbyOpen ? 0 : heldBits() | touchBits() | latch;
+  let k = lobbyOpen || leaveOpen ? 0 : heldBits() | touchBits() | latch;
   latch = 0;
   if (forced[ME] !== undefined) k = forced[ME];
   if (autopilot && net.me) { try { k = autopilot(net.me, state.players) | 0; } catch (e) { dbg('error', 'autopilot: ' + e.message); } }
@@ -1399,13 +1402,43 @@ function renderLobby() {
   document.getElementById('lQueueBox').classList.toggle('hidden', !queue.length);
 }
 
+// ---------- leaving: Escape (or ✕ on touch) asks first; the game carries on behind the menu ----------
+let leaveOpen = false;
+const leaveEl = document.getElementById('leave');
+function leaveMenu(open) {
+  if (open === leaveOpen || (open && lobbyOpen)) return;
+  leaveOpen = open;
+  leaveEl.classList.toggle('hidden', !open);
+  for (const k in keys) keys[k] = false;
+  latch = 0; fingers.clear(); syncTouch(); board(false);
+  if (open) {
+    const m = ONLINE ? net.meta.get(net.id) : null;
+    document.getElementById('lvNote').textContent = !ONLINE ? 'Back to the lobby.' : net.mode === 'queue' ? 'You will lose your place in the queue.' : `Your score${m ? ` of ${m.score}` : ''} will be lost.`;
+    document.getElementById('lvNo').focus();   // Stay is the default, so a stray Enter doesn't quit
+  } else document.activeElement && document.activeElement.blur && document.activeElement.blur();
+  dbg('life', open ? 'leave menu opened' : 'leave menu closed');
+}
+function leaveGame() {
+  leaveMenu(false);
+  if (!ONLINE) { location.href = location.pathname; return; }
+  net.leave();
+  backToLobby('');
+}
+function backToLobby(message) {
+  lobbyOpen = true;
+  lobbyEl.classList.remove('hidden');
+  document.body.classList.add('inlobby');
+  document.getElementById('lErr').textContent = message;
+  renderLobby();
+}
+document.getElementById('lvYes').addEventListener('click', leaveGame);
+document.getElementById('lvNo').addEventListener('click', () => leaveMenu(false));
+
 function onNetStatus(s) {
   if (s === 'kicked') {
     dbg('life', 'back to lobby', { reason: net.kickReason });
-    lobbyOpen = true;
-    lobbyEl.classList.remove('hidden');
-    document.body.classList.add('inlobby');
-    document.getElementById('lErr').textContent = net.kickReason === 'idle' ? 'You were idle for 2 minutes.' : `Disconnected by the server (${net.kickReason || 'kick'}).`;
+    leaveMenu(false);
+    backToLobby(net.kickReason === 'idle' ? 'You were idle for 2 minutes.' : `Disconnected by the server (${net.kickReason || 'kick'}).`);
   }
   document.getElementById('lStatus').textContent = s === 'open' ? '' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…' : '';
 }
@@ -1445,7 +1478,7 @@ requestAnimationFrame(frame);
 // Scripted checks: state, sim and helpers. input[id] = bitmask overrides that player's keys.
 window.__mp = {
   get state() { return state; }, sim: Sim, cfg: CFG, level: L, get localId() { return ME; }, dummyId: DUMMY,
-  online: ONLINE, net, get lobbyOpen() { return lobbyOpen; }, fight,
+  online: ONLINE, net, get lobbyOpen() { return lobbyOpen; }, get leaveOpen() { return leaveOpen; }, fight,
   debug: { entries: dbgEntries, send: sendReport },
   get autopilot() { return autopilot; }, set autopilot(f) { autopilot = f; },
   events: eventLog, input: forced, get fps() { return fps; },

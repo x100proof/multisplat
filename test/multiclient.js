@@ -76,6 +76,13 @@ async function fightTest() {
   const killer = all.find(p => p.id === kill.killer), victim = all.find(p => p.id === kill.victim);
   const ki = ids.indexOf(killer.id), vi = ids.indexOf(victim.id);
 
+  // the kill feed shows "killer ✂ victim" on every page (it fades after ~6 s, so check it first)
+  for (const p of all) {
+    await waitFor(() => p.page.evaluate(([k, v]) => __mp.feed.some(t => t.includes(k) && t.includes('✂') && t.includes(v)), [killer.name, victim.name]),
+      { timeout: 3000, what: `kill feed on ${p.name}` });
+  }
+  log(`kill feed "${killer.name} ✂ ${victim.name}" on all 3 pages`);
+
   // kill event, score increment and respawn on every page
   await sleep(2600);   // respawn delay is 2 s, plus the 100 ms interpolation delay
   for (const p of all) {
@@ -91,6 +98,17 @@ async function fightTest() {
     assert.ok(s.meta[vi].deaths >= 1, `${p.name} sees the victim's death`);
   }
   log('kill, score and respawn seen on all 3 pages');
+
+  // gore: every page simulated the same spatter from the kill seed (same fingerprint once settled)
+  const key = `${kill.tick}:${kill.victim}`;
+  const fps = [];
+  for (const p of all) {
+    await waitFor(() => p.page.evaluate(k => __mp.gore.settled(k), key), { timeout: 8000, what: `gore settled on ${p.name}` });
+    fps.push(await p.page.evaluate(k => ({ fp: __mp.gore.fingerprint(k), c: __mp.gore.counts }), key));
+  }
+  log(`gore fingerprints for kill ${key}: ${fps.map(f => f.fp).join(' ')} (decals ${fps[0].c.decals}, pools ${fps[0].c.pools})`);
+  assert.ok(fps[0].fp && +fps[0].fp.split(':')[0] > 100, 'plenty of blood landed');
+  for (const f of fps) assert.equal(f.fp, fps[0].fp, 'same gore on every page');
 
   // --- drop and reconnect within 15 s keeps the score
   const score = await killer.page.evaluate(id => __mp.net.meta.get(id).score, killer.id);

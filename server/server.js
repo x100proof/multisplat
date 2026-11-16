@@ -2,7 +2,7 @@
 // player debug-report intake on POST /debug/report, and an optional loopback admin listener.
 //
 // All site-specific values come from the environment (SPEC §10): HOST, PORT, ALLOWED_ORIGINS,
-// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM, ITEM_SECS and ITEM_POINTS (the last three
+// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM, ITEM_SECS, STAR_SECS and ITEM_POINTS (the last four
 // for tests only, refused when NODE_ENV=production).
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -35,6 +35,7 @@ export function loadConfig(vars = process.env) {
     debugPort: vars.DEBUG_PORT ? +vars.DEBUG_PORT : null,
     netSim: null,
     itemSecs: null,
+    starSecs: null,
     itemPoints: null,
   };
   if (cfg.debugPort !== null && (!Number.isInteger(cfg.debugPort) || cfg.debugPort < 0 || cfg.debugPort > 65535)) throw new Error('DEBUG_PORT must be a port number');
@@ -51,7 +52,14 @@ export function loadConfig(vars = process.env) {
     if (!(a > 0) || !(b >= a)) throw new Error('ITEM_SECS must be minS,maxS');
     cfg.itemSecs = { min: a, max: b };
   }
-  // ITEM_POINTS=i,j,... restricts pickups to those LEVEL.items indexes (so a test bot can reach them).
+  // STAR_SECS=min,max does the same for the ninja-star pickups (SPEC §5.2 says 5-10 s).
+  if (vars.STAR_SECS) {
+    if (vars.NODE_ENV === 'production') throw new Error('STAR_SECS is for testing and is refused when NODE_ENV=production');
+    const [a, b = a] = vars.STAR_SECS.split(',').map(Number);
+    if (!(a > 0) || !(b >= a)) throw new Error('STAR_SECS must be minS,maxS');
+    cfg.starSecs = { min: a, max: b };
+  }
+  // ITEM_POINTS=i,j,... restricts pickups (of both kinds) to those LEVEL.items indexes (so a test bot can reach them).
   if (vars.ITEM_POINTS) {
     if (vars.NODE_ENV === 'production') throw new Error('ITEM_POINTS is for testing and is refused when NODE_ENV=production');
     const idx = vars.ITEM_POINTS.split(',').map(Number);
@@ -123,9 +131,11 @@ function delayer(sim) {
 
 export async function startServer(cfg = loadConfig(), { log = console.log } = {}) {
   const events = createEventRing(2000);
-  const simCfg = cfg.itemSecs
-    ? { ...DEFAULTS, itemMinTicks: Math.round(cfg.itemSecs.min * TICK_HZ), itemMaxTicks: Math.round(cfg.itemSecs.max * TICK_HZ) }
-    : DEFAULTS;
+  const simCfg = cfg.itemSecs || cfg.starSecs ? {
+    ...DEFAULTS,
+    ...(cfg.itemSecs ? { itemMinTicks: Math.round(cfg.itemSecs.min * TICK_HZ), itemMaxTicks: Math.round(cfg.itemSecs.max * TICK_HZ) } : {}),
+    ...(cfg.starSecs ? { starMinTicks: Math.round(cfg.starSecs.min * TICK_HZ), starMaxTicks: Math.round(cfg.starSecs.max * TICK_HZ) } : {}),
+  } : DEFAULTS;
   const level = cfg.itemPoints ? { ...LEVEL, items: cfg.itemPoints.map(i => LEVEL.items[i]) } : LEVEL;
   const arena = new Arena({ log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
   const clientIp = req => clientIpOf(req, cfg.trustProxy);

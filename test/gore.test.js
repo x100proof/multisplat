@@ -29,7 +29,7 @@ test('the source is DOM-free and uses no Math.random or trig', () => {
 });
 
 test('same seed gives identical particles, gibs, decals and pools', () => {
-  for (const move of ['chop', 'sweep', 'spikes', 'leave']) {
+  for (const move of ['chop', 'sweep', 'star', 'spikes', 'leave']) {
     const e = kill({ move, x: move === 'spikes' ? 196 : 100, vx: move === 'spikes' ? 0 : 4.9 });
     const a = createGore(levelFor(move)), b = createGore(levelFor(move));
     goreKill(a, e); goreKill(b, e);
@@ -56,6 +56,7 @@ test('a kill is cut into the right pieces', () => {
   const ids = move => { const G = createGore(LEVEL); goreKill(G, kill({ move })); return G.gibs.map(g => g.id).sort().join(''); };
   assert.equal(ids('chop'), 'HLRS');        // left and right halves, hood, sword
   assert.equal(ids('sweep'), 'BHST');       // top and bottom halves
+  assert.equal(ids('star'), 'BHST');        // a ninja star cuts like a sweep
   assert.equal(ids('spikes'), 'BHST');
   assert.equal(ids('leave'), 'HQ0Q1Q2Q3S'.match(/Q\d|[A-Z]/g).sort().join(''));
   const G = createGore(SPIKE_LEVEL); goreKill(G, kill({ move: 'spikes', x: 196, vx: 0 }));

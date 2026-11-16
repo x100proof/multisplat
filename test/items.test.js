@@ -9,11 +9,14 @@ import { SPIKE_LEVEL } from './spikelevel.js';
 
 const FLOOR_Y = 272 - 13;
 const NO_SPAWN = 1e9;     // itemT far in the future: no pickup appears during a test
+// These are the long-sword tests: ninja-star pickups (which share the item points) are switched
+// off here and tested in stars.test.js.
+const CFG = { ...DEFAULTS, starMax: 0 };
 
 function world(n = 2, seed = 1) {
   const w = S.createWorld({ seed });
   for (let i = 1; i <= n; i++) S.addPlayer(w, i);
-  w.itemT = NO_SPAWN;
+  w.itemT = NO_SPAWN; w.starT = NO_SPAWN;
   return w;
 }
 function place(w, id, x, y, face = 1) {
@@ -21,8 +24,9 @@ function place(w, id, x, y, face = 1) {
   Object.assign(p, { x, y, px: x, py: y, vx: 0, vy: 0, face, iframes: 0, onGround: true });
   return p;
 }
-function run(w, ticks, inputs = () => ({}), opts) {
+function run(w, ticks, inputs = () => ({}), opts = {}) {
   const ev = [];
+  opts = { cfg: CFG, ...opts };
   for (let i = 0; i < ticks; i++) ev.push(...S.step(w, inputs(i), opts));
   return ev;
 }
@@ -46,7 +50,7 @@ test('items: spawn timer is 20-40 s after the previous one appeared, at most 2 l
 });
 
 test('items: the countdown runs only while there is room; a taken pickup frees a slot', () => {
-  const cfg = { ...DEFAULTS, itemMinTicks: 100, itemMaxTicks: 100 };
+  const cfg = { ...CFG, itemMinTicks: 100, itemMaxTicks: 100 };
   const w = S.createWorld({ seed: 7 });
   const ev = run(w, 500, () => ({}), { cfg }).filter(e => e.type === 'item');
   assert.deepEqual(ev.map(e => e.tick), [100, 200]);
@@ -64,20 +68,20 @@ test('items: a pickup appears only at a free point, away from players and other 
     S.addPlayer(w, 1, { level: L2 });
     place(w, 1, a.x - 5 + 20, a.y - 13);          // 20 units from point a: too close
     w.itemT = 1;
-    const ev = S.step(w, {}, { level: L2 }).filter(e => e.type === 'item');
+    const ev = S.step(w, {}, { level: L2, cfg: CFG }).filter(e => e.type === 'item');
     assert.deepEqual(ev.map(e => [e.x, e.y]), [[b.x, b.y]]);
   }
   const w = S.createWorld({ seed: 3 });
   S.addPlayer(w, 1, { level: L2 });
   place(w, 1, a.x - 5, a.y - 13);
   w.items.push({ id: 1, x: b.x, y: b.y }); w.itemSeq = 1;
-  assert.deepEqual(S.freeItemPoints(w, DEFAULTS, L2), [], 'a has a player, b has a pickup');
+  assert.deepEqual(S.freeItemPoints(w, CFG, L2), [], 'a has a player, b has a pickup');
   w.itemT = 1;
   const ev = run(w, 5, () => ({}), { level: L2 }).filter(e => e.type === 'item');
   assert.equal(ev.length, 0, 'no free point: none appears');
   assert.equal(w.itemT, 0, 'still due, retried every tick');
   place(w, 1, a.x - 5 + 40, a.y - 13);
-  assert.deepEqual(S.freeItemPoints(w, DEFAULTS, L2), [a], '40 units away is clear');
+  assert.deepEqual(S.freeItemPoints(w, CFG, L2), [a], '40 units away is clear');
 });
 
 test('items: determinism with pickups (same inputs -> identical serialized state)', () => {
@@ -116,7 +120,7 @@ test('items: taken on body contact; a tie goes to the lower id; a holder cannot 
   place(w, 3, 40, FLOOR_Y); place(w, 1, 300, FLOOR_Y); place(w, 2, 300, FLOOR_Y);   // 1 and 2 overlap; pushed apart
   w.items.push({ id: 5, x: 305, y: 272 }, { id: 6, x: 72, y: 272 });
   let ev = S.step(w, {});
-  assert.deepEqual(ev.filter(e => e.type === 'pickup'), [{ type: 'pickup', tick: 1, id: 1, item: 5, x: 305, y: 272 }]);
+  assert.deepEqual(ev.filter(e => e.type === 'pickup'), [{ type: 'pickup', tick: 1, id: 1, item: 5, kind: 'long', x: 305, y: 272 }]);
   assert.equal(S.getPlayer(w, 1).long, true);
   assert.equal(S.getPlayer(w, 2).long, false);
   assert.deepEqual(w.items.map(i => i.id), [6], 'an unclaimed pickup stays');

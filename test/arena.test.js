@@ -416,7 +416,7 @@ test('long swords: item/pickup events relayed; snapshots carry pickups and long;
   assert.equal(items.length, 2, 'two appeared (30 ticks apart)');
   assert.ok(viewer.events().some(e => e.type === 'item'), 'viewers get item events too');
   let snap = a.last('snapshot');
-  assert.deepEqual(snap.it, arena.state.items.map(i => [i.id, i.x, i.y]));
+  assert.deepEqual(snap.it, arena.state.items.map(i => [i.id, i.x, i.y, 0]), '[id, x, y, kind 0 = long sword]');
   assert.equal(snap.it.length, 2);
   // put A on the first pickup
   const it = arena.state.items[0], pa = Sim.getPlayer(arena.state, 1);
@@ -470,6 +470,54 @@ test('lag compensation with a long sword: the rewound check uses the longer box'
   }
 });
 
+test('ninja stars: the throw bit passes input validation, bit 64 does not; snapshots carry counts, pickups and stars in flight', () => {
+  const { conn, tick, arena } = setup();
+  const a = conn(), v = conn(), w = conn();                // w: a lobby viewer
+  a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
+  tick(4);
+  const st = arena.state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
+  st.itemT = 1e9; st.starT = 1e9;
+  Object.assign(pa, { x: 40, y: 259, px: 40, py: 259, vx: 0, vy: 0, face: 1, iframes: 0, stars: 2 });
+  Object.assign(pv, { x: 150, y: 259, px: 150, py: 259, vx: 0, vy: 0, iframes: 0 });
+  st.items.push({ id: 90, x: 344, y: 272, kind: 'star' }, { id: 91, x: 72, y: 208, kind: 'long' });
+  tick(2);
+  let snap = w.last('snapshot');
+  const row = snap.p.find(r => r[0] === 1);
+  assert.equal(row.length, 13); assert.equal(row[12], 2, 'star count per player');
+  assert.deepEqual(snap.it.map(i => [i[0], i[3]]), [[90, 1], [91, 0]], 'pickups with their kind');
+  assert.deepEqual(snap.st, [], 'no stars in flight');
+  assert.equal(a.last('snapshot').me.stars, 2, '`me` carries the count');
+  // throw: keys 32 is a valid mask (and 63); the star flies, every connection sees it, then the hit
+  a.say({ t: 'input', seq: 1, keys: KEY.THROW | KEY.RIGHT });
+  tick(2);
+  assert.equal(a.closed, null, 'the throw bit is allowed');
+  snap = w.last('snapshot');
+  assert.equal(snap.st.length, 1);
+  const [sid, sx, sy, svx, owner] = snap.st[0];
+  assert.ok(Number.isInteger(sid) && sx > 45 && Math.abs(sy - (pa.y + 6)) < .02 && svx === 6 && owner === 1, JSON.stringify(snap.st));
+  assert.equal(snap.p.find(r => r[0] === 1)[12], 1, 'count down by one');
+  assert.ok(snap.p.find(r => r[0] === 1)[11] & 16, 'the throw FX bit reaches remote players');
+  a.say({ t: 'input', seq: 2, keys: 0 });
+  tick(30);
+  for (const c of [a, v, w]) {
+    assert.ok(c.events().some(e => e.type === 'throw' && e.id === 1 && e.stars === 1), 'throw event');
+    assert.ok(c.events().some(e => e.type === 'hit' && e.move === 'star' && e.attacker === 1 && e.victim === 2 && e.dmg === 20), 'star hit event');
+  }
+  assert.equal(w.last('snapshot').st.length, 0, 'spent');
+  assert.equal(pv.hp, 80);
+  // admin state lists star pickups, stars in flight and counts
+  a.say({ t: 'input', seq: 3, keys: KEY.THROW });
+  tick(1);
+  const ad = arena.adminState();
+  assert.ok(ad.items.some(i => i.id === 90 && i.kind === 'star'));
+  assert.equal(ad.stars.length, 1); assert.equal(ad.stars[0].owner, 1);
+  assert.equal(ad.players.find(p => p.id === 1).stars, 0);
+  assert.ok(typeof ad.starInS === 'number');
+  // a mask outside the 6 bits is malformed
+  a.say({ t: 'input', seq: 4, keys: 64 });
+  assert.equal(a.last('kick').reason, 'malformed');
+});
+
 test('kills send score events and credit survives a leave', () => {
   const { conn, tick, arena } = setup();
   const a = conn(), v = conn();
@@ -510,6 +558,9 @@ test('config: defaults, origins, NET_SIM refused in production', () => {
   assert.deepEqual(loadConfig({ ITEM_SECS: '2,3' }).itemSecs, { min: 2, max: 3 });
   assert.throws(() => loadConfig({ ITEM_SECS: '2,3', NODE_ENV: 'production' }), /production/);
   assert.throws(() => loadConfig({ ITEM_SECS: '3,2' }));
+  assert.deepEqual(loadConfig({ STAR_SECS: '1,2' }).starSecs, { min: 1, max: 2 });
+  assert.throws(() => loadConfig({ STAR_SECS: '1,2', NODE_ENV: 'production' }), /production/);
+  assert.throws(() => loadConfig({ STAR_SECS: '0' }));
   assert.deepEqual(loadConfig({ ITEM_POINTS: '0,1' }).itemPoints, [0, 1]);
   assert.throws(() => loadConfig({ ITEM_POINTS: '0', NODE_ENV: 'production' }), /production/);
   assert.throws(() => loadConfig({ ITEM_POINTS: '99' }));

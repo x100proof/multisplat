@@ -9,12 +9,12 @@ Status: **M6** (in progress). This covers:
 - long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX,
 - M6 changes: leaving with Escape, no spike traps in the arena (§3), the 5 s heartbeat and resume
   window (§6.4), scores for everyone along the top (§9), neon blood by default with a real-gore
-  option (§7).
+  option (§7), ninja stars (§5.2).
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
-shared/level.js       the 26x18 arena, tile queries, spawn points, long-sword item points, spawn picker
-shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, respawn, pickups)
+shared/level.js       the 26x18 arena (no spikes), tile queries, spawn points, item points (long swords and ninja stars), spawn picker
+shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, ninja stars, respawn, pickups)
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
@@ -25,8 +25,8 @@ public/music.js       the combat score as data, its offline pre-render into two 
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
 public/debug.js       client log ring (dbg), debug report builder and sender
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, items, level, server, arena, gore, music, hygiene)
-test/multiclient.js   headless Chromium: 3 players, fight, kill feed, gore fingerprint, resume, debug report, NET_SIM prediction, long sword
+test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, gore, music, hygiene)
+test/multiclient.js   headless Chromium: 3 players, fight, kill feed, score strip, gore fingerprint and blood styles, resume, debug report, NET_SIM prediction, long sword, leave, ninja stars, heartbeat
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
 test/lib.js, bot.js   test helpers (spare ports, server process, Chromium lookup) and the scripted player
@@ -39,18 +39,22 @@ from `/shared/*.js`.
 ## shared/constants.js
 
 - `TICK_HZ = 60`, `VW = 320`, `VH = 192`, `T = 16`, `PW = 10`, `PH = 13` (Kanbei's body).
-- `KEY` is the input bitmask: `LEFT 1, RIGHT 2, JUMP 4, RUN 8, SLASH 16`. Bits are level-triggered
+- `KEY` is the input bitmask: `LEFT 1, RIGHT 2, JUMP 4, RUN 8, SLASH 16, THROW 32` (`KEY_MASK 63`;
+  the server kicks a mask outside it as malformed). Bits are level-triggered
   (set while held). The sim detects jump and slash presses as 0→1 edges against the previous tick.
-- `FX`: cosmetic per-tick flags the sim writes to `player.fx` (`JUMP 1, SLASH 2, BONK 4, LAND 8`).
+- `FX`: cosmetic per-tick flags the sim writes to `player.fx` (`JUMP 1, SLASH 2, BONK 4, LAND 8, THROW 16`).
 - `ATK_LEN 12`, `ATK_CD 16`, `COMBO_T 40` are NinjaRunner's sword timing.
 - `DEFAULTS` holds every tunable the sim reads: NinjaRunner movement, `pushDamp`, and the SPEC §5
   combat values (`maxHp 100`, `chopDmg 34`, `sweepDmg 25`, `knockX 3.5`, `knockY -3`, `killKnockMul 1.4`,
   `hitStun 10`, `stunMoveMul .25`, `spawnIframes 90`, `respawnTicks 120`, `creditTicks 300`,
   `spawnMinDist 64`) and the pickup tunables `itemMinTicks 1200`, `itemMaxTicks 2400` (20–40 s),
-  `itemMax 2`, `itemClear 32`.
+  `itemMax 2`, `itemClear 32`, and the ninja-star tunables (SPEC §5.2): `starMinTicks 300`,
+  `starMaxTicks 600` (5–10 s), `starMax 4`, `starGive 3`, `starCarry 9`, `throwCd 15`, `starSpeed 6`,
+  `starRange 240`, `starDmg 20`, `starKnockX 1.6`, `starKnockY -1.6` (a small knockback).
 - `LONG_REACH = 1.6` (the holder's sword-box length factor) is a separate constant, not in `DEFAULTS`,
   because the offline debug panel edits `cfg` and reach must always match the server.
-  `ITEM_W 8`, `ITEM_H 14` is a pickup's body.
+  `ITEM_W 8`, `ITEM_H 14` is a pickup's body (both kinds). `STAR_W 4`, `STAR_H 4` is a flying star's
+  box (centred on its x, y) and `STAR_HAND 6` its height below the thrower's top.
 - `NET` holds the netcode values:
   - `historyMs 200`, `rewindCapMs 150`,
   - `snapshotHz 30`, `maxInputBatch 3`,
@@ -94,13 +98,17 @@ plain JSON:
 
 ```js
 state = { tick, rng, players: [player…],   // players kept sorted by numeric id
-          items: [{id, x, y}…],  // long-sword pickups lying in the arena (x, y = their item point)
-          itemT,                 // ticks until the next may appear (-1: drawn on the first step)
-          itemSeq }              // last pickup id used
+          items: [{id, x, y, kind: 'long'|'star'}…],  // pickups lying in the arena (x, y = their item
+                                 // point; one pickup of either kind per point; no kind = 'long')
+          itemT, starT,          // ticks until the next long sword / star pickup may appear (-1: drawn on the first step)
+          itemSeq,               // last pickup id used (shared by both kinds)
+          stars: [{id, owner, x, y, vx, dist}…],   // ninja stars in flight (x, y = centre)
+          starSeq }              // last star id used
 player = { id, x, y, w, h, vx, vy, px, py, face, onGround, coyote, buf, walk,
            atk, atkCd, atkType: 'chop'|'sweep', combo, swing, hitSet: [ids],
            hp, alive, iframes, stun, respawn, lastHitBy, lastHitTick, score, deaths,
-           keys /* previous tick's bitmask */, fx, standOn, long /* holds a long sword */ }
+           keys /* previous tick's bitmask */, fx, standOn, long /* holds a long sword */,
+           stars /* ninja stars carried, 0-9 */, throwCd }
 ```
 
 Randomness comes from NinjaRunner's Park–Miller generator, with its seed stored in `state.rng`.
@@ -120,7 +128,8 @@ pickup countdown and point.
 | `resolvePlayers(players, cfg, level, fixedIds?)` | Player–player collision. |
 | `slashHits(attacker, targets)` → ids | Lag-compensation helper. It tests the attacker's live sword box (`swordBoxOf`, so a holder's longer box) against supplied `{id, x, y, w?, h?}` positions. It skips the attacker and ids already in `hitSet`, and changes no state. |
 | `swordBoxOf(p)` | NinjaRunner's box. With `p.long` its length is ×`LONG_REACH` (chop 18 → 28.8, sweep 22 → 35.2); height, y and the near edge (2 units inside the body on the facing side) stay, so it grows outward in the facing direction only. |
-| `itemBox(it)`, `freeItemPoints(state, cfg, level)` | A pickup's body (centred on x, resting on y); the item points with no pickup and no living player's feet within `itemClear`. |
+| `itemBox(it)`, `freeItemPoints(state, cfg, level)` | A pickup's body (centred on x, resting on y); the item points with no pickup (of either kind) and no living player's feet within `itemClear`. |
+| `itemKind(it)`, `starBox(st)` | `'star'` or `'long'` (an item without `kind` is a long sword); a flying star's box. |
 | `createHistory()`, `recordHistory(hist, state)`, `positionsAt(hist, tick)` | A position ring of 200 ms (12 ticks). `positionsAt` interpolates for fractional ticks and clamps to the oldest or newest frame. |
 | `killPlayer(state, id, cause)` → events | Kills a player from outside the rules (for example on disconnect). Last-hitter credit still applies. |
 | `serialize`, `deserialize`, `cloneState` | JSON. |
@@ -159,6 +168,30 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
    counts down only while fewer than `itemMax` lie. When it is due, a point is chosen uniformly among
    `freeItemPoints`; if none is free it retries every tick without using the RNG. `item` event.
 
+   **Ninja-star pickups** use the same list, points and rule: a star pickup goes to the first living
+   player in id order who touches it and carries fewer than `starCarry` (9): `stars = min(9, stars + 3)`,
+   `pickup` event with `kind: 'star'` and the new count; a player at 9 leaves it. Their own countdown
+   (`starT`, `starMinTicks`–`starMaxTicks`, 5–10 s) runs while fewer than `starMax` (4) star pickups
+   lie. Each tick the long-sword countdown runs first, then the stars'.
+
+**Ninja stars (SPEC §5.2).**
+- **Throw.** In step 1, before a living player moves, a throw is due if `THROW` went 0→1 against the
+  previous tick's keys, the player is not stunned, `throwCd` is 0 and it carries a star. After its move
+  (`throwStar`): `stars--`, `throwCd = 15`, `iframes = 0` (ends spawn protection), `FX.THROW`, and a star
+  `{x: body centre, y: top + 6, vx: ±6}` is added, `throw` event. `throwCd` counts down once a tick.
+  `movePlayer` and `predictStep` never throw (the client does not predict it).
+- **Flight** (`stepStars`, after the slashes, before the pickups; in throw order). The star sweeps
+  `vx` along x, cut short by the first solid tile column its leading edge would enter (`isSolid`:
+  planks do not stop it) and by `starRange` (240) in total. Inside the swept box (4 units tall) it hits
+  the nearest living player along the flight who is not the thrower and has no `iframes` (ties go to
+  the lower id): `starDmg` 20, knockback `(1.6 × dir, -1.6)` (×1.4 on a kill), `hitStun`, `lastHitBy`
+  = the thrower, `hit` event with `move: 'star'`, `star` and `dir`; on 0 HP `kill(…, 'star')` credits
+  the thrower (even if the thrower died meanwhile). A hit spends the star. A star stopped by a wall or
+  the range ends with a `starEnd` event (`wall` true or false). Stars are not lag-compensated
+  (`rewind` is never used for them).
+- **Loss.** `kill()` sets `stars = 0` and reports the count in the kill event (`stars`); `spawnPlayer`
+  starts with 0; a removed player takes them along. Stars already in flight keep flying.
+
 **Long sword lost.** `kill()` clears `long` for every death cause (sword, spikes, `killPlayer`), and
 `spawnPlayer` clears it too; a removed player takes it along. It is never dropped.
 
@@ -174,8 +207,12 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
                  seed /* uint31 from the state RNG, for identical gore everywhere */, x, y, vx, vy, face,
                  long? /* true: the killing blow was a holder's chop or sweep */,
                  held? /* true: the victim held a long sword (lost now) */ }
-{ type: 'item',   tick, id /* pickup id */, x, y }          // a pickup appeared
-{ type: 'pickup', tick, id /* player */, item, x, y }       // who took which
+{ type: 'item',   tick, id /* pickup id */, kind: 'long'|'star', x, y }   // a pickup appeared
+{ type: 'pickup', tick, id /* player */, item, kind, x, y, stars? /* star pickups: the new count */ }
+{ type: 'throw',  tick, id /* thrower */, star, x, y, face, stars /* left */ }
+{ type: 'hit',    tick, attacker, victim, move: 'star', star, dmg: 20, hp, x, y, dir }   // a star hit
+{ type: 'starEnd', tick, star, x, y, wall }                // a star stopped by a wall (true) or its range
+// kill: move 'star' for a star kill; stars? = the unthrown stars the victim lost
 ```
 
 ### Notes for M2
@@ -219,10 +256,12 @@ Server → client:
 { t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
   tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
-  player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx], …], it: [[id, x, y], …] }
+  player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars], …],
+  it: [[id, x, y, kind], …], st: [[id, x, y, vx, owner], …] }
      // 30 Hz; positions rounded to 0.01; flags = alive 1 | onGround 2 | sweep 4 | long sword 8;
      // it = the long-sword pickups lying in the arena (so a joiner or resumer learns them, and the
-     // holders from the flags, from one snapshot); `me` carries `long` for the local player;
+     // holders from the flags, from one snapshot); `me` carries `long` and `stars` for the local player;
+     // kind 1 = ninja stars, 0 = long sword; st = the ninja stars in flight; stars = the count carried
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
 { t: 'lobby', players: [roster], queue: [...], cap }   // on connect and on roster/score change (≤ 2/s)
@@ -233,7 +272,7 @@ Server → client:
 roster = { id, name, color, score, deaths, away /* disconnected, inside the grace period */ }
 ```
 
-Events are the sim's `spawn`, `hit`, `kill`, `item` and `pickup` (shapes above), relayed unchanged. `kill.seed` lets every client
+Events are the sim's `spawn`, `hit`, `kill`, `item`, `pickup`, `throw` and `starEnd` (shapes above), relayed unchanged. `kill.seed` lets every client
 render identical gore. There are also:
 
 ```js
@@ -248,10 +287,11 @@ the hitter gets the point.
 ## server/server.js
 
 - `loadConfig(vars)` reads `HOST`, `PORT`, `ALLOWED_ORIGINS`, `TRUST_PROXY`, `MAX_PER_IP`,
-  `MAX_CONN`, `DEBUG_DIR`, `DEBUG_PORT`, `NET_SIM` (SPEC §10) and two more test-only knobs:
-  `ITEM_SECS=min,max` (the pickup countdown in seconds, passed to the arena as a `cfg` copy) and
-  `ITEM_POINTS=i,j,…` (pickups only at those `LEVEL.items` indexes, passed as a `level` copy). It
-  throws on any of the three with `NODE_ENV=production`, and the entry point then exits 2.
+  `MAX_CONN`, `DEBUG_DIR`, `DEBUG_PORT`, `NET_SIM` (SPEC §10) and three more test-only knobs:
+  `ITEM_SECS=min,max` (the long-sword countdown in seconds, passed to the arena as a `cfg` copy),
+  `STAR_SECS=min,max` (the same for star pickups) and `ITEM_POINTS=i,j,…` (pickups of both kinds only
+  at those `LEVEL.items` indexes, passed as a `level` copy). It throws on any of the four with
+  `NODE_ENV=production`, and the entry point then exits 2.
 - `handler` / `resolvePath` are the M1 static server for `public/` and `/shared/`: GET/HEAD only,
   traversal-safe. `POST /debug/report` goes to `server/debug.js`.
 - **Upgrades** are accepted only on `/ws`. Refusals:
@@ -328,7 +368,10 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   once and resets the grid if it falls more than 100 ms behind.
 - **Debug views.** `adminState()` returns players (with `long`), the lying pickups (`items`), the
   seconds until the next may appear (`itemInS`), queue, tick time and connections. `tools/debug.js
-  state` prints a `long-sword pickups` line and marks holders `LONG`.
+  state` prints a `long-sword pickups` line and marks holders `LONG`. For ninja stars, `adminState()`
+  also has each item's `kind`, `starInS`, the stars in flight (`stars`: id, owner, x, y, vx, dist) and
+  each player's `stars`; the CLI prints `star pickups`, `stars in flight` and `stars=n` per player.
+  `PRESS_BITS` (carried over a skipped input) includes `THROW`; the input-mask check is `KEY_MASK` (63).
   `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
   a token.
 
@@ -433,7 +476,17 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
     `resetPredErr()`). Under 2 units, the drawn position eases from the old one over 6 frames.
     Otherwise it snaps and logs to `sync`.
   - Physics always use `DEFAULTS`.
-- **Interpolation (§6.3).** `view(now)` gives `{tick, players, fx, items}`. Snapshots are unpacked
+- **Ninja stars.** `unpack` reads the count (`p[12]`, 0 if absent), `unpackItems` the kind (`it[3]`,
+  long if absent) and `unpackFlying` the stars in flight (`st`, none if absent), so an older server's
+  snapshots still work. `me.stars` only ever comes from the server. `localTick` plays our own throw at
+  once: on a local THROW edge with stars, not stunned and off a local 15-tick cooldown, it sets
+  `me.fx |= FX.THROW` (sound and arm flick) but predicts neither the star nor the count. `life` entries:
+  `stars gained`, `star thrown` (from our `throw` event) and `stars lost` (our kill event's `stars`).
+  `throw` events about us are released at once.
+- **Interpolation (§6.3).** `view(now)` gives `{tick, players, fx, items, stars}`; `stars` (in flight)
+  are interpolated between the snapshots around the render tick like remote players (a star missing
+  from the later one ended in between and shows until the midpoint; past the newest, extrapolated by
+  `vx` for at most 6 ticks). Snapshots are unpacked
   with `long` (flag bit 8) and `items` (from `it`; a snapshot without it, e.g. from a pre-M5 server,
   means none). `items` are those of the newest snapshot at or before the render tick, minus pickups
   we took ourselves (our `pickup` event is released at once and hides it before the timeline
@@ -559,6 +612,23 @@ editable physics.
   - `drawPip` (here `drawKanbei`), `drawTails`, `drawSword` and the `iframes` flashing,
   - the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`),
   - the debug panel (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
+- **Ninja stars (§5.2).**
+  - `drawStarItem`: a star pickup is a spinning four-pointed neon shuriken (`shuriken()`, white-pink
+    with a magenta glow and a hole) hovering over a magenta light pool, inside a turning dashed violet
+    ring, with a small `+3`: unlike the long sword's upright cyan blade.
+  - `drawFlyingStar`: a star in flight spins fast with a short magenta trail behind it; drawn from
+    `state.stars` (online the interpolated view, offline the sim state), after the players.
+  - `drawThrowFlick`: for 8 ticks after `FX.THROW` (ours at once from `localTick`, others from the
+    snapshot FX bit, offline from the sim) an arm swing and a small star leave the hand.
+  - `drawThrowHint`: "X to throw" (on touch "✦ to throw") floats above our own Kanbei for 4 s after
+    we take a star pickup (`__mp.throwHint` reads it).
+  - The status bar shows `★ n` (`#hStars`, next to HP, the server's count), flashing on a pickup.
+  - SFX: `sfx.throw` (airy whip and whistle), `sfx.starHit` (metallic tick and thud), `sfx.starPickup`
+    (three bright clinks), `sfx.starWall` (a ting, with a small spark burst where it struck).
+  - The kill feed shows `A ✦ B` (pink glow) for a star kill. Gore: a star hit spurts along the star's
+    flight (`e.dir`); a star kill is cut like a sweep (gore.js maps `star` to the sweep pieces), so it is
+    seeded and identical everywhere like the rest.
+  - Debug: the hitbox view adds star-pickup boxes (pink) and flying stars' boxes (white).
 - **Long swords (§5.1).**
   - `drawItem` draws a pickup: a cyan blade standing point-up over a light pool, with a halo, slowly
     bobbing and tilting, its glow pulsing and a glint running up the blade. Pickups are drawn before
@@ -583,9 +653,11 @@ editable physics.
   and rim glow. Online, `colorOf(id)` is the player's chosen colour. Offline, the local player is
   pink and the dummy orange.
 - **Input.**
-  - Keyboard: arrows to move, Up or Z to jump, Shift or X to run, Space to slash, Tab for the
-    scoreboard, D for the debug panel, M to mute.
-  - Touch (NinjaRunner's `TOUCH_BTN`, `btnAt`, `fingerOn`, `syncTouch`): ◀ ▶ bottom left, » ⚔ ⤒
+  - Keyboard: arrows to move, Up or Z to jump, Shift to run, Space to slash, **X to throw a ninja
+    star** (X no longer runs), Tab for the scoreboard, D for the debug panel, M to mute. The help line
+    and the lobby footer say so.
+  - Touch (NinjaRunner's `TOUCH_BTN`, `btnAt`, `fingerOn`, `syncTouch`): ◀ ▶ bottom left, » ✦ ⚔ ⤒
+    (✦ = `tT`, throw, `THROW_SYMBOL`)
     bottom right, plus a small ♪ (mute) and ⛶ (full screen) bar. Every finger is tracked by pointer
     id and can slide between buttons; jump and slash presses are latched like keys. **Run is the »
     toggle** (as in NinjaRunner), so one thumb stays on ◀ ▶ and the other on ⤒ ⚔. The bits are OR-ed
@@ -593,8 +665,8 @@ editable physics.
     (or `?touch`), hide while the lobby is open, and live in `#stage`, so they turn with it.
     Fight calls `goLandscape()` (full screen + orientation lock where allowed), as NinjaRunner's
     start does; a phone held upright still gets the rotated stage.
-  - Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash, bumpers or triggers
-    to run.
+  - Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash, Y to throw, bumpers or
+    triggers to run.
 
   The client builds one bitmask per tick. A press that starts and ends between ticks is latched
   for one tick. Device changes are logged (`input`), keystrokes never.
@@ -725,7 +797,14 @@ editable physics.
   every surface level, footing, headroom, walkable from a spawn).
 - `spikelevel.js` (a helper, not a test): `SPIKE_LEVEL`, the arena with spike strips, used by the
   spike tests in `sim.test.js`, `items.test.js` and `gore.test.js`.
-- `items.test.js`: the spawn window (40 seeds, gaps within 20–40 s and spread over it) and the max-2
+- `stars.test.js` (SPEC §5.2): spawn cadence 5–10 s and max 4 (30 seeds), points shared with long
+  swords both ways, +3 and the cap of 9 (and a full player leaving it), edge trigger and the 15-tick
+  cooldown, no throw without stars or in hit-stun, throwing ending spawn protection, 6 units a tick
+  from hand height and gone after 240, stopped by a block but not a plank, first player only, never the
+  thrower (point blank), invulnerable and dead players passed through, no rewind, 20 damage with its
+  knockback and stun, kill credit (also after the thrower died) and `move: 'star'`, loss on death and
+  leave, determinism with stars in flight (and resuming mid-flight), `predictStep` ignoring the bit.
+- `items.test.js` (ninja-star pickups switched off with `starMax: 0`): the spawn window (40 seeds, gaps within 20–40 s and spread over it) and the max-2
   rule; the countdown holding while full; free-point selection away from players and pickups (and
   retrying when none is free); determinism with pickups (6 players, serialized state and events, and
   resuming from a deserialized state); pickup on contact, the lower-id tie, a holder leaving a second
@@ -750,11 +829,14 @@ editable physics.
     clock advances (in steps of at most 0.5 s), unless the test makes it `silent`,
   - idle kick, input flood,
   - lag-compensated hits through rewound history, and with a long sword (hit only by a holder),
+  - ninja stars: the throw bit accepted and bit 64 kicked, the count per player (`p[12]`, `me.stars`),
+    pickups with their kind, stars in flight in `st`, the THROW FX bit, `throw` and star `hit` events
+    on every connection, admin state,
   - long swords: `item`/`pickup` relayed to players and viewers, `it` and the flag bit in snapshots,
     `me.long`, a mid-game joiner's first snapshot, admin state, the flag gone after death,
   - leave credit and `score` events,
   - `viewByToken` / admin state without tokens,
-  - `loadConfig` (defaults, `NET_SIM`, `ITEM_SECS` and `ITEM_POINTS` refused in production),
+  - `loadConfig` (defaults, `NET_SIM`, `ITEM_SECS`, `STAR_SECS` and `ITEM_POINTS` refused in production),
   - report validation,
   - the admin listener's loopback bind and read-only routes.
 
@@ -771,7 +853,7 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - reports: stored with server metadata, 413, 403, forged metadata keys 400, wrong type/method,
     flood 429, token view and the token never stored,
   - the event ring contents, no bodies in the logs,
-  - `NET_SIM`, `ITEM_SECS` and `ITEM_POINTS` refused in production,
+  - `NET_SIM`, `ITEM_SECS`, `STAR_SECS` and `ITEM_POINTS` refused in production,
   - `test/smoke.js` against the server.
 - `npm run test:multi` (`test/multiclient.js`) uses headless Chromium through playwright-core.
   Chromium comes from `PLAYWRIGHT_CHROMIUM`, playwright's own lookup, or the newest build in its
@@ -803,7 +885,12 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
     `Hold ⚔ Opp`; the respawned opponent then comes down in `fight` mode and kills the standing holder
     with its sword (`kill.held`, killer and move checked), and after the respawn every page has it back
     to the standard sword; `tools/debug.js state` lists the pickups,
-  - heartbeat, on a fourth server: two players and a lobby viewer stay connected through 7 s of
+  - ninja stars, on a fourth server with `STAR_SECS=1,1 ITEM_POINTS=0,1`: a `fetch` bot takes a star
+    pickup; `__mp.throwHint` is "X to throw" and `#hStars` shows `★ 3` (`★ 0` before); every page sees
+    the pickup; the target waits at x 40, the thrower at x 140 runs the `throw` bot; every page sees
+    the `throw` and the star `hit`; the count (and `#hStars`) goes down; `tools/debug.js state` lists
+    star pickups, stars in flight and counts,
+  - heartbeat, on a fifth server: two players and a lobby viewer stay connected through 7 s of
     quiet; a 3 s `freeze` changes nothing; a 7 s freeze is timed out (ring event, the other player
     sees `away`) and resumes with the same id; a 12 s freeze ends with the player released and the
     page back in the lobby with the "Connection lost" message,

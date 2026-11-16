@@ -11,7 +11,7 @@ const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
 const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
 const DRAIN_WINDOW = 30;                            // ticks over which a standing input backlog is measured
-const PRESS_BITS = KEY.JUMP | KEY.SLASH;            // edge-triggered keys a skipped input must not lose
+const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a skipped input must not lose
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
 const FLOOD_KICK_DROPS = 90;                        // dropped messages within FLOOD_WINDOW_MS → kick
@@ -399,19 +399,22 @@ export class Arena {
     if (dt > TICK_MS) { s.overruns++; this.event('overrun', null, { tick: this.state.tick, ms: r2(dt) }); }
   }
 
-  // Snapshot (SPEC §6.1): every player as [id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx],
-  // flags = alive 1 | onGround 2 | sweep 4 | long sword 8, plus the lying pickups `it` as [[id, x, y]]. Each client also gets its own full player state (`me`)
-  // and its last processed input `seq`, for reconciliation.
+  // Snapshot (SPEC §6.1): every player as [id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars],
+  // flags = alive 1 | onGround 2 | sweep 4 | long sword 8; the lying pickups `it` as [[id, x, y, kind]]
+  // (kind 1 = ninja stars, 0 = long sword); the stars in flight `st` as [[id, x, y, vx, owner]].
+  // Each client also gets its own full player state (`me`, with `stars`) and its last processed
+  // input `seq`, for reconciliation.
   snapshot() {
     const st = this.state;
     const p = st.players.map(q => {
       const rec = this.recs.get(q.id), fx = rec ? rec.fx : 0;
       if (rec) rec.fx = 0;
       return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
-        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx];
+        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx, q.stars | 0];
     });
-    const it = (st.items || []).map(i => [i.id, i.x, i.y]);
-    const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + '}';
+    const it = (st.items || []).map(i => [i.id, i.x, i.y, Sim.itemKind(i) === 'star' ? 1 : 0]);
+    const fl = (st.stars || []).map(f => [f.id, r2(f.x), r2(f.y), f.vx, f.owner]);
+    const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + ',"st":' + JSON.stringify(fl) + '}';
     const head = '{"t":"snapshot","tick":' + st.tick;
     for (const c of this.conns) {
       const rec = c.rec;
@@ -456,11 +459,13 @@ export class Arena {
     return { id: rec.id, name: rec.name, color: rec.color, state: rec.conn ? rec.state : rec.state + ' (disconnected)',
       queuePos: this.queuePos(rec), conn: rec.conn ? rec.conn.id : null, lastSeq: rec.lastSeq, inputQueue: rec.inputs.length,
       idleS: Math.round((this.now() - rec.lastActive) / 1000),
-      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, score: p.score, deaths: p.deaths } : {}) };
+      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, stars: p.stars | 0, score: p.score, deaths: p.deaths } : {}) };
   }
   adminState() {
     return { tick: this.state.tick, uptimeS: Math.round((this.now() - this.startedAt) / 1000),
-      items: (this.state.items || []).map(i => ({ ...i })), itemInS: r2(Math.max(0, this.state.itemT) * TICK_MS / 1000),
+      items: (this.state.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, this.state.itemT) * TICK_MS / 1000),
+      starInS: r2(Math.max(0, this.state.starT ?? 0) * TICK_MS / 1000),
+      stars: (this.state.stars || []).map(f => ({ id: f.id, owner: f.owner, x: r2(f.x), y: r2(f.y), vx: f.vx, dist: r2(f.dist) })),
       players: [...this.recs.values()].filter(r => r.state === 'play').map(r => this.recView(r)),
       queue: this.queue.map(r => this.recView(r)), tickTime: this.tickTimeStats(),
       conns: [...this.conns].map(c => this.connView(c)) };

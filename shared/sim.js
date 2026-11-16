@@ -4,7 +4,8 @@
 // starting state plus the same per-tick input bitmasks always gives the same result.
 //
 // Movement and the sword are ported from NinjaRunner (updatePlay, moveBody, swordBoxOf).
-import { T, KEY, FX, PW, PH, ATK_LEN, ATK_CD, COMBO_T, DEFAULTS, HISTORY_TICKS, LONG_REACH, ITEM_W, ITEM_H } from './constants.js';
+import { T, KEY, KEY_MASK, FX, PW, PH, ATK_LEN, ATK_CD, COMBO_T, DEFAULTS, HISTORY_TICKS, LONG_REACH, ITEM_W, ITEM_H,
+  STAR_W, STAR_H, STAR_HAND } from './constants.js';
 import { LEVEL, isSolid, isPlat, tileAt, pickSpawn, spawnPos } from './level.js';
 
 export { KEY, FX, DEFAULTS, LEVEL };
@@ -20,9 +21,11 @@ export function nextRand(state) {
 export function createWorld({ seed = 1 } = {}) {
   let s = Math.floor(Math.abs(seed)) % RNG_M;
   if (s === 0) s = 1;
-  // items: long-sword pickups lying in the arena [{id, x, y}]; itemT: ticks until the next one may
+  // items: pickups lying in the arena [{id, x, y, kind: 'long'|'star'}] (a long sword or ninja
+  // stars; one per item point); itemT / starT: ticks until the next long sword / star pickup may
   // appear (-1 = not drawn yet; drawn on the first step); itemSeq: the last pickup id used.
-  return { tick: 0, rng: s, players: [], items: [], itemT: -1, itemSeq: 0 };
+  // stars: ninja stars in flight [{id, owner, x, y, vx, dist}] (x, y = centre); starSeq: last id.
+  return { tick: 0, rng: s, players: [], items: [], itemT: -1, itemSeq: 0, starT: -1, stars: [], starSeq: 0 };
 }
 
 function newPlayer(id) {
@@ -32,7 +35,7 @@ function newPlayer(id) {
     atk: 0, atkCd: 0, atkType: 'chop', combo: 0, swing: 0, hitSet: [],
     hp: 0, alive: false, iframes: 0, stun: 0, respawn: 0,
     lastHitBy: null, lastHitTick: -1, score: 0, deaths: 0,
-    keys: 0, fx: 0, standOn: null, long: false,
+    keys: 0, fx: 0, standOn: null, long: false, stars: 0, throwCd: 0,
   };
 }
 
@@ -62,7 +65,7 @@ function spawnPlayer(state, p, cfg, L, events) {
     x: pos.x, y: pos.y, px: pos.x, py: pos.y, vx: 0, vy: 0, face: s.x < L.w * T / 2 ? 1 : -1,
     onGround: false, coyote: 0, buf: 0, atk: 0, atkCd: 0, atkType: 'chop', combo: 0, hitSet: [],
     hp: cfg.maxHp, alive: true, iframes: cfg.spawnIframes, stun: 0, respawn: 0,
-    lastHitBy: null, lastHitTick: -1, standOn: null, long: false,
+    lastHitBy: null, lastHitTick: -1, standOn: null, long: false, stars: 0, throwCd: 0,
   });
   events.push({ type: 'spawn', tick: state.tick, id: p.id, x: p.x, y: p.y });
 }
@@ -244,7 +247,9 @@ export function slashHits(attacker, targets) {
 function kill(state, v, killerId, move, cfg, events) {
   const held = v.long, killer = killerId != null ? getPlayer(state, killerId) : null;
   const longKill = !!(killer && killer.long && (move === 'chop' || move === 'sweep'));
+  const lostStars = v.stars | 0;
   v.long = false;                               // a long sword is lost on death, never dropped
+  v.stars = 0;                                  // so are unthrown ninja stars
   v.alive = false; v.hp = 0; v.deaths++; v.respawn = cfg.respawnTicks;
   v.atk = 0; v.stun = 0; v.iframes = 0; v.buf = 0;
   let credit = killerId;
@@ -254,7 +259,7 @@ function kill(state, v, killerId, move, cfg, events) {
   nextRand(state);
   events.push({ type: 'kill', tick: state.tick, killer: k ? k.id : null, victim: v.id, move, seed: state.rng,
                 x: v.x, y: v.y, vx: v.vx, vy: v.vy, face: v.face,
-                ...(longKill ? { long: true } : {}), ...(held ? { held: true } : {}) });
+                ...(longKill ? { long: true } : {}), ...(held ? { held: true } : {}), ...(lostStars ? { stars: lostStars } : {}) });
 }
 
 // Kill a player from outside the normal rules (e.g. a disconnect). Credit rules still apply.
@@ -275,16 +280,21 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
   state.tick++;
   const P = state.players;
 
-  // 1. respawns and movement, in id order
+  // 1. respawns and movement, in id order; a throw press launches a star from where the thrower
+  // ends up (SPEC §5.2): edge-triggered, cooldown cfg.throwCd, not in hit-stun, needs a star
   const spiked = [];
+  if (!state.stars) { state.stars = []; state.starSeq = 0; state.starT = -1; }   // a pre-M6 state
   for (const p of P) {
-    const keys = (get(p.id) | 0) & 31;
+    const keys = (get(p.id) | 0) & KEY_MASK;
     if (!p.alive) {
       p.keys = keys; p.fx = 0;
       if (--p.respawn <= 0) spawnPlayer(state, p, cfg, L, events);
       continue;
     }
+    const throwPress = (keys & KEY.THROW) && !(p.keys & KEY.THROW) && p.stun <= 0 && (p.throwCd | 0) <= 0 && (p.stars | 0) > 0;
+    if (p.throwCd > 0) p.throwCd--;
     movePlayer(p, keys, cfg, L);
+    if (throwPress) throwStar(state, p, cfg, events);
   }
   // 2. player-player collision
   resolvePlayers(P, cfg, L);
@@ -312,9 +322,75 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
     if (dead) kill(state, v, a.id, a.atkType, cfg, events);
     else v.stun = cfg.hitStun;
   }
-  // 5. long-sword pickups: taken on body contact by a living player without one, in id order
+  // 5. ninja stars in flight: move, stop at solid tiles or the range, hit the first player
+  stepStars(state, cfg, L, events);
+  // 6. pickups: taken on body contact, in id order; then the spawn countdowns
   stepItems(state, cfg, L, events);
   return events;
+}
+
+// ---------- ninja stars (SPEC §5.2) ----------
+export const starBox = st => ({ x: st.x - STAR_W / 2, y: st.y - STAR_H / 2, w: STAR_W, h: STAR_H });
+
+function throwStar(state, p, cfg, events) {
+  p.stars--; p.throwCd = cfg.throwCd;
+  p.iframes = 0;                                // throwing ends spawn protection, like attacking
+  p.fx |= FX.THROW;
+  // it starts on the body's centre line, so a point-blank target is still hit, and flies at hand height
+  const st = { id: ++state.starSeq, owner: p.id, x: p.x + p.w / 2, y: p.y + STAR_HAND, vx: cfg.starSpeed * p.face, dist: 0 };
+  state.stars.push(st);
+  events.push({ type: 'throw', tick: state.tick, id: p.id, star: st.id, x: st.x, y: st.y, face: p.face, stars: p.stars });
+}
+
+// One tick of flight for every star, in throw order. The star sweeps from x to x + vx; the sweep is
+// cut short at the first solid tile (planks don't stop it) and at cfg.starRange. Inside the sweep it
+// hits the first living, vulnerable player other than the thrower that it touches (nearest along
+// the flight, ties to the lower id): starDmg, a small knockback along the flight, hit-stun.
+function stepStars(state, cfg, L, events) {
+  for (let i = 0; i < state.stars.length; i++) {
+    const st = state.stars[i], dir = st.vx > 0 ? 1 : -1, half = STAR_W / 2, speed = Math.abs(st.vx);
+    let travel = Math.max(0, Math.min(speed, cfg.starRange - st.dist)), wall = false;
+    // solid tiles: the columns the leading edge enters during the sweep
+    const top = Math.floor((st.y - STAR_H / 2) / T), bot = Math.floor((st.y + STAR_H / 2 - .01) / T);
+    const lead = st.x + dir * half;
+    const solidCol = tx => { for (let ty = top; ty <= bot; ty++) if (isSolid(L, tx, ty)) return true; return false; };
+    for (let tx = Math.floor((dir > 0 ? lead - .01 : lead) / T); ; tx += dir) {
+      const d = dir > 0 ? Math.max(0, tx * T - lead) : Math.max(0, lead - (tx + 1) * T);   // where the edge enters column tx
+      if (d > 0 && d >= travel) break;                         // not reached (touching a face is not entering)
+      if (solidCol(tx)) { travel = d; wall = true; break; }
+    }
+    // players inside the swept box
+    const x0 = st.x, x1 = st.x + dir * travel;
+    const sweep = { x: Math.min(x0, x1) - half, y: st.y - STAR_H / 2, w: Math.abs(x1 - x0) + STAR_W, h: STAR_H };
+    let victim = null, best = Infinity;
+    for (const v of state.players) {
+      if (v.id === st.owner || !v.alive || v.iframes > 0 || !overlap(sweep, v)) continue;
+      const d = dir > 0 ? v.x - x0 : x0 - (v.x + v.w);         // how far along the flight its near side is
+      if (d < best) { best = d; victim = v; }
+    }
+    if (victim) {
+      st.x = dir > 0 ? Math.min(x1, Math.max(x0, victim.x - half)) : Math.max(x1, Math.min(x0, victim.x + victim.w + half));
+      starHit(state, st, victim, cfg, events);
+      state.stars.splice(i--, 1);
+      continue;
+    }
+    st.x = x1; st.dist += travel;
+    if (wall || st.dist >= cfg.starRange) {
+      state.stars.splice(i--, 1);
+      events.push({ type: 'starEnd', tick: state.tick, star: st.id, x: st.x, y: st.y, wall });
+    }
+  }
+}
+
+function starHit(state, st, v, cfg, events) {
+  const dir = st.vx > 0 ? 1 : -1;
+  v.hp -= cfg.starDmg; v.lastHitBy = st.owner; v.lastHitTick = state.tick;
+  const dead = v.hp <= 0, mul = dead ? cfg.killKnockMul : 1;
+  v.vx = cfg.starKnockX * dir * mul; v.vy = cfg.starKnockY * mul; v.onGround = false;
+  events.push({ type: 'hit', tick: state.tick, attacker: st.owner, victim: v.id, move: 'star', star: st.id, dmg: cfg.starDmg,
+                hp: Math.max(0, v.hp), x: v.x, y: v.y, dir });
+  if (dead) kill(state, v, st.owner, 'star', cfg, events);
+  else v.stun = cfg.hitStun;
 }
 
 // ---------- long-sword pickups (SPEC §5.1) ----------
@@ -330,30 +406,43 @@ export function freeItemPoints(state, cfg = DEFAULTS, L = LEVEL) {
 
 const drawItemT = (state, cfg) => cfg.itemMinTicks + Math.floor(nextRand(state) * (cfg.itemMaxTicks - cfg.itemMinTicks + 1));
 
+export const itemKind = it => (it.kind === 'star' ? 'star' : 'long');   // pre-M6 items are long swords
+const drawStarT = (state, cfg) => cfg.starMinTicks + Math.floor(nextRand(state) * (cfg.starMaxTicks - cfg.starMinTicks + 1));
+
 function stepItems(state, cfg, L, events) {
   if (!state.items) { state.items = []; state.itemT = -1; state.itemSeq = 0; }   // a pre-M5 state
-  // pickups: each lying item, in list order, goes to the lowest-id living toucher without one
+  if (state.starT == null) state.starT = -1;
+  // pickups: each lying item, in list order, goes to the lowest-id living toucher who can take it:
+  // a long sword to one without one; stars (+starGive, up to starCarry) to one below starCarry
   for (let i = 0; i < state.items.length; i++) {
-    const it = state.items[i], box = itemBox(it);
-    const p = state.players.find(q => q.alive && !q.long && overlap(q, box));
+    const it = state.items[i], box = itemBox(it), kind = itemKind(it);
+    const p = state.players.find(q => q.alive && (kind === 'star' ? (q.stars | 0) < cfg.starCarry : !q.long) && overlap(q, box));
     if (!p) continue;
-    p.long = true;
+    if (kind === 'star') p.stars = Math.min(cfg.starCarry, (p.stars | 0) + cfg.starGive); else p.long = true;
     state.items.splice(i--, 1);
-    events.push({ type: 'pickup', tick: state.tick, id: p.id, item: it.id, x: it.x, y: it.y });
+    events.push({ type: 'pickup', tick: state.tick, id: p.id, item: it.id, kind, x: it.x, y: it.y, ...(kind === 'star' ? { stars: p.stars } : {}) });
   }
-  // spawning: the countdown is drawn when a pickup appears (and on the first step) and runs only
-  // while there is room for another; when it is due and no point is free, it retries every tick
-  if (state.itemT < 0) state.itemT = drawItemT(state, cfg);
-  if (state.items.length >= cfg.itemMax) return;
-  if (state.itemT > 0) state.itemT--;
-  if (state.itemT > 0) return;
+  // spawning, per kind: the countdown is drawn when a pickup of that kind appears (and on the first
+  // step) and runs only while there is room for another of that kind; when it is due and no point
+  // is free (a point holds one pickup of either kind), it retries every tick
+  spawnKind(state, cfg, L, events, 'long', 'itemT', cfg.itemMax, drawItemT);
+  spawnKind(state, cfg, L, events, 'star', 'starT', cfg.starMax, drawStarT);
+}
+
+function spawnKind(state, cfg, L, events, kind, key, max, draw) {
+  if (state[key] < 0) state[key] = draw(state, cfg);
+  let n = 0;
+  for (const it of state.items) if (itemKind(it) === kind) n++;
+  if (n >= max) return;
+  if (state[key] > 0) state[key]--;
+  if (state[key] > 0) return;
   const free = freeItemPoints(state, cfg, L);
   if (!free.length) return;
   const pt = free[Math.floor(nextRand(state) * free.length) % free.length];
-  const it = { id: ++state.itemSeq, x: pt.x, y: pt.y };
+  const it = { id: ++state.itemSeq, x: pt.x, y: pt.y, kind };
   state.items.push(it);
-  state.itemT = drawItemT(state, cfg);
-  events.push({ type: 'item', tick: state.tick, id: it.id, x: it.x, y: it.y });
+  state[key] = draw(state, cfg);
+  events.push({ type: 'item', tick: state.tick, id: it.id, kind, x: it.x, y: it.y });
 }
 
 // Re-simulate only one player for client prediction: its own movement, then collisions against
@@ -362,7 +451,7 @@ function stepItems(state, cfg, L, events) {
 export function predictStep(state, id, keys, { cfg = DEFAULTS, level: L = LEVEL } = {}) {
   const p = getPlayer(state, id);
   if (!p || !p.alive) return false;
-  movePlayer(p, keys & 31, cfg, L);
+  movePlayer(p, keys & KEY_MASK, cfg, L);
   const fixed = new Set(state.players.filter(o => o !== p).map(o => o.id));
   resolvePlayers(state.players, cfg, L, fixed);
   return inSpikes(p, L);

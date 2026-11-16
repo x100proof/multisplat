@@ -337,6 +337,12 @@ const sfx = {
   },
   // a long sword appeared: a soft, high shimmer
   item: (v = 1) => { tone(1568, .5, 'sine', 2093, .035 * v); tone(2349, .4, 'sine', null, .02 * v, .12); },
+  // ninja stars (SPEC §5.2). Throw: a short airy whip with a rising whistle; hit: a hard metallic
+  // tick and a dull thud; pickup: three quick bright clinks (steel on steel)
+  throw: (v = 1) => { noise(.09, .14 * v, 0, 7000); tone(900, .1, 'triangle', 2200, .04 * v); },
+  starHit: (v = 1) => { tone(2600, .05, 'square', 1200, .05 * v); noise(.08, .22 * v, 0, 4500); tone(180, .1, 'square', 60, .06 * v, .01); },
+  starPickup: (v = 1) => { [2093, 2637, 3136].forEach((f, i) => { tone(f, .09, 'square', null, .025 * v, i * .05); tone(f * 1.5, .07, 'sine', null, .03 * v, i * .05 + .01); }); noise(.06, .06 * v, 0, 8000); },
+  starWall: (v = 1) => { tone(3200, .04, 'square', 1800, .025 * v); noise(.04, .08 * v, 0, 6000); },
 };
 
 // ---------- input: keyboard and gamepad -> one bitmask per tick ----------
@@ -347,7 +353,7 @@ let latch = 0;
 const JUMP_KEYS = ['ArrowUp', 'KeyZ'];
 const KEYMAP = {
   ArrowLeft: KEY.LEFT, ArrowRight: KEY.RIGHT, ArrowUp: KEY.JUMP, KeyZ: KEY.JUMP,
-  ShiftLeft: KEY.RUN, ShiftRight: KEY.RUN, KeyX: KEY.RUN, Space: KEY.SLASH,
+  ShiftLeft: KEY.RUN, ShiftRight: KEY.RUN, Space: KEY.SLASH, KeyX: KEY.THROW,   // X throws a ninja star (run is Shift only)
 };
 let lastDevice = null;
 function noteDevice(d) { if (d !== lastDevice) { lastDevice = d; dbg('input', 'device ' + d); } }
@@ -363,6 +369,7 @@ function padBits() {
     if (ax > .4 || btn(15)) b |= KEY.RIGHT;
     if (btn(0) || btn(12)) b |= KEY.JUMP;               // A / d-pad up
     if (btn(2) || btn(1)) b |= KEY.SLASH;               // X / B
+    if (btn(3)) b |= KEY.THROW;                         // Y: throw a ninja star
     if (btn(4) || btn(5) || btn(6) || btn(7)) b |= KEY.RUN;   // bumpers / triggers
   }
   if (b) noteDevice('gamepad');
@@ -396,7 +403,8 @@ addEventListener('pointerdown', () => initAudio());
 // A finger can slide from button to button (◀ to ▶, or ▶ onto ⤒ to jump mid-run). Run (») is an
 // on/off toggle, as in NinjaRunner, so one thumb is free for ◀ ▶ and the other for jump and slash.
 // The bits are OR-ed into the same per-tick mask as the keyboard; presses are latched like keys.
-const TOUCH_BTN = { tL: KEY.LEFT, tR: KEY.RIGHT, tJ: KEY.JUMP, tS: KEY.SLASH };
+const TOUCH_BTN = { tL: KEY.LEFT, tR: KEY.RIGHT, tJ: KEY.JUMP, tS: KEY.SLASH, tT: KEY.THROW };
+const THROW_SYMBOL = '✦';     // the touch throw button's label, also used in the "to throw" reminder
 const fingers = new Map();   // pointerId -> id of the button under that finger (or null)
 let touchRun = false, touchHeld = 0;
 const pad = document.getElementById('touch');
@@ -462,7 +470,7 @@ const simCfg = () => (ONLINE ? DEFAULTS : CFG);
 let state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
 let goreMs = 0, renderMs = 0, feedDirty = true;
 const eventLog = [];          // recent sim events, for scripted checks
-let corpses = [], popups = [];
+let corpses = [], popups = [], sparks = [];   // sparks: a star hitting a wall
 // Gore (gore.js): simulated here on every client from the server's kill seeds, never on the server.
 const G = createGore(L);
 const goreLog = { at: {} };   // throttles the cap messages
@@ -479,17 +487,18 @@ function onEvents(evs) {
     eventLog.push(e); if (eventLog.length > 200) eventLog.shift();
     const near = e.id === ME || e.attacker === ME || e.victim === ME;
     if (e.type === 'hit') {
-      sfx.slice();
+      if (e.move === 'star') sfx.starHit(near ? 1 : .7); else sfx.slice();
       popups.push({ x: e.x + 5, y: e.y - 4, t: 40, s: String(e.dmg) });
-      if (near) S.shake = Math.max(S.shake, 4);
-      if (CFG.gore) {   // spurt along the blow: away from where we see the attacker
+      if (near) S.shake = Math.max(S.shake, e.move === 'star' ? 3 : 4);
+      if (CFG.gore) {   // spurt along the blow: away from where we see the attacker (a star: along its flight)
         const a = Sim.getPlayer(state, e.attacker);
-        goreHit(G, e, a ? (a.x <= e.x ? 1 : -1) : 0);
+        goreHit(G, e, e.move === 'star' ? (e.dir || 0) : a ? (a.x <= e.x ? 1 : -1) : 0);
       }
     } else if (e.type === 'kill') {
       const v = Sim.getPlayer(state, e.victim);
       if (!ONLINE && e.victim === ME && e.held) dbg('life', 'long sword lost', { cause: 'death', move: e.move });
-      feed.push({ killer: e.killer, victim: e.victim, move: e.move, long: !!e.long, t: performance.now(), kc: colorOf(e.killer), vc: colorOf(e.victim), kn: e.killer != null ? nameOf(e.killer) : null, vn: nameOf(e.victim) });
+      if (!ONLINE && e.victim === ME && e.stars) dbg('life', 'stars lost', { n: e.stars, cause: 'death' });
+      feed.push({ killer: e.killer, victim: e.victim, move: e.move, long: !!e.long, star: e.move === 'star', t: performance.now(), kc: colorOf(e.killer), vc: colorOf(e.victim), kn: e.killer != null ? nameOf(e.killer) : null, vn: nameOf(e.victim) });
       if (feed.length > 5) feed.shift();
       feedDirty = true;
       if (music) music.intensity();
@@ -517,9 +526,19 @@ function onEvents(evs) {
       if (e.id === ME) { sfx.check(); snapCamera(); }
     } else if (e.type === 'pickup') {
       // the taker hears it fully, players within 160 units fainter with distance
+      const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y), star = e.kind === 'star';
+      const play = star ? sfx.starPickup : sfx.pickup;
+      if (e.id === ME) play(1); else if (d < 160) play(.25 + .35 * (1 - d / 160));
+      if (star && e.id === ME) {                    // remind the key above our Kanbei, flash the count
+        throwHintUntil = performance.now() + THROW_HINT_MS;
+        const el = document.getElementById('hStars'); el.classList.remove('got'); void el.offsetWidth; el.classList.add('got');
+      }
+      if (!ONLINE && e.id === ME) dbg('life', star ? 'stars gained' : 'long sword taken', { item: e.item, x: e.x, y: e.y, ...(star ? { now: e.stars } : {}) });
+    } else if (e.type === 'throw') {
+      if (!ONLINE && e.id === ME) dbg('life', 'star thrown', { star: e.star, left: e.stars });
+    } else if (e.type === 'starEnd') {
       const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
-      if (e.id === ME) sfx.pickup(1); else if (d < 160) sfx.pickup(.25 + .35 * (1 - d / 160));
-      if (!ONLINE && e.id === ME) dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y });
+      if (e.wall && d < 200) { sfx.starWall(.3 + .7 * (1 - d / 200)); sparks.push({ x: e.x, y: e.y, t: 10 }); }
     } else if (e.type === 'item') {
       const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
       if (d < 240) sfx.item(.4 + .6 * (1 - d / 240));
@@ -567,6 +586,7 @@ function update() {
   }
   corpses = corpses.filter(c => { c.vy += .3; c.x += c.vx; c.y += c.vy; if (c.impaled) c.vx = c.vy = 0; return --c.t > 0; });
   popups = popups.filter(p => (p.y -= .5, --p.t > 0));
+  sparks = sparks.filter(k => --k.t > 0);
   followCamera();
 }
 
@@ -576,6 +596,7 @@ function playFx(p) {
   if (p.fx & FX.SLASH) sfx.slash();
   if (p.fx & FX.BONK) sfx.bonk();
   if (p.fx & FX.LAND && p.standOn != null) sfx.stomp();
+  if (p.fx & FX.THROW) { sfx.throw(p.id === ME ? 1 : .6); throwAnims.set(p.id, S.tick); }
 }
 
 // Online: sample input, predict our player and queue the input for the server (sent per frame).
@@ -619,7 +640,7 @@ function followCamera() {
 
 function resetWorld() {
   state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
-  corpses = []; popups = []; L.bloody.clear(); clearGore(G);
+  corpses = []; popups = []; sparks = []; L.bloody.clear(); clearGore(G);
   onEvents(Sim.addPlayer(state, ME, { cfg: CFG }));
   onEvents(Sim.addPlayer(state, DUMMY, { cfg: CFG }));
   snapCamera();
@@ -745,6 +766,90 @@ function drawItem(it, x, y) {
   // a glint running up the blade
   const k = (t * .02) % 1.6;
   if (k < 1) { ctx.globalAlpha = 1 - k; ctx.fillStyle = '#fff'; oval(ctx, 0, 4 - k * 12, .9, .9); }
+  ctx.restore();
+}
+
+// ---------- ninja stars (SPEC §5.2) ----------
+// A four-pointed shuriken of radius r centred on (0, 0), turned by `spin`, with a hole in the middle.
+function shuriken(r, spin, fill, edge) {
+  ctx.save(); ctx.rotate(spin);
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = i * TAU / 8, rr = i % 2 ? r * .34 : r;
+    i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : ctx.moveTo(rr, 0);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.lineWidth = .35; ctx.strokeStyle = edge; ctx.stroke();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.beginPath(); ctx.arc(0, 0, r * .16, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+// A star pickup: a spinning neon shuriken hovering over a magenta light pool, with a spinning
+// violet halo ring: clearly not the long sword's upright cyan blade. x centre, y the surface.
+function drawStarItem(it, x, y) {
+  const t = S.tick + it.id * 23, bob = Math.sin(t * .07) * 1.2, pulse = .6 + .4 * Math.sin(t * .12);
+  const cy = y - 7 + bob;
+  ctx.save();
+  const g = ctx.createRadialGradient(x, y, 0, x, y, 9);
+  g.addColorStop(0, `rgba(255,110,199,${.4 * pulse})`); g.addColorStop(1, 'rgba(255,110,199,0)');
+  ctx.fillStyle = g; ctx.fillRect(x - 9, y - 5, 18, 6);
+  const h = ctx.createRadialGradient(x, cy, 0, x, cy, 10);
+  h.addColorStop(0, `rgba(176,38,255,${.32 * pulse})`); h.addColorStop(1, 'rgba(176,38,255,0)');
+  ctx.fillStyle = h; ctx.beginPath(); ctx.arc(x, cy, 10, 0, TAU); ctx.fill();
+  ctx.translate(x, cy);
+  ctx.strokeStyle = `rgba(255,110,199,${.5 + .4 * pulse})`; ctx.lineWidth = .5; ctx.setLineDash([2, 2.2]);
+  ctx.lineDashOffset = -t * .2; ctx.beginPath(); ctx.arc(0, 0, 6.3, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(4 + 4 * pulse);
+  shuriken(4.6, t * .12, '#ffd1ec', NEON.magenta);
+  ctx.shadowBlur = 0;
+  // the count it gives, small
+  ctx.font = '800 3.6px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(249,248,113,.85)';
+  ctx.fillText('+3', 0, -6.6);
+  ctx.restore();
+}
+// A star in flight: spinning fast, with a short fading trail behind it (along -vx).
+function drawFlyingStar(st, x, y) {
+  const dir = st.vx > 0 ? 1 : -1;
+  ctx.save(); ctx.lineCap = 'round';
+  const tr = ctx.createLinearGradient(x, y, x - dir * 16, y);
+  tr.addColorStop(0, 'rgba(255,110,199,.75)'); tr.addColorStop(1, 'rgba(176,38,255,0)');
+  ctx.strokeStyle = tr; ctx.lineWidth = 2.2; line(ctx, x, y, x - dir * 16, y);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = .6; line(ctx, x, y, x - dir * 9, y);
+  ctx.translate(x, y);
+  ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(5);
+  shuriken(2.6, S.tick * .7 * dir + st.id, '#ffffff', NEON.magenta);
+  ctx.restore();
+}
+// The throw flick: for a few ticks after a throw (our own at once, others from the snapshot FX
+// bit) a small star leaves the hand along the facing direction.
+const throwAnims = new Map();   // player id -> S.tick of the throw
+function drawThrowFlick(p, px, py) {
+  const t0 = throwAnims.get(p.id);
+  if (t0 == null) return;
+  const k = (S.tick - t0) / 8;
+  if (k > 1 || k < 0) { throwAnims.delete(p.id); return; }
+  const f = p.face, hx = px + 5 + f * (4 + k * 10), hy = py + 6 - Math.sin(k * Math.PI) * 2;
+  ctx.save(); ctx.globalAlpha = 1 - k * .6; ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,209,236,.7)'; ctx.lineWidth = .8;
+  ctx.beginPath(); ctx.arc(px + 5, py + 7, 7, f > 0 ? -1.4 : Math.PI + .2, f > 0 ? -.2 : Math.PI + 1.4); ctx.stroke();   // arm swing
+  ctx.translate(hx, hy); shuriken(2.2, S.tick * .8 * f, '#ffffff', NEON.magenta);
+  ctx.restore();
+}
+// "X to throw" (or the touch button's symbol) above our own Kanbei for a few seconds after we
+// grab stars (SPEC §5.2).
+let throwHintUntil = 0;
+const THROW_HINT_MS = 4000;
+function throwHintText() { return (TOUCH_UI ? THROW_SYMBOL : 'X') + ' to throw'; }
+function drawThrowHint(p, px, py) {
+  const left = throwHintUntil - performance.now();
+  if (left <= 0) return;
+  const a = Math.min(1, left / 600, (THROW_HINT_MS - left) / 150 + .2);
+  ctx.save(); ctx.globalAlpha = Math.max(0, a);
+  ctx.font = '800 5.5px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center';
+  const tx = px + p.w / 2, ty = py - (ONLINE ? 16 : 10) + Math.sin(S.tick * .15) * .6, label = throwHintText();
+  ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(5,3,10,.9)'; ctx.strokeText(label, tx, ty);
+  ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(4); ctx.fillStyle = '#ffd1ec'; ctx.fillText(label, tx, ty);
   ctx.restore();
 }
 
@@ -896,10 +1001,10 @@ function render() {
   // the cut-up dead: body pieces, hoods and swords
   for (const g of G.gibs) drawGib(g, cx);
 
-  // long-sword pickups (online: as of the render tick; a snapshot without them means none)
+  // pickups, long swords and ninja stars (online: as of the render tick; a snapshot without them means none)
   for (const it of state.items || []) {
     const x = it.x - cx;
-    if (x > -16 && x < VW + 16 && it.y > CY - 8 && it.y - 24 < CY + VH) drawItem(it, x, it.y);
+    if (x > -16 && x < VW + 16 && it.y > CY - 8 && it.y - 24 < CY + VH) (Sim.itemKind(it) === 'star' ? drawStarItem : drawItem)(it, x, it.y);
   }
 
   // players: the local one last, so it is drawn on top
@@ -912,8 +1017,16 @@ function render() {
       ctx.filter = 'none';
       if (p.atk > 0) drawSword(p, px, py);
     }
+    drawThrowFlick(p, px, py);
     drawHpBar(p, px, py, col);
     if (ONLINE) drawNameTag(p, px, py, col);
+    if (p.id === ME) drawThrowHint(p, px, py);
+  }
+
+  // ninja stars in flight (online: interpolated at the render tick like remote players)
+  for (const st of state.stars || []) {
+    const x = st.x - cx;
+    if (x > -20 && x < VW + 20 && st.y > CY - 8 && st.y < CY + VH + 8) drawFlyingStar(st, x, st.y);
   }
 
   // flying blood: additive blend so it glows (NinjaRunner), batched per colour
@@ -942,7 +1055,8 @@ function render() {
     for (const s of L.spawns) ctx.fillRect(s.x - cx - 1, s.y - 2, 2, 2);
     ctx.fillStyle = 'rgba(125,249,255,.9)';      // item points (cyan) and the lying pickups' boxes
     for (const s of L.items || []) { ctx.beginPath(); ctx.moveTo(s.x - cx, s.y - 3.5); ctx.lineTo(s.x - cx + 1.5, s.y - 2); ctx.lineTo(s.x - cx, s.y - .5); ctx.lineTo(s.x - cx - 1.5, s.y - 2); ctx.fill(); }
-    for (const it of state.items || []) box(Sim.itemBox(it), '#7df9ff');
+    for (const it of state.items || []) box(Sim.itemBox(it), Sim.itemKind(it) === 'star' ? '#ff6ec7' : '#7df9ff');
+    for (const st of state.stars || []) box(Sim.starBox(st), '#ffffff');      // stars in flight
   }
 
   // rain slanting across everything
@@ -959,6 +1073,11 @@ function render() {
   ctx.font = '800 7px system-ui, sans-serif'; ctx.textAlign = 'center';
   ctx.shadowColor = NEON.pink; ctx.shadowBlur = blur(4); ctx.fillStyle = NEON.yellow;
   for (const p of popups) ctx.fillText(p.s, p.x - cx, p.y);
+  ctx.strokeStyle = '#ffd1ec'; ctx.lineWidth = .5;
+  for (const k of sparks) {                       // a star striking a wall: a small burst of sparks
+    const r = (10 - k.t) * .5;
+    for (let i = 0; i < 6; i++) { const a = i * TAU / 6 + k.x; line(ctx, k.x - cx + Math.cos(a) * r * .4, k.y + Math.sin(a) * r * .4, k.x - cx + Math.cos(a) * r, k.y + Math.sin(a) * r); }
+  }
   ctx.shadowBlur = 0;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
@@ -967,6 +1086,7 @@ function render() {
   const me = !ONLINE && Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
   if (me) {
     setText('hHp', `HP ${Math.max(0, me.hp)}`);
+    setText('hStars', `★ ${me.stars | 0}`);
     document.getElementById('hHp').classList.toggle('low', me.alive && me.hp <= 34);
     setText('hScore', `SCORE ${me.score}` + (d ? ` · DUMMY ${d.score}` : ''));
     setText('msg', me.alive ? '' : `SPLAT · respawn in ${(me.respawn / 60).toFixed(1)}`);
@@ -983,7 +1103,7 @@ function board(on) { if (boardHeld !== on) { boardHeld = on; boardEl.classList.t
 const span = (text, color, cls) => { const e = document.createElement('span'); e.textContent = text; if (color) e.style.color = color; if (cls) e.className = cls; return e; };
 function feedRow(f) {
   const row = document.createElement('div');
-  if (f.kn != null && f.killer !== f.victim) row.append(span(f.kn, f.kc, 'nm'), f.long ? span(' ⚔ ', null, 'x long') : span(' ✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
+  if (f.kn != null && f.killer !== f.victim) row.append(span(f.kn, f.kc, 'nm'), f.star ? span(' ✦ ', null, 'x star') : f.long ? span(' ⚔ ', null, 'x long') : span(' ✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
   else row.append(span(f.move === 'spikes' ? '▲ ' : f.move === 'leave' ? '✕ ' : '✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
   if (f.move === 'spikes' || f.move === 'leave') row.append(span(f.move === 'spikes' ? ' (spikes)' : ' (left)', null, 'how'));
   return row;
@@ -1141,6 +1261,7 @@ function drawGib(g, cx) {
 function hudOnline() {
   const me = net.me, m = metaOf(ME);
   setText('hHp', me ? `HP ${Math.max(0, me.hp)}` : '');
+  setText('hStars', me && !lobbyOpen ? `★ ${me.stars | 0}` : '');   // our count, always the server's (SPEC §5.2)
   document.getElementById('hHp').classList.toggle('low', !!me && me.alive && me.hp <= 34);
   setText('hScore', m && !lobbyOpen ? `SCORE ${m.score}` : '');
   let msg = '', sub = '';
@@ -1535,6 +1656,7 @@ window.__mp = {
     setStyle(st) { CFG.realGore = st === 'real'; saveCfg(); applyBloodStyle(); if (!panel.classList.contains('hidden')) buildDebug(); return bloodStyleName(); },
   },
   get strip() { return { builds: stripBuilds, chips: [...stripEl.children].map(c => ({ id: +c.dataset.id, me: c.classList.contains('me'), text: c.textContent })) }; },
+  get throwHint() { return performance.now() < throwHintUntil ? throwHintText() : null; },   // the "X to throw" reminder while shown
   get feed() { return [...feedEl.children].map(e => e.textContent); },
   get perf() { return { renderMs, goreMs, fps }; },
   get music() { return music; }, analyzeLoop, startAudio: initAudio,

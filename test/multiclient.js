@@ -292,7 +292,11 @@ async function longSwordTest() {
   assert.equal(lk.long, true, 'kill event marked long');
   for (const p of all) {
     await waitFor(() => p.page.evaluate(([k, v]) => __mp.feed.some(t => t.includes(k) && t.includes('⚔') && t.includes(v)), [H.name, O.name]),
-      { timeout: 3000, what: `long-sword kill feed on ${p.name}` });
+      { timeout: 3000, what: `long-sword kill feed on ${p.name}` }).catch(async e => {
+      log('feed missing:', p.name, JSON.stringify(await p.page.evaluate(() => ({ feed: __mp.feed, net: __mp.net.state, reconnects: __mp.net.stats.reconnects,
+        kills: __mp.events.filter(e => e.type === 'kill'), msgs: __mp.debug.entries().filter(e => e.cat === 'net').map(e => e.msg) }))));
+      throw e;
+    });
   }
   log(`kill feed "${H.name} ⚔ ${O.name}" on all 3 pages`);
 
@@ -351,6 +355,71 @@ async function leaveTest() {
   await waitFor(async () => { const v = await ui(A); return !v.lobby && v.id != null && v.id !== A.id; }, { what: 'rejoin after leaving' });
   log('escape menu: stay keeps the slot, leave frees it and returns to the lobby, rejoin works');
   for (const p of [A, B]) await p.page.context().close();
+  await srv.stop();
+}
+
+// Ninja stars (SPEC §5.2): STAR_SECS=1,1 and ITEM_POINTS=0,1 put star pickups on the floor quickly
+// (ITEM_SECS keeps long swords away). A bot grabs stars: the "X to throw" reminder and the status
+// bar's count show; it throws at the opponent standing on the same floor; every page sees the
+// throw and the star hit; the count goes down.
+async function starTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir, STAR_SECS: '1,1', ITEM_SECS: '900,900', ITEM_POINTS: '0,1' }); servers.push(srv);
+  const T = await openPlayer(srv, 'Thrower', 4), V = await openPlayer(srv, 'Target', 0);
+  const wctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const W = { page: await wctx.newPage(), name: 'Watch' };
+  W.page.on('pageerror', e => errors.push(`Watch: ${e.message}`));
+  await W.page.goto(srv.url);
+  await W.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const all = [T, V, W];
+  // the target waits on the left half of the floor, out of the way
+  await installBot(V.page, { mode: 'goto', x: 40 });
+  await waitFor(() => T.page.evaluate(() => (__mp.state.items || []).some(i => i.kind === 'star')), { timeout: 10000, what: 'a star pickup appears' });
+  const hud0 = await T.page.evaluate(() => document.getElementById('hStars').textContent);
+  assert.equal(hud0, '★ 0', 'the status bar shows the (empty) star count');
+  await installBot(T.page, { mode: 'fetch' });
+  const pick = await waitFor(() => T.page.evaluate(id => __mp.events.find(e => e.type === 'pickup' && e.id === id && e.kind === 'star'), T.id),
+    { timeout: 30000, every: 100, what: 'Thrower picks up stars' });
+  await stopBot(T.page);
+  const ui = await waitFor(async () => {
+    const u = await T.page.evaluate(() => ({ hint: __mp.throwHint, hud: document.getElementById('hStars').textContent,
+      shown: getComputedStyle(document.getElementById('hStars')).display !== 'none', me: __mp.net.me && __mp.net.me.stars,
+      life: __mp.debug.entries().filter(e => e.cat === 'life').map(e => e.msg) }));
+    return u.me === 3 && u.hud === '★ 3' ? u : null;
+  }, { timeout: 3000, what: 'the star count after the pickup' });
+  assert.equal(ui.hint, 'X to throw', 'the reminder above our Kanbei');
+  assert.ok(ui.shown); assert.ok(ui.life.includes('stars gained'));
+  for (const p of all) await waitFor(() => p.page.evaluate(([id, item]) => __mp.events.some(e => e.type === 'pickup' && e.id === id && e.item === item && e.kind === 'star'), [T.id, pick.item]),
+    { timeout: 3000, what: `star pickup on ${p.name}` });
+  log(`stars: ${T.name} took ${pick.item} at ${pick.x},${pick.y}; reminder "${ui.hint}", status bar "${ui.hud}"`);
+  // both on the left half of the floor (the low centre block would stop the star): target at 40,
+  // thrower at 140, then throw until a star hits
+  await waitFor(() => V.page.evaluate(() => { const m = __mp.net.me; return m && m.onGround && m.y > 250 && Math.abs(m.x + 5 - 40) < 3; }), { timeout: 30000, every: 200, what: 'Target at x 40' });
+  await stopBot(V.page);
+  await installBot(T.page, { mode: 'goto', x: 140 });
+  await waitFor(() => T.page.evaluate(() => { const m = __mp.net.me; return m && m.onGround && m.y > 250 && Math.abs(m.x + 5 - 140) < 3; }), { timeout: 30000, every: 200, what: 'Thrower at x 140' });
+  const before = await T.page.evaluate(() => __mp.net.me.stars);   // (it may have picked up more on the way)
+  await installBot(T.page, { mode: 'throw', target: V.id });
+  const hit = await waitFor(() => T.page.evaluate(([a, v]) => __mp.events.find(e => e.type === 'hit' && e.move === 'star' && e.attacker === a && e.victim === v), [T.id, V.id]),
+    { timeout: 15000, every: 100, what: 'a star hit' });
+  await stopBot(T.page);
+  for (const p of all) {
+    await waitFor(() => p.page.evaluate(([a, v, t]) => __mp.events.some(e => e.type === 'hit' && e.move === 'star' && e.attacker === a && e.victim === v && e.tick === t) &&
+      __mp.events.some(e => e.type === 'throw' && e.id === a), [T.id, V.id, hit.tick]), { timeout: 3000, what: `star hit on ${p.name}` });
+  }
+  const after = await waitFor(async () => {
+    const u = await T.page.evaluate(() => ({ me: __mp.net.me.stars, hud: document.getElementById('hStars').textContent, throws: window.__botState.throws,
+      life: __mp.debug.entries().filter(e => e.cat === 'life').map(e => e.msg) }));
+    return u.me < before && u.hud === `★ ${u.me}` ? u : null;
+  }, { timeout: 3000, what: 'the count goes down' });
+  assert.ok(after.life.includes('star thrown'));
+  assert.equal(hit.dmg, 20);
+  log(`stars: ${after.throws} thrown, hit for ${hit.dmg} seen on all 3 pages, count ${before} -> ${after.me} ("${after.hud}")`);
+  // admin state and the CLI list star pickups, stars in flight and counts
+  const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
+    (e, so) => (e ? rej(e) : res(so))));
+  assert.match(st, /star pickups \(\d\)/); assert.match(st, /stars in flight \(\d\)/); assert.match(st, /stars=\d/);
+  for (const c of [T.page.context(), V.page.context(), wctx]) await c.close();
   await srv.stop();
 }
 
@@ -417,6 +486,7 @@ async function main() {
     await predictionTest();
     await longSwordTest();
     await leaveTest();
+    await starTest();
     await heartbeatTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');

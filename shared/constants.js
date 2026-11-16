@@ -6,11 +6,11 @@ export const VW = 320, VH = 192, T = 16; // view size and tile size, in world un
 
 // Per-player input bitmask, sampled once per tick (level-triggered: a bit is set while held).
 // Jump and slash presses are detected inside the sim as 0 -> 1 edges against the previous tick.
-export const KEY = Object.freeze({ LEFT: 1, RIGHT: 2, JUMP: 4, RUN: 8, SLASH: 16 });
-export const KEY_MASK = 31;
+export const KEY = Object.freeze({ LEFT: 1, RIGHT: 2, JUMP: 4, RUN: 8, SLASH: 16, THROW: 32 });
+export const KEY_MASK = 63;
 
 // Cosmetic per-tick flags the sim sets on a player (player.fx) so a client can play sounds.
-export const FX = Object.freeze({ JUMP: 1, SLASH: 2, BONK: 4, LAND: 8 });
+export const FX = Object.freeze({ JUMP: 1, SLASH: 2, BONK: 4, LAND: 8, THROW: 16 });
 
 // Player body (Kanbei, from NinjaRunner) and sword timing.
 export const PW = 10, PH = 13;
@@ -36,6 +36,10 @@ export const DEFAULTS = Object.freeze({
   // long-sword pickups (SPEC §5.1): a new one 20-40 s after the previous appeared, at most 2 lying
   // at once, at an item point with no player within itemClear units
   itemMinTicks: 1200, itemMaxTicks: 2400, itemMax: 2, itemClear: 32,
+  // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; +3 each, carry 9; throw
+  // cooldown 15 ticks; flight 6 units/tick for 240 units; 20 damage and a small knockback
+  starMinTicks: 300, starMaxTicks: 600, starMax: 4, starGive: 3, starCarry: 9,
+  throwCd: 15, starSpeed: 6, starRange: 240, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
 });
 
 // Long sword (SPEC §5.1): the holder's swordBoxOf length is scaled by this, for chop and sweep.
@@ -43,6 +47,8 @@ export const DEFAULTS = Object.freeze({
 export const LONG_REACH = 1.6;
 // A pickup's body, centred on its item point's x and resting on the point's surface (y).
 export const ITEM_W = 8, ITEM_H = 14;
+export const STAR_W = 4, STAR_H = 4;    // a flying star's box (centred on its x, y)
+export const STAR_HAND = 6;             // a star leaves the hand this far below the body's top
 
 // Netcode values shared by the server and the client (SPEC §6).
 export const NET = Object.freeze({

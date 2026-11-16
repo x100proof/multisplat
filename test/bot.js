@@ -5,8 +5,8 @@
 // block if needed) or park on the right half.
 // Long-sword modes (all on the floor): 'fetch' walks to the nearest pickup lying on the floor,
 // 'goto' walks to x, 'spar' keeps `dist` units (centre to centre) from target and slashes only
-// from there (beyond standard reach, inside long reach).
-//   window.__botCfg = { mode: 'fight' | 'park' | 'pace' | 'fetch' | 'goto' | 'spar', target: id, x, dist }
+// from there (beyond standard reach, inside long reach), 'throw' faces target and throws a ninja star every 20 ticks.
+//   window.__botCfg = { mode: 'fight' | 'park' | 'pace' | 'fetch' | 'goto' | 'spar' | 'throw', target: id, x, dist }
 export function bot(me, players) {
   const cfg = window.__botCfg || {}, L = window.__mp.level, T = 16;
   const K = { L: 1, R: 2, J: 4, RUN: 8, S: 16 };
@@ -54,6 +54,15 @@ export function bot(me, players) {
     if (d < 0 && l <= 1) d = 1;
     if (d > 0 && r >= L.w - 2) d = -1;
     return go(dirKey(d));
+  }
+  if (cfg.mode === 'throw') {
+    // stand still, face the target (on the same floor level) and throw a star every 20 ticks
+    const tgt = players.find(p => p.id === cfg.target && p.alive);
+    if (!tgt || Math.abs(tgt.y - me.y) > 3) return 0;
+    const dir = Math.sign(tgt.x - me.x) || 1;
+    if (me.face !== dir) return dirKey(dir);
+    if (st.t - (st.throwAt || 0) >= 20 && (me.stars | 0) > 0) { st.throwAt = st.t; st.throws = (st.throws || 0) + 1; return 32; }
+    return 0;
   }
   if (cfg.mode === 'fetch' || cfg.mode === 'goto' || cfg.mode === 'spar') {
     let tx = cfg.x ?? cx, tol = 1.5;

@@ -2,7 +2,7 @@
 // backoff and resume, clock sync, client-side prediction with reconciliation for the local player,
 // and interpolation of remote players 100 ms in the past.
 import * as Sim from '/shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, PW, PH } from '/shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, PW, PH, KEY, FX } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { dbg, dbgv, sendReport } from './debug.js';
 
@@ -16,11 +16,14 @@ const ERR_KEEP = 180;                                  // prediction-error sampl
 function unpack(a) {
   return { id: a[0], x: a[1], y: a[2], vx: a[3], vy: a[4], face: a[5], hp: a[6], atk: a[7],
     alive: !!(a[8] & 1), onGround: !!(a[8] & 2), atkType: a[8] & 4 ? 'sweep' : 'chop', long: !!(a[8] & 8),
-    iframes: a[9], stun: a[10], fx: a[11], w: PW, h: PH };
+    iframes: a[9], stun: a[10], fx: a[11], stars: a[12] | 0, w: PW, h: PH };   // a[12]: ninja stars carried (absent before M6)
 }
 // Long-sword pickups lying in the arena, from a snapshot's `it` ([[id, x, y]]). A snapshot from a
 // pre-M5 server has none.
-const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => ({ id: a[0], x: a[1], y: a[2] })) : []);
+// a[3] is the kind (1 = ninja stars; absent or 0 = long sword).
+const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => ({ id: a[0], x: a[1], y: a[2], kind: a[3] === 1 ? 'star' : 'long' })) : []);
+// Ninja stars in flight, from a snapshot's `st` ([[id, x, y, vx, owner]]); none from an older server.
+const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).map(a => [a[0], { id: a[0], x: a[1], y: a[2], vx: a[3], owner: a[4] }]) : []);
 
 export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {} } = {}) {
   const net = {
@@ -42,6 +45,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   let live = false;
   const rtts = [];
   let seq = 0, pending = [], unsent = [];
+  let prevKeys = 0, localThrowCd = 0;                  // the local throw's immediate sound/animation
   const snaps = [];                                    // [{tick, at, players: Map}]
   const taken = new Set();                             // ids of pickups we took (hidden before the snapshots catch up)
   let arrOff = null, lastSnapAt = 0, lastFxTick = 0;
@@ -248,10 +252,16 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       if (e.type === 'kill' && e.victim === net.id) {
         dbg('life', 'death', { killer: e.killer, move: e.move });
         if (e.held) dbg('life', 'long sword lost', { cause: 'death', move: e.move });
+        if (e.stars) dbg('life', 'stars lost', { n: e.stars, cause: 'death' });
       }
-      if (e.type === 'pickup' && e.id === net.id) { taken.add(e.item); dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y }); }
+      if (e.type === 'pickup' && e.id === net.id) {
+        taken.add(e.item);
+        if (e.kind === 'star') dbg('life', 'stars gained', { item: e.item, now: e.stars, x: e.x, y: e.y });
+        else dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y });
+      }
+      if (e.type === 'throw' && e.id === net.id) dbg('life', 'star thrown', { star: e.star, left: e.stars });
       // effects about me play at once; the rest when the interpolated view reaches their tick
-      const mine = e.victim === net.id || e.attacker === net.id || ((e.type === 'spawn' || e.type === 'pickup') && e.id === net.id) || !('x' in e);
+      const mine = e.victim === net.id || e.attacker === net.id || ((e.type === 'spawn' || e.type === 'pickup' || e.type === 'throw') && e.id === net.id) || !('x' in e);
       evq.push({ e, due: mine ? -Infinity : e.tick });
     }
   }
@@ -270,7 +280,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     const players = new Map();
     for (const a of m.p) players.set(a[0], unpack(a));
     if (snaps.length && m.tick <= snaps[snaps.length - 1].tick) return;
-    snaps.push({ tick: m.tick, at: now, players, items: unpackItems(m.it) });
+    snaps.push({ tick: m.tick, at: now, players, items: unpackItems(m.it), flying: unpackFlying(m.st) });
     const ids = new Set(); for (const s2 of snaps) for (const i of s2.items) ids.add(i.id);
     for (const i of taken) if (!ids.has(i)) taken.delete(i);
     if (snaps.length > SNAP_KEEP) snaps.shift();
@@ -333,7 +343,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   // Called once per 60 Hz client tick with this tick's key mask.
   net.localTick = function localTick(keys) {
     if (smooth.n > 0) smooth.n--;
-    if (net.mode !== 'play' || !live || !ws || ws.readyState !== 1) return;
+    if (net.mode !== 'play' || !live || !ws || ws.readyState !== 1) { prevKeys = keys; return; }
     seq++;
     unsent.push(keys);
     if (net.me) {
@@ -341,7 +351,15 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       if (pending.length > PENDING_MAX) pending.shift();
       const world = { tick: 0, rng: 1, players: obstacles(0, net.me) };
       Sim.predictStep(world, net.me.id, keys, { cfg: DEFAULTS, level: LEVEL });
+      // A throw is not predicted (no star, no count change: both come from the server), but its
+      // sound and arm flick play at once: the FX bit is set when the press would be accepted.
+      localThrowCd = Math.max(0, localThrowCd - 1);
+      const me = net.me;
+      if ((keys & KEY.THROW) && !(prevKeys & KEY.THROW) && me.alive && (me.stars | 0) > 0 && me.stun <= 0 && localThrowCd <= 0 && (me.throwCd | 0) <= 0) {
+        me.fx |= FX.THROW; localThrowCd = DEFAULTS.throwCd;
+      }
     }
+    prevKeys = keys;
   };
   // Send this frame's inputs, at most 3 ticks per message.
   net.flush = function flush() {
@@ -399,7 +417,23 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     // pickups as of the render tick, minus any we took ourselves (released at once, not interpolated)
     const at = snaps.length ? snaps[Math.max(0, snaps.findLastIndex(s => s.tick <= R))] : null;
     const items = at ? at.items.filter(i => !taken.has(i.id)) : [];
-    return { tick: Math.floor(R), players, fx, items };
+    // ninja stars in flight, interpolated like remote players (between the snapshots around the
+    // render tick; a star missing from the later one ended in between and shows until the midpoint)
+    const stars = [];
+    if (snaps.length) {
+      let i = snaps.length - 1;
+      while (i > 0 && snaps[i].tick > R) i--;
+      const a = snaps[i], b = snaps[i + 1];
+      const k = b ? Math.max(0, Math.min(1, (R - a.tick) / (b.tick - a.tick))) : 0;
+      const ext = b ? 0 : Math.max(0, Math.min(R - a.tick, EXTRAP_TICKS));
+      for (const fa of (a.flying || new Map()).values()) {
+        const fb = b && b.flying && b.flying.get(fa.id);
+        if (fb) stars.push({ ...fa, x: fa.x + (fb.x - fa.x) * k, y: fa.y + (fb.y - fa.y) * k });
+        else if (!b) stars.push({ ...fa, x: fa.x + fa.vx * ext });
+        else if (k < .5) stars.push({ ...fa, x: fa.x + fa.vx * (R - a.tick) });
+      }
+    }
+    return { tick: Math.floor(R), players, fx, items, stars };
   };
 
   net.snapshots = snaps;

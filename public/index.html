@@ -42,6 +42,10 @@
   #hud { position: absolute; left: 0; right: 0; top: var(--sh); display: flex; justify-content: space-between;
          padding: .3em .8em; font-weight: 700; font-size: var(--hf);
          color: #d1f7ff; text-shadow: 0 0 6px #05d9e8, 2px 2px 0 #000; pointer-events: none; }
+  #hStars { margin-left: 1em; color: #f9f871; text-shadow: 0 0 6px #b026ff, 2px 2px 0 #000; }
+  #hStars:empty { display: none; }
+  #hStars.got { animation: starsGot .6s ease-out; }
+  @keyframes starsGot { from { color: #fff; text-shadow: 0 0 14px #f9f871, 0 0 4px #fff; } }
   #hHp.low { color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d, 2px 2px 0 #000; }
   #msg { position: absolute; left: 0; right: 0; top: 38%; text-align: center; pointer-events: none;
          font-weight: 800; font-size: clamp(16px, 4vw, 40px); color: #ff2a6d;
@@ -53,6 +57,7 @@
           pointer-events: none; font-weight: 700; font-size: clamp(9px, 1.6vw, 15px); text-shadow: 0 0 4px #000, 1px 1px 0 #000; }
   #feed > div { background: rgba(5,3,10,.55); padding: .1em .5em; border-radius: 4px; white-space: nowrap; }
   #feed .x { color: #ff1f1f; } #feed .how { color: #999; font-weight: 400; }
+  #feed .x.star { color: #ffd1ec; font-size: 1.1em; line-height: 1; text-shadow: 0 0 4px #ff6ec7, 0 0 8px #b026ff; }
   #feed .x.long { color: #aef6ff; font-size: 1.2em; line-height: 1; text-shadow: 0 0 4px #05d9e8, 0 0 8px #05d9e8; }
   /* scoreboard while Tab is held */
   #board { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); min-width: min(24em, 80%); max-height: 70%; overflow-y: auto;
@@ -168,17 +173,17 @@
 <div id="strip"></div>
 <div id="wrap">
   <canvas id="c"></canvas>
-  <div id="hud"><span id="hHp"></span><span id="hScore"></span></div>
+  <div id="hud"><span id="hLeft"><span id="hHp"></span><span id="hStars"></span></span><span id="hScore"></span></div>
   <div id="msg"></div>
   <div id="msgSub"></div>
   <div id="feed"></div>
   <div id="board" class="hidden"></div>
   <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tFull" aria-label="Full screen">⛶</button><button id="tLeave" aria-label="Leave">✕</button></div>
-  <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · Tab scores · D debug · M mute · Esc leave</div>
+  <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · D debug · M mute · Esc leave</div>
 </div>
 <div id="touch">
   <div class="grp"><button id="tL" aria-label="Left">◀</button><button id="tR" aria-label="Right">▶</button></div>
-  <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
+  <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tT" aria-label="Throw a ninja star">✦</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
 <div id="leave" class="hidden" role="dialog" aria-modal="true" aria-labelledby="lvTitle">
@@ -202,7 +207,7 @@
     <ul id="lPlayers"></ul>
     <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
     <div id="lStatus"></div>
-    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · Tab scores · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · » run on/off</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
+    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · X throw star · Tab scores · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · ✦ throw star · » run on/off</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
   </div>
 </div>
 <div id="dbg" class="hidden"></div>

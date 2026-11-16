@@ -132,7 +132,8 @@ export function goreKill(G, e, opts = {}) {
   const move = e.move, face = e.face < 0 ? -1 : 1;
   const blow = e.vx > .01 ? 1 : e.vx < -.01 ? -1 : face;          // direction the killing blow pushed
   const feetX = e.x + 5, feetY = e.y + 13, kvx = e.vx || 0, kvy = e.vy || 0;
-  const kind = move === 'chop' ? 'chop' : move === 'sweep' ? 'sweep' : move === 'spikes' ? 'spikes' : 'quarter';
+  // a ninja star (SPEC §5.2) cuts like a sweep: it flies flat at hand height
+  const kind = move === 'chop' ? 'chop' : move === 'sweep' || move === 'star' ? 'sweep' : move === 'spikes' ? 'spikes' : 'quarter';
   const sl = (r() - .5) * 2.4;
   const ps = pieces(kind === 'spikes' ? 'sweep' : kind, sl);
   for (const p of ps) {

@@ -65,8 +65,13 @@ async function main() {
       const s = await get('/state');
       out(`tick ${s.tick} · up ${s.uptimeS}s · tick time avg ${s.tickTime.avgMs} ms, p99 ${s.tickTime.p99Ms}, max ${s.tickTime.maxMs} (budget ${s.tickTime.budgetMs}), overruns ${s.tickTime.overruns}`);
       out(`players (${s.players.length}):`);
-      for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
-      if (s.items) out(`long-sword pickups (${s.items.length}): ${s.items.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.itemInS}s when there is room`);
+      for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} stars=${p.stars ?? 0} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
+      if (s.items) {
+        const longs = s.items.filter(i => i.kind !== 'star'), stars = s.items.filter(i => i.kind === 'star');
+        out(`long-sword pickups (${longs.length}): ${longs.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.itemInS}s when there is room`);
+        out(`star pickups (${stars.length}): ${stars.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.starInS ?? '?'}s when there is room`);
+      }
+      if (s.stars) out(`stars in flight (${s.stars.length}): ${s.stars.map(f => `#${f.id} by ${f.owner} at ${f.x},${f.y} ${f.vx > 0 ? '→' : '←'} ${f.dist}u`).join(' ') || '-'}`);
       out(`queue (${s.queue.length}):`);
       for (const p of s.queue) out(`  #${p.queuePos} ${p.id} ${JSON.stringify(p.name)} ${p.state}`);
       out(`connections (${s.conns.length}):`);

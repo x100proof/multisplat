@@ -186,8 +186,8 @@ test('NET_SIM is refused when NODE_ENV=production', async () => {
   assert.equal(code, 2); assert.match(err, /NET_SIM/);
 });
 
-test('ITEM_SECS and ITEM_POINTS (test-only pickup knobs) are refused when NODE_ENV=production', async () => {
-  for (const [k, v] of [['ITEM_SECS', '1,2'], ['ITEM_POINTS', '0,1']]) {
+test('ITEM_SECS, STAR_SECS and ITEM_POINTS (test-only pickup knobs) are refused when NODE_ENV=production', async () => {
+  for (const [k, v] of [['ITEM_SECS', '1,2'], ['STAR_SECS', '1,2'], ['ITEM_POINTS', '0,1']]) {
     const p = spawn(process.execPath, [join(ROOT, 'server/server.js')], { env: { ...process.env, PORT: '0', [k]: v, NODE_ENV: 'production' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
     p.stderr.on('data', d => { err += d; });

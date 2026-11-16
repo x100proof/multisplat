@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { ROOT } from './lib.js';
 import { createGore, goreKill, goreHit, stepGore, fingerprint, settled, killKey, hitSeed, prng, sinp, fadeOf, GORE } from '../public/gore.js';
 import { LEVEL } from '../shared/level.js';
+import { SPIKE_LEVEL } from './spikelevel.js';
+
+// spikes kills run on the test level with spikes (the shipped arena has none)
+const levelFor = move => (move === 'spikes' ? SPIKE_LEVEL : LEVEL);
 
 const kill = (o = {}) => ({ type: 'kill', tick: 900, killer: 1, victim: 2, move: 'chop', seed: 123456, x: 100, y: 259, vx: 4.9, vy: -4.2, face: -1, ...o });
 function run(e, ticks = 400, opts) {
@@ -27,7 +31,7 @@ test('the source is DOM-free and uses no Math.random or trig', () => {
 test('same seed gives identical particles, gibs, decals and pools', () => {
   for (const move of ['chop', 'sweep', 'spikes', 'leave']) {
     const e = kill({ move, x: move === 'spikes' ? 196 : 100, vx: move === 'spikes' ? 0 : 4.9 });
-    const a = createGore(LEVEL), b = createGore(LEVEL);
+    const a = createGore(levelFor(move)), b = createGore(levelFor(move));
     goreKill(a, e); goreKill(b, e);
     for (let i = 0; i < 300; i++) {
       stepGore(a); stepGore(b);
@@ -54,7 +58,7 @@ test('a kill is cut into the right pieces', () => {
   assert.equal(ids('sweep'), 'BHST');       // top and bottom halves
   assert.equal(ids('spikes'), 'BHST');
   assert.equal(ids('leave'), 'HQ0Q1Q2Q3S'.match(/Q\d|[A-Z]/g).sort().join(''));
-  const G = createGore(LEVEL); goreKill(G, kill({ move: 'spikes', x: 196, vx: 0 }));
+  const G = createGore(SPIKE_LEVEL); goreKill(G, kill({ move: 'spikes', x: 196, vx: 0 }));
   assert.ok(G.gibs.find(g => g.id === 'B').pinned, 'the bottom half stays on the spikes');
   for (let i = 0; i < 120; i++) stepGore(G);
   assert.ok(G.bloody.size >= 1, 'spikes stained');

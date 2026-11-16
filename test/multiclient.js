@@ -226,8 +226,7 @@ async function longSwordTest() {
   assert.ok((await H.page.evaluate(() => __mp.debug.entries())).some(e => e.cat === 'life' && e.msg === 'long sword taken'));
   log('pickup event and holder flag on all 3 pages, reach x1.6');
 
-  // reach: the other player stands on the floor by the left wall (x 36: knockback can't throw it
-  // into the spikes); the holder slashes only from 31 units (centre to centre), beyond standard
+  // reach: the other player stands on the floor by the left wall (x 36); the holder slashes only from 31 units (centre to centre), beyond standard
   // reach (26) but inside long reach (36.8), and hits
   await installBot(O.page, { mode: 'goto', x: 36 });
   await waitFor(() => O.page.evaluate(() => { const m = __mp.net.me; return m && m.onGround && m.y > 250 && Math.abs(m.x + 5 - 36) < 3; }),
@@ -251,11 +250,14 @@ async function longSwordTest() {
   }
   log(`kill feed "${H.name} ⚔ ${O.name}" on all 3 pages`);
 
-  // the holder dies (walks into the floor spikes): standard sword again on every page
-  await installBot(H.page, { mode: 'spikes' });
+  // the holder dies by the opponent's sword (the arena has no spikes): the holder stands still and
+  // the respawned opponent comes down to the floor and fights it; standard sword again everywhere
+  await installBot(O.page, { mode: 'fight', target: H.id });
   const death = await waitFor(() => H.page.evaluate(id => __mp.events.find(e => e.type === 'kill' && e.victim === id), H.id),
-    { timeout: 30000, every: 100, what: 'the holder dies' });
-  await stopBot(H.page);
+    { timeout: 40000, every: 100, what: 'the holder dies' });
+  await stopBot(O.page);
+  assert.equal(death.killer, O.id, 'killed by the opponent');
+  assert.ok(death.move === 'chop' || death.move === 'sweep', 'by a sword, not ' + death.move);
   assert.equal(death.held, true, 'kill event says the victim held a long sword');
   for (const p of all) {
     const h = await waitFor(async () => { const d = await drawn(p, H.id); return d && d.alive ? d : null; }, { timeout: 6000, what: `holder respawn on ${p.name}` });

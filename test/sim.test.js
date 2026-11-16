@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as S from '../shared/sim.js';
 import { KEY, DEFAULTS } from '../shared/constants.js';
+import { SPIKE_LEVEL } from './spikelevel.js';
 
 const FLOOR_Y = 272 - 13;   // y of a player standing on the floor
 
@@ -232,12 +233,13 @@ test('combat: simultaneous swings trade', () => {
 });
 
 test('spikes: instant kill, credited to the last hitter within 5 s', () => {
-  // floor spikes are at columns 12-13, row 16
+  // the shipped arena has no spikes; the test level has floor spikes at columns 12-13, row 16
+  const SP = { level: SPIKE_LEVEL };
   const onSpikes = (w, id) => { const p = place(w, id, 12 * 16 + 3, FLOOR_Y - 4); p.onGround = false; p.vy = 2; };
   // no hitter: nobody scores, the death still counts
   let w = world(2);
   onSpikes(w, 2);
-  let ev = run(w, 3);
+  let ev = run(w, 3, undefined, SP);
   let k = ev.find(e => e.type === 'kill');
   assert.ok(k); assert.equal(k.move, 'spikes'); assert.equal(k.killer, null);
   assert.equal(S.getPlayer(w, 2).deaths, 1); assert.equal(S.getPlayer(w, 1).score, 0);
@@ -247,7 +249,7 @@ test('spikes: instant kill, credited to the last hitter within 5 s', () => {
   swing(w, 1);
   assert.equal(S.getPlayer(w, 2).lastHitBy, 1);
   onSpikes(w, 2);
-  ev = run(w, 3);
+  ev = run(w, 3, undefined, SP);
   k = ev.find(e => e.type === 'kill');
   assert.equal(k.killer, 1); assert.equal(k.move, 'spikes');
   assert.equal(S.getPlayer(w, 1).score, 1);
@@ -257,7 +259,7 @@ test('spikes: instant kill, credited to the last hitter within 5 s', () => {
   swing(w, 1);
   run(w, DEFAULTS.creditTicks + 5);
   onSpikes(w, 2);
-  ev = run(w, 3);
+  ev = run(w, 3, undefined, SP);
   assert.equal(ev.find(e => e.type === 'kill').killer, null);
   assert.equal(S.getPlayer(w, 1).score, 0);
 });

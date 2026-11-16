@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import * as S from '../shared/sim.js';
 import { KEY, DEFAULTS, LONG_REACH, ITEM_H } from '../shared/constants.js';
 import { LEVEL } from '../shared/level.js';
+import { SPIKE_LEVEL } from './spikelevel.js';
 
 const FLOOR_Y = 272 - 13;
 const NO_SPAWN = 1e9;     // itemT far in the future: no pickup appears during a test
@@ -207,10 +208,10 @@ test('lost on death (sword, spikes, leave); standard reach after respawn; kill f
   place(w, 1, 100, FLOOR_Y); const v2 = place(w, 2, 112, FLOOR_Y); v2.hp = 10;
   kill = swing(w, 1).find(e => e.type === 'kill');
   assert.equal('long' in kill, false); assert.equal('held' in kill, false);
-  // spikes
+  // spikes (on the test level: the shipped arena has none)
   w = world(1);
   const s = place(w, 1, 196, 272 - 13); s.long = true; s.onGround = false;
-  kill = run(w, 2).find(e => e.type === 'kill');
+  kill = run(w, 2, undefined, { level: SPIKE_LEVEL }).find(e => e.type === 'kill');
   assert.equal(kill.move, 'spikes'); assert.equal(kill.held, true); assert.equal('long' in kill, false);
   assert.equal(s.long, false);
   // leave (killed for leaving, then removed): gone; the same id rejoining has the standard sword

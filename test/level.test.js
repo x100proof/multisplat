@@ -16,23 +16,23 @@ test('arena is closed: walls left and right, floor and ceiling', () => {
   for (let x = 0; x < L.w; x++) { assert.ok(isSolid(L, x, L.h - 1), `floor col ${x}`); assert.ok(isSolid(L, x, 0), `ceiling col ${x}`); }
 });
 
-test('3-4 tiers of platforms above the floor', () => {
-  const rows = new Set();
-  for (let y = 1; y < L.h - 1; y++) for (let x = 1; x < L.w - 1; x++) if (isSolid(L, x, y) || isPlat(L, x, y)) rows.add(y);
-  assert.ok(rows.size >= 3 && rows.size <= 4, `platform rows: ${[...rows]}`);
-});
-
-test('two short spike strips', () => {
-  const strips = [];
-  L.grid.forEach((row, y) => { for (const m of row.matchAll(/\^+/g)) strips.push({ y, x: m.index, n: m[0].length }); });
-  assert.equal(strips.length, 2);
-  for (const s of strips) {
-    assert.ok(s.n <= 3, 'short');
-    for (let x = s.x; x < s.x + s.n; x++) assert.ok(isSolid(L, x, s.y + 1), 'spikes sit on something solid');
+test('3-4 tiers of platforms above the floor, and a low block on the floor', () => {
+  // a tier is a row of platforms with room to stand under it; the rows just above the floor only
+  // hold the low centre block, which is a step, not a tier
+  const rows = new Set(), low = [];
+  for (let y = 1; y < L.h - 1; y++) for (let x = 1; x < L.w - 1; x++) if (isSolid(L, x, y) || isPlat(L, x, y)) {
+    if (y < L.h - 2) rows.add(y); else low.push([x, y]);
   }
+  assert.ok(rows.size >= 3 && rows.size <= 4, `platform rows: ${[...rows]}`);
+  assert.ok(low.length >= 1 && low.length <= 3, 'a short, one-tile block on the floor');
+  for (const [x] of low) assert.ok(x > 3 && x < L.w - 4, 'away from the walls');
 });
 
-test('at least 10 spawn points, each on solid footing, clear of walls and spikes', () => {
+test('no spike traps in the shipped arena (SPEC §3)', () => {
+  for (const row of L.grid) assert.ok(!row.includes('^'), 'spikes in ' + row);
+});
+
+test('at least 10 spawn points, each on solid footing, clear of walls', () => {
   assert.ok(L.spawns.length >= 10);
   for (const s of L.spawns) {
     const p = spawnPos(s), l = Math.floor(p.x / T), r = Math.floor((p.x + PW - .01) / T);
@@ -42,9 +42,6 @@ test('at least 10 spawn points, each on solid footing, clear of walls and spikes
       assert.ok(isSolid(L, tx, fy) || isPlat(L, tx, fy), `footing under ${s.x},${s.y}`);
       for (let ty = Math.floor(p.y / T); ty < fy; ty++) assert.ok(!isSolid(L, tx, ty), `body clear at ${s.x},${s.y}`);
     }
-    // no spike anywhere below the spawn (columns it spans, plus one either side), nor beside it
-    for (let tx = l - 1; tx <= r + 1; tx++) for (let ty = Math.floor(p.y / T); ty < L.h; ty++)
-      assert.notEqual(tileAt(L, tx, ty), '^', `spike under/beside spawn ${s.x},${s.y}`);
   }
 });
 
@@ -72,7 +69,7 @@ test('pickSpawn favours far points', () => {
   assert.ok(far > 300, `right half chosen ${far}/500`);
 });
 
-test('long-sword item points: >= 6, on every tier, on footing, clear of spikes, reachable', () => {
+test('long-sword item points: >= 6, on every tier, on footing, distinct, reachable', () => {
   const pts = L.items;
   assert.ok(pts.length >= 6);
   const standable = (tx, ty) => isSolid(L, tx, ty) || isPlat(L, tx, ty);
@@ -87,7 +84,6 @@ test('long-sword item points: >= 6, on every tier, on footing, clear of spikes, 
     for (let tx = l; tx <= r; tx++) {
       assert.ok(standable(tx, ty), `footing under ${key}`);
       for (let y = Math.floor((p.y - Math.max(ITEM_H, PH)) / T); y < ty; y++) assert.equal(tileAt(L, tx, y), '.', `air at ${key}`);
-      for (let y = 0; y < L.h; y++) assert.notEqual(tileAt(L, tx, y), '^', `no spikes in the column of ${key}`);
     }
     // reachable: a spawn on the same surface, connected by walkable tiles with headroom
     const s = L.spawns.find(sp => sp.y === p.y && (() => {

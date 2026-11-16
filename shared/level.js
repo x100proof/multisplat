@@ -1,5 +1,7 @@
 // The arena: 26 x 18 tiles (416 x 288 units), closed on every side.
 // Tile codes are NinjaRunner's: '#' ground, 'B' block, '=' one-way plank, '^' spikes, '.' air.
+// The shipped arena has no spikes (SPEC §3): the only way to die is another player. The sim still
+// supports '^' (tests use a level of their own).
 import { T, PW, PH } from './constants.js';
 
 const MAP = [
@@ -8,7 +10,7 @@ const MAP = [
   '#........................#', //  2
   '#...=====........=====...#', //  3 tier 4: high planks
   '#........................#', //  4
-  '#...........^^...........#', //  5 spikes on top of the centre block
+  '#........................#', //  5
   '#BBB.......BBBB.......BBB#', //  6 tier 3: wall ledges + centre block
   '#........................#', //  7
   '#........................#', //  8
@@ -19,7 +21,7 @@ const MAP = [
   '#BBBB....==....==....BBBB#', // 13 tier 1: wall ledges + small planks
   '#........................#', // 14
   '#........................#', // 15
-  '#...........^^...........#', // 16 spikes on the floor, centre
+  '#...........BB...........#', // 16 a low block in the middle of the floor
   '##########################', // 17 floor
 ];
 
@@ -30,16 +32,19 @@ const SPAWNS = [
   [120, 144], [296, 144],                          // tier 2
   [40, 96], [376, 96],                             // tier 3
   [104, 48], [312, 48],                            // tier 4
+  [192, 96],                                       // tier 3: the centre block
 ].map(([x, y]) => ({ x, y }));
 
 // Long-sword item points (SPEC §5.1), given like spawns: x = centre, y = top of the surface the
-// pickup lies on. Two per surface level, none on or above the spike columns (12-13).
+// pickup lies on. Two per surface level, plus one on the centre block. Indexes are stable (tests pin
+// pickups to points by index).
 const ITEMS = [
-  [72, 272], [344, 272],     // floor, either side of the floor spikes
+  [72, 272], [344, 272],     // floor, either side of the low centre block
   [152, 208], [264, 208],    // tier 1: the small planks
   [168, 144], [248, 144],    // tier 2: inner ends of the long planks
   [56, 96], [360, 96],       // tier 3: wall ledges
   [136, 48], [280, 48],      // tier 4: high planks
+  [208, 96],                 // tier 3: the centre block
 ].map(([x, y]) => Object.freeze({ x, y }));
 
 export const LEVEL = Object.freeze({

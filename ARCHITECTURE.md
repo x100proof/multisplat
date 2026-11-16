@@ -1,12 +1,13 @@
 # multisplat: architecture (as implemented)
 
-Status: **M5**. This covers:
+Status: **M6** (in progress). This covers:
 - the shared simulation and the arena (M1),
 - the authoritative WebSocket server, with lobby, queue, resume and lag compensation,
 - the online client, with prediction and interpolation,
 - the remote-debugging pipeline (M2),
 - client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3),
-- long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX.
+- long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX,
+- M6 changes: leaving with Escape, no spike traps in the arena (§3).
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -65,15 +66,18 @@ from `/shared/*.js`.
 
 `LEVEL = {w: 26, h: 18, grid: string[], spawns: [{x, y}]}`. Tiles use NinjaRunner's codes (`#`, `B`, `=`, `^`, `.`).
 The arena has a solid border on all four sides (including a ceiling). Above the floor there are four
-platform tiers, at rows 13, 9, 6 and 3. Two 2-tile spike strips sit in the centre: one on the floor
-and one on top of the centre block. There are 14 spawn points. Each one is given as a feet position:
+platform tiers, at rows 13, 9, 6 and 3. There are **no spikes** (SPEC §3): the only way to die is
+another player. A low 2×1 block sits in the middle of the floor (columns 12–13), a step to jump or
+fight over. The sim still supports the `^` tile; tests that need it use `test/spikelevel.js`, a copy of
+the arena with spike strips on the floor and on the centre block. There are 15 spawn points (one on
+the centre block). Each one is given as a feet position:
 x is the centre and y is the top of the tile stood on.
 
 - `isSolid(L, tx, ty)` and `isPlat` are NinjaRunner's tile tests. `tileAt` returns the tile code.
-- `LEVEL.items`: 10 long-sword item points, given like spawns (x centre, y the surface top), two per
-  surface level (floor and the four tiers), none in the spike columns 12–13. Each lies on the same
-  walkable surface as a spawn point (a test checks footing, headroom, no spikes in the column and the
-  walk from that spawn).
+- `LEVEL.items`: 11 long-sword item points, given like spawns (x centre, y the surface top), two per
+  surface level (floor and the four tiers) plus one on the centre block (index 10; indexes are stable
+  because `ITEM_POINTS` pins pickups by index). Each lies on the same walkable surface as a spawn point
+  (a test checks footing, headroom and the walk from that spawn).
 - `spawnPos(s)` gives the top-left of a body standing on spawn point `s`.
 - `pickSpawn(L, living, rand, minDist)` skips points within `minDist` of a living player. It weights
   the remaining points by the squared distance to the nearest living player. If every point is too
@@ -601,7 +605,8 @@ editable physics.
   with "you are #n of m waiting" under it while queued, and `RECONNECTING…`. Name tags
   (`drawNameTag`, `(away)` during a grace period) and HP bars float over every player.
   `hudCommon` (both modes):
-  - the kill feed: `A ✂ B` in the players' colours, `▲ B (spikes)` / `✕ B (left)` without a
+  - the kill feed: `A ✂ B` in the players' colours, `▲ B (spikes)` (only on a level with spikes;
+    the shipped arena has none, so spike drawing and stains never show) / `✕ B (left)` without a
     killer, last 5, held 5 s then faded over 1.5 s;
   - the scoreboard while Tab is held: every player by kills, with deaths and the queue length;
   - on touch screens a small always-visible top 3, top right (the feed moves above the buttons).
@@ -647,7 +652,7 @@ editable physics.
   - movement (run, variable jump, buffer, coyote),
   - collision (symmetric push, no pass-through, wall, head-standing and riding),
   - combat (chop, sweep, per-swing once, stun, kill, score, respawn, spawn invulnerability, trades),
-  - spike credit (none, recent hitter, expired),
+  - spike credit (none, recent hitter, expired), on `SPIKE_LEVEL`,
   - `slashHits` and rewound `step`, history interpolation,
   - `predictStep` matching `step`.
 - `gore.test.js`: no DOM, `Math.random` or trig in the source; same seed → identical drops,
@@ -658,10 +663,11 @@ editable physics.
 - `music.test.js`: 150–160 BPM and a 4–8 bar loop; 16th bass, four-on-the-floor kick, snare on 2
   and 4, offbeat hats; every pitched note in E minor (D# only over B); the riff varies; the
   intensity layer's extra percussion; `analyze` on a synthetic click loop (tempo, seam).
-- `level.test.js`: size and tile codes, closed border, 3–4 tiers, two short spike strips, ≥10
-  spawns with footing and no spikes below or beside them, `pickSpawn` distance and weighting, and the
-  item points (≥6, every surface level, footing, headroom, no spikes in their columns, walkable from a
-  spawn).
+- `level.test.js`: size and tile codes, closed border, 3–4 tiers plus the low floor block, **no
+  spikes**, ≥10 spawns with footing, `pickSpawn` distance and weighting, and the item points (≥6,
+  every surface level, footing, headroom, walkable from a spawn).
+- `spikelevel.js` (a helper, not a test): `SPIKE_LEVEL`, the arena with spike strips, used by the
+  spike tests in `sim.test.js`, `items.test.js` and `gore.test.js`.
 - `items.test.js`: the spawn window (40 seeds, gaps within 20–40 s and spread over it) and the max-2
   rule; the countdown holding while full; free-point selection away from players and pickups (and
   retrying when none is free); determinism with pickups (6 players, serialized state and events, and
@@ -708,7 +714,8 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   Chromium comes from `PLAYWRIGHT_CHROMIUM`, playwright's own lookup, or the newest build in its
   cache. The test:
   - joins 3 players (Ash, Bea, Cy),
-  - drives Ash and Bea with `test/bot.js` (down to the floor, meet on the left half, slash) until
+  - drives Ash and Bea with `test/bot.js` (down to the floor, jump the low centre block, meet on the
+    left half, slash) until
     one kills the other; Cy parks on the right,
   - asserts the kill feed shows `killer ✂ victim` on all pages (`⚔` if a fighter had picked up a long
     sword on the way),
@@ -725,8 +732,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
     a lobby viewer: a `fetch` bot walks onto a pickup; every page sees the `pickup` event and the
     holder's flag (and draws its reach ×1.6); the other player is parked by the left wall and a `spar`
     bot slashes only from 31 units (beyond standard reach) and hits, then kills, and every feed shows
-    `Hold ⚔ Opp`; the holder walks into the spikes (`kill.held`), and after the respawn every page has
-    it back to the standard sword; `tools/debug.js state` lists the pickups,
+    `Hold ⚔ Opp`; the respawned opponent then comes down in `fight` mode and kills the standing holder
+    with its sword (`kill.held`, killer and move checked), and after the respawn every page has it back
+    to the standard sword; `tools/debug.js state` lists the pickups,
   - asserts no page errors.
 - `npm run test:all` runs everything.
 - `hygiene.js` (also run through `hygiene.test.js`) scans `git ls-files` plus untracked,

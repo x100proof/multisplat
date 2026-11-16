@@ -1,12 +1,12 @@
 // A scripted player for the browser tests. Its source is injected into a page and set as
 // window.__mp.autopilot, which game.js calls once per tick with (predicted me, drawn players).
 // Plan: get down to the floor (walk off the outer edge of each platform, or the inner edge if the
-// platform touches a wall), then either fight on the left half of the floor (jumping the centre
-// spike strip if needed) or park on the right half.
+// platform touches a wall), then either fight on the left half of the floor (jumping the low centre
+// block if needed) or park on the right half.
 // Long-sword modes (all on the floor): 'fetch' walks to the nearest pickup lying on the floor,
 // 'goto' walks to x, 'spar' keeps `dist` units (centre to centre) from target and slashes only
-// from there (beyond standard reach, inside long reach), 'spikes' walks into the floor spikes.
-//   window.__botCfg = { mode: 'fight' | 'park' | 'pace' | 'fetch' | 'goto' | 'spar' | 'spikes', target: id, x, dist }
+// from there (beyond standard reach, inside long reach).
+//   window.__botCfg = { mode: 'fight' | 'park' | 'pace' | 'fetch' | 'goto' | 'spar', target: id, x, dist }
 export function bot(me, players) {
   const cfg = window.__botCfg || {}, L = window.__mp.level, T = 16;
   const K = { L: 1, R: 2, J: 4, RUN: 8, S: 16 };
@@ -15,7 +15,7 @@ export function bot(me, players) {
   if (!me.alive) return 0;
   if (cfg.mode === 'pace') {
     // Walk back and forth, turning every so often (the period depends on the id, so two pacers
-    // don't turn in step), at walls, before spikes and before another player: pacing is for
+    // don't turn in step), at walls, before a block and before another player: pacing is for
     // measuring walking prediction, not body contact, which prediction cannot know about.
     const ahead = Math.floor((me.x + me.w / 2 + st.pace * 14) / T), row = Math.floor((me.y + me.h - 1) / T);
     const blocked = players.some(o => o.id !== me.id && o.alive && Math.abs(o.y - me.y) < 14 &&
@@ -25,7 +25,7 @@ export function bot(me, players) {
       st.pace = c && c.face > 0 ? -1 : 1;
     } else if (me.x < 24) st.pace = 1;
     else if (me.x > L.w * T - 34) st.pace = -1;
-    else if (st.t % (60 + (me.id % 4) * 17) === 0 || blocked || (me.onGround && L.grid[row] && L.grid[row][ahead] === '^')) st.pace = -st.pace;
+    else if (st.t % (60 + (me.id % 4) * 17) === 0 || blocked || (me.onGround && L.grid[row] && L.grid[row][ahead] === 'B')) st.pace = -st.pace;
     return st.pace < 0 ? K.L : K.R;
   }
   const dirKey = d => (d < 0 ? K.L : K.R);
@@ -55,7 +55,6 @@ export function bot(me, players) {
     if (d > 0 && r >= L.w - 2) d = -1;
     return go(dirKey(d));
   }
-  if (cfg.mode === 'spikes') return go(dirKey(208 - cx));
   if (cfg.mode === 'fetch' || cfg.mode === 'goto' || cfg.mode === 'spar') {
     let tx = cfg.x ?? cx, tol = 1.5;
     if (cfg.mode === 'fetch') {
@@ -89,7 +88,7 @@ export function bot(me, players) {
     if (Math.abs(cx - tx) <= tol) return 0;
     return Math.abs(cx - tx) < 8 ? (st.t % 4 ? 0 : dirKey(tx - cx)) : go(dirKey(tx - cx));   // ease in with taps
   }
-  // on the floor: cross the spike strip (x 192..224) with a running jump if on the wrong side
+  // on the floor: cross the low centre block (x 192..224) with a running jump if on the wrong side
   const side = cfg.mode === 'park' ? 1 : -1;
   if (half !== side) {
     const k = dirKey(side) | K.RUN;

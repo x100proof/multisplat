@@ -176,9 +176,11 @@
   body.touchui #watch { top: auto; bottom: max(8px, env(safe-area-inset-bottom)); max-width: calc(100% - 24px); }   /* the thumb buttons are hidden */
   #watch .touchhelp, body.touchui #watch .keyshelp { display: none; }
   body.touchui #watch .touchhelp { display: inline; }
-  #wLobby { pointer-events: auto; flex: none; min-width: 44px; min-height: 44px; padding: 0 .8em; font: inherit; font-weight: 800; cursor: pointer;
+  #wLeader { display: none; }   /* touch only (keys have ↓), and only while someone else is chosen */
+  body.touchui #wLeader.on { display: block; }
+  #wLobby, #wLeader { pointer-events: auto; flex: none; min-width: 44px; min-height: 44px; padding: 0 .8em; font: inherit; font-weight: 800; cursor: pointer;
             color: #05d9e8; background: rgba(0,0,0,.45); border: 2px solid #05d9e8; border-radius: 6px; touch-action: manipulation; }
-  #wLobby:hover { background: rgba(5,217,232,.15); }
+  #wLobby:hover, #wLeader:hover { background: rgba(5,217,232,.15); }
   body.watching #help, body.watching #tChat, body.touchui.watching #touch { display: none; }
   body.touchui #howto p .touchonly { display: inline; }   /* the How to play "Watching" text (rows use table-row) */
   body.watching #strip .chip.watched { border-color: #f9f871; box-shadow: 0 0 6px rgba(249,248,113,.6); color: #fff; }
@@ -278,7 +280,7 @@
   <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button><button id="tChat" aria-label="Chat">💬</button></div>
   <div id="watch" class="hidden"><div class="txt"><div><span class="tag">WATCHING</span> <span id="wWho"></span><span id="wWhy"></span></div>
     <div class="hint"><span class="keyshelp">Click a ninja to follow them · ← → switch · ↓ leader · Esc lobby</span><span class="touchhelp">Tap a ninja to follow them</span></div></div>
-    <button id="wLobby" type="button" aria-label="Back to the lobby">LOBBY</button></div>
+    <button id="wLeader" type="button" aria-label="Follow the leader">LEADER</button><button id="wLobby" type="button" aria-label="Back to the lobby">LOBBY</button></div>
   <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · C chat · D debug · F full screen · Esc leave · H how to play</div>
 </div>
 <div id="touch">
@@ -317,7 +319,7 @@
     <h3>Ninja stars</h3>
     <p>Spinning stars appear often. Each pickup gives 3, and you can carry 9. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
     <h3>Watching</h3>
-    <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the arena is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
+    <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the arena is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, and the Leader button to go back to following the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
     <h3>Privacy</h3>
     <p>To help fix problems, the server keeps the last hour of diagnostic logs from your browser (no keystrokes or chat text), with your IP address, your name and the id shown in the lobby.</p>
     <div class="foot"><span>The fight carries on while this is open.</span><button id="hwClose">Close</button></div>

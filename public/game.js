@@ -1821,8 +1821,11 @@ function watchHud() {
   setText('wWhy', m ? (watchChosen != null ? '' : ' (the leader)') : ' · nobody is fighting yet');
   const col = m ? PALETTE[m.color] || '#fff' : '#d1f7ff';
   if (watchHud.col !== col) { watchHud.col = col; document.getElementById('wWho').style.color = col; }
+  const lead = watchChosen != null;                          // the touch LEADER button: only while someone else is chosen
+  if (watchHud.lead !== lead) { watchHud.lead = lead; document.getElementById('wLeader').classList.toggle('on', lead); }
 }
 document.getElementById('wLobby').addEventListener('click', () => watch(false));
+document.getElementById('wLeader').addEventListener('click', () => { watchChosen = null; watchTarget(); dbg('life', 'watch: leader', {}); });
 
 // ---------- chat (SPEC §9): C opens a one-line box, Enter sends, Escape cancels ----------
 // Incoming lines show as a speech bubble above the speaker (canvas text) and in a small list at the

@@ -631,7 +631,8 @@ Watch the fight without joining, and follow any ninja.
   drawn (interpolated) living ninjas, body or name tag, within 6 units for a mouse and 14 for a
   finger (about a fingertip on a phone), nearest wins; it works on a phone held upright (the turned
   stage). A click on the arena away from everyone changes nothing (removed at the user's request;
-  ↓ goes back to the leader). A followed ninja is kept
+  ↓ goes back to the leader, and on touch a LEADER button beside LOBBY, shown only while another
+  ninja is chosen). A followed ninja is kept
   through death and respawn; when it leaves the arena the watcher falls back to the leader. **← →**
   step through the ninjas in score order, **↓** goes back to the leader. All of this is local to the
   page; nothing is sent.

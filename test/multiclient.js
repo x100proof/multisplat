@@ -1,6 +1,8 @@
 // Headless multi-client test (SPEC §12): three browsers in one arena, a scripted fight to the death,
 // kill/score/respawn seen on every page, a drop and resume that keeps the score, a manual debug
-// report read back through tools/debug.js, and prediction error under NET_SIM=120,2.
+// report read back through tools/debug.js, prediction error under NET_SIM=120,2, and a long-sword
+// pickup (ITEM_SECS / ITEM_POINTS shorten the spawn timer and keep pickups on the floor) that
+// every page sees, that lengthens the holder's reach in a scripted check and is lost on death.
 //
 //   node test/multiclient.js            (Chromium from $PLAYWRIGHT_CHROMIUM or playwright's cache)
 import assert from 'node:assert/strict';
@@ -76,12 +78,15 @@ async function fightTest() {
   const killer = all.find(p => p.id === kill.killer), victim = all.find(p => p.id === kill.victim);
   const ki = ids.indexOf(killer.id), vi = ids.indexOf(victim.id);
 
-  // the kill feed shows "killer ✂ victim" on every page (it fades after ~6 s, so check it first)
+  // the kill feed shows "killer ✂ victim" on every page (it fades after ~6 s, so check it first).
+  // A fighter may have walked over a long-sword pickup on the way (they spawn in this test too):
+  // a long-sword kill is marked ⚔ instead.
+  const sym = kill.long ? '⚔' : '✂';
   for (const p of all) {
-    await waitFor(() => p.page.evaluate(([k, v]) => __mp.feed.some(t => t.includes(k) && t.includes('✂') && t.includes(v)), [killer.name, victim.name]),
+    await waitFor(() => p.page.evaluate(([k, v, sym]) => __mp.feed.some(t => t.includes(k) && t.includes(sym) && t.includes(v)), [killer.name, victim.name, sym]),
       { timeout: 3000, what: `kill feed on ${p.name}` });
   }
-  log(`kill feed "${killer.name} ✂ ${victim.name}" on all 3 pages`);
+  log(`kill feed "${killer.name} ${sym} ${victim.name}" on all 3 pages`);
 
   // kill event, score increment and respawn on every page
   await sleep(2600);   // respawn delay is 2 s, plus the 100 ms interpolation delay
@@ -185,11 +190,97 @@ async function predictionTest() {
   await srv.stop();
 }
 
+// Long swords (SPEC §5.1): pickups every 1-2 s, only at the two floor item points.
+async function longSwordTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir, ITEM_SECS: '1,2', ITEM_POINTS: '0,1' }); servers.push(srv);
+  const H = await openPlayer(srv, 'Hold', 3), O = await openPlayer(srv, 'Opp', 6);
+  // a third page that only watches from the lobby (spectators get the same snapshots and events)
+  const wctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const W = { page: await wctx.newPage(), name: 'Watch' };
+  W.page.on('pageerror', e => errors.push(`Watch: ${e.message}`));
+  await W.page.goto(srv.url);
+  await W.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const all = [H, O, W];
+  const drawn = (p, id) => p.page.evaluate(id => {
+    const q = __mp.state.players.find(p => p.id === id);
+    return q ? { alive: q.alive, long: !!q.long, reach: __mp.sim.swordBoxOf({ ...q, atkType: 'chop' }).w } : null;
+  }, id);
+
+  // the holder fetches a pickup lying on the floor; the other stands still where it spawned
+  await waitFor(() => H.page.evaluate(() => (__mp.state.items || []).length > 0), { timeout: 10000, what: 'a pickup appears' });
+  await installBot(H.page, { mode: 'fetch' });
+  const pick = await waitFor(() => H.page.evaluate(id => __mp.events.find(e => e.type === 'pickup' && e.id === id), H.id),
+    { timeout: 30000, every: 200, what: 'Hold picks up a long sword' });
+  await stopBot(H.page);
+  log(`pickup: ${H.name} took item ${pick.item} at ${pick.x},${pick.y}`);
+  for (const p of all) {
+    await waitFor(() => p.page.evaluate(([id, item]) => __mp.events.some(e => e.type === 'pickup' && e.id === id && e.item === item), [H.id, pick.item]),
+      { timeout: 3000, what: `pickup event on ${p.name}` });
+    const h = await waitFor(async () => { const d = await drawn(p, H.id); return d && d.long ? d : null; }, { timeout: 3000, what: `holder flag on ${p.name}` });
+    assert.ok(Math.abs(h.reach - 18 * 1.6) < 1e-9, `${p.name} draws the holder's reach x1.6`);
+    const o = await drawn(p, O.id);
+    assert.equal(o.long, false); assert.equal(o.reach, 18);
+  }
+  assert.equal(await H.page.evaluate(() => __mp.net.me.long), true, 'the holder\'s own (predicted) player has the flag from `me`');
+  assert.ok((await H.page.evaluate(() => __mp.debug.entries())).some(e => e.cat === 'life' && e.msg === 'long sword taken'));
+  log('pickup event and holder flag on all 3 pages, reach x1.6');
+
+  // reach: the other player stands on the floor by the left wall (x 36: knockback can't throw it
+  // into the spikes); the holder slashes only from 31 units (centre to centre), beyond standard
+  // reach (26) but inside long reach (36.8), and hits
+  await installBot(O.page, { mode: 'goto', x: 36 });
+  await waitFor(() => O.page.evaluate(() => { const m = __mp.net.me; return m && m.onGround && m.y > 250 && Math.abs(m.x + 5 - 36) < 3; }),
+    { timeout: 30000, every: 200, what: 'Opp at x 36 on the floor' });
+  await stopBot(O.page);
+  await installBot(H.page, { mode: 'spar', target: O.id, dist: 31 });
+  const hit = await waitFor(() => H.page.evaluate(([a, v]) => __mp.events.find(e => e.type === 'hit' && e.attacker === a && e.victim === v), [H.id, O.id]),
+    { timeout: 30000, every: 100, what: 'a long-reach hit' });
+  const dist = await H.page.evaluate(() => window.__botState.lastSlashDist);
+  log(`long-reach hit: slashed from ${dist.toFixed(1)} units (standard reach ends at 26), ${hit.move} for ${hit.dmg}`);
+  assert.ok(dist > 27, `the hit came from beyond standard reach (${dist})`);
+  // keep sparring to the kill: the feed marks it as a long-sword kill everywhere
+  const lk = await waitFor(() => H.page.evaluate(([a, v]) => __mp.events.find(e => e.type === 'kill' && e.killer === a && e.victim === v), [H.id, O.id]),
+    { timeout: 30000, every: 100, what: 'a long-sword kill' });
+  await stopBot(H.page);
+  assert.ok(lk.move === 'chop' || lk.move === 'sweep', 'killed by the sword, not ' + lk.move);
+  assert.equal(lk.long, true, 'kill event marked long');
+  for (const p of all) {
+    await waitFor(() => p.page.evaluate(([k, v]) => __mp.feed.some(t => t.includes(k) && t.includes('⚔') && t.includes(v)), [H.name, O.name]),
+      { timeout: 3000, what: `long-sword kill feed on ${p.name}` });
+  }
+  log(`kill feed "${H.name} ⚔ ${O.name}" on all 3 pages`);
+
+  // the holder dies (walks into the floor spikes): standard sword again on every page
+  await installBot(H.page, { mode: 'spikes' });
+  const death = await waitFor(() => H.page.evaluate(id => __mp.events.find(e => e.type === 'kill' && e.victim === id), H.id),
+    { timeout: 30000, every: 100, what: 'the holder dies' });
+  await stopBot(H.page);
+  assert.equal(death.held, true, 'kill event says the victim held a long sword');
+  for (const p of all) {
+    const h = await waitFor(async () => { const d = await drawn(p, H.id); return d && d.alive ? d : null; }, { timeout: 6000, what: `holder respawn on ${p.name}` });
+    assert.equal(h.long, false, `${p.name}: no long sword after death`); assert.equal(h.reach, 18);
+  }
+  const me = await H.page.evaluate(() => ({ long: __mp.net.me.long, w: __mp.sim.swordBoxOf({ ...__mp.net.me, atkType: 'chop' }).w }));
+  assert.equal(me.long, false); assert.equal(me.w, 18);
+  assert.ok((await H.page.evaluate(() => __mp.debug.entries())).some(e => e.cat === 'life' && e.msg === 'long sword lost'));
+  log(`holder died (${death.move}) and is back to the standard sword on all 3 pages`);
+
+  // admin state lists pickups and holders
+  const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
+    (e, so) => (e ? rej(e) : res(so))));
+  assert.match(st, /long-sword pickups \(\d\): #\d+ at/);
+  log('tools/debug.js state: ' + st.split('\n').find(l => l.startsWith('long-sword')));
+  for (const p of all) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
     await fightTest();
     await predictionTest();
+    await longSwordTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

@@ -1650,13 +1650,13 @@ function setupLobby() {
   markColor();
   document.getElementById('lFight').addEventListener('click', fight);
   document.getElementById('lWatch').addEventListener('click', () => watch(true));   // SPEC §16: no name, no slot
-  // Rooms (SPEC §17): pick one from the list (the server then sends its roster, snapshots and events),
-  // go back to the plain list, create one, rename ours (admin).
+  // Rooms (SPEC §17): two screens. Tapping a room in the list opens its screen (the server then sends
+  // its roster, snapshots and events); ← Rooms goes back to the list; create one; rename ours (admin).
   document.getElementById('lRoomList').addEventListener('click', e => {
     const b = e.target.closest('button[data-room]');
-    if (b && net.mode === 'viewer') net.viewRoom(+b.dataset.room);
+    if (b && net.mode === 'viewer') { showNotice(''); net.viewRoom(+b.dataset.room); }
   });
-  document.getElementById('lBack').addEventListener('click', () => { if (net.mode === 'viewer') net.viewRoom(0); });
+  document.getElementById('lBack').addEventListener('click', backToRooms);
   document.getElementById('lCreate').addEventListener('click', createRoom);
   document.getElementById('lRenameBtn').addEventListener('click', () => renameRoom('lRenameIn'));
   document.getElementById('lvRenameBtn').addEventListener('click', () => renameRoom('lvRenameIn'));
@@ -1698,13 +1698,13 @@ function closeLobby() {
   snapCamera();
 }
 
-// FIGHT joins the selected room (SPEC §17). A page already in that room (its creator, who lands in
-// the lobby of its new room) just goes back to the fight.
+// FIGHT joins the room whose screen is open (SPEC §17); its pending admin (the creator) joins and stays
+// admin. A page already in that room just goes back to the fight.
 function fight() {
   if (!lobbyOpen) return;
   if (net.mode !== 'viewer') { initAudio(); goLandscape(); closeLobby(); return; }
   const room = net.lobby.room;
-  if (!room) { document.getElementById('lErr').textContent = 'Pick a room first, or create one.'; return; }
+  if (!room) return;   // the room list: nothing to fight in
   const name = lobbyName();
   if (!name) return;
   initAudio();
@@ -1712,18 +1712,27 @@ function fight() {
   net.join(name, pickedColor, room);
   closeLobby();
 }
-// Create room: the lobby stays open on the new room, so its admin can name it and add AI players
-// first; FIGHT then goes in. The server may refuse (10 rooms, 2 per address, rate, a bad name).
+// Create a room: it does not join. We are its admin and land on its screen (the server's lobby
+// message names it), where we can name it and add AI players before FIGHT. The server may refuse
+// (10 rooms, 2 per address, rate, a bad name). Our remembered player name, if any, goes along for the
+// default room name and the list.
 function createRoom() {
-  if (!lobbyOpen || net.mode !== 'viewer') return;
-  const name = lobbyName();
-  if (!name) return;
+  if (!lobbyOpen || net.mode !== 'viewer' || net.lobby.room) return;
   const raw = document.getElementById('lRoomName').value.trim();
   const rname = raw ? cleanRoomName(raw) : '';
-  if (rname === null) { document.getElementById('lErr').textContent = ROOM_NAME_RULE; return; }
+  if (rname === null) { showNotice(ROOM_NAME_RULE); return; }
+  showNotice('');
   initAudio();
-  net.create(name, pickedColor, rname);
+  net.create(rname, cleanName(lsGet(LS_NAME) || '') || undefined);
   document.getElementById('lRoomName').value = '';
+}
+// ← Rooms: back to the room list. Leaving the screen of a room we created and nobody has joined
+// closes it; with others in it we must make someone admin first (the server refuses too).
+function backToRooms() {
+  if (!lobbyOpen || net.mode !== 'viewer') return;
+  if (net.isAdmin() && otherHumans().length) { showNotice('Make someone admin first.'); return; }
+  showNotice('');
+  net.viewRoom(0);
 }
 const ROOM_NAME_RULE = "Room name: 1–20 letters, digits, space, ' _ or -";
 function renameRoom(inputId) {
@@ -1790,55 +1799,57 @@ function rosterRow(p, { score = true, me = false, prefix = '' } = {}) {
   if (score) { const sc = document.createElement('span'); sc.className = 'sc'; sc.textContent = String(p.score); li.appendChild(sc); }
   return li;
 }
-// The AI row (lobby and Esc menu): − / + for the admin only; everyone else sees the count read-only.
+// The AI row (lobby and Esc menu): − / + for the admin only; everyone else sees the count read-only
+// (and no row at all when there are none).
 function renderBots(pre) {
   const { bots = 0, botMax = 7, players = [], cap } = net.lobby, admin = net.isAdmin();
   setText(pre + 'BotN', String(bots));
   document.getElementById(pre + 'BotDec').disabled = !admin || bots <= 0;
   document.getElementById(pre + 'BotInc').disabled = !admin || bots >= botMax || players.length >= cap;
   for (const k of ['BotDec', 'BotInc']) document.getElementById(pre + k).classList.toggle('hidden2', !admin);
-  setText(pre + 'BotRO', admin ? '' : '(the admin sets this)');
+  document.getElementById(pre + 'Bots').classList.toggle('hidden2', !admin && !bots);
+  setText(pre + 'BotRO', '');
 }
 
+// Two screens (SPEC §17): the room list with Create a room under it while we look at no room; the
+// room's own screen (name, colour, FIGHT / WATCH, its roster, the admin's controls) while we do.
 function renderLobby() {
   if (!ONLINE) return;
   markColor();
   const { rooms = [], maxRooms = ROOM.max, room, rname, players, queue, cap } = net.lobby;
   const member = net.mode !== 'viewer';
-  // the room list: one button per room (name, admin, fighters/slots, watchers); selected = pressed
-  const rl = document.getElementById('lRoomList');
-  if (sameList(rl, [member, room, rooms])) {} else for (const r of rooms) {
-    const li = document.createElement('li'), b = document.createElement('button');
-    b.type = 'button'; b.dataset.room = r.id; b.setAttribute('aria-pressed', String(r.id === room)); b.disabled = member && r.id !== room;
-    const nm = document.createElement('span'); nm.className = 'rn'; nm.textContent = r.name;
-    const ad = document.createElement('span'); ad.className = 'ra'; ad.textContent = r.admin ? `★ ${r.admin}` : '';
-    const ct = document.createElement('span'); ct.className = 'rc'; ct.textContent = `${r.n}/${r.cap}` + (r.q ? ` +${r.q}` : '');
-    const wt = document.createElement('span'); wt.className = 'rw'; wt.textContent = r.watch ? `👁 ${r.watch}` : '';
-    b.append(nm, ad, ct, wt); li.appendChild(b); rl.appendChild(li);
+  document.getElementById('scrRooms').classList.toggle('hidden', !!room);
+  document.getElementById('scrRoom').classList.toggle('hidden', !room);
+  // one big button per room: its name, its admin, players/slots (kept current behind the room screen too)
+  {
+    const rl = document.getElementById('lRoomList');
+    const rows = rooms.map(r => [r.id, r.name, r.admin, r.n, r.cap]);
+    if (!sameList(rl, rows)) for (const r of rooms) {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.type = 'button'; b.dataset.room = r.id;
+      const nm = document.createElement('span'); nm.className = 'rn'; nm.textContent = r.name;
+      const ad = document.createElement('span'); ad.className = 'ra'; ad.textContent = r.admin ? `★ ${r.admin}` : '';
+      const ct = document.createElement('span'); ct.className = 'rc'; ct.textContent = `${r.n}/${r.cap}`;
+      b.append(nm, ad, ct); li.appendChild(b); rl.appendChild(li);
+    }
+    if (!rooms.length && !rl.children.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'No rooms yet — create one below.'; rl.appendChild(li); }
+    const full = rooms.length >= maxRooms;
+    document.getElementById('lCreate').disabled = full;
+    document.getElementById('lRoomName').disabled = full;
+    setText('lCreateNote', full ? `${maxRooms} rooms are open, the most there can be.` : '');
   }
-  if (!rooms.length && !rl.children.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'No rooms yet — create one.'; rl.appendChild(li); }
-  setText('lRoomsLabel', `Rooms (${rooms.length}/${maxRooms})`);
-  const full = rooms.length >= maxRooms;
-  document.getElementById('lCreate').disabled = full || member;
-  document.getElementById('lRoomName').disabled = full || member;
-  document.getElementById('lCreateRow').classList.toggle('hidden2', member);
-  const cn = document.getElementById('lCreateNote');
-  cn.textContent = member ? '' : full ? `${maxRooms} rooms are open, the most there can be: join one, or wait for one to close.` : '';
-  cn.classList.toggle('full', full && !member);
-  // the selected (or our own) room
-  document.getElementById('lRoom').classList.toggle('hidden', !room);
   if (!room) return;
   setText('lRoomTitle', rname || '');
   document.getElementById('lBack').classList.toggle('hidden2', member);
-  document.getElementById('lRenameRow').classList.toggle('hidden2', !net.isAdmin());
   const list = document.getElementById('lPlayers'), admin = net.isAdmin(), adm = net.lobby.admin;
+  document.getElementById('lRenameRow').classList.toggle('hidden2', !admin);
   const sorted = [...players].sort((a, b) => b.score - a.score);
   if (!sameList(list, [admin, adm, net.id, sorted])) for (const p of sorted) list.appendChild(rosterRow(p, { me: p.id === net.id }));
   if (!players.length && !list.children.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'Nobody is fighting yet.'; list.appendChild(li); }
   let info = `${players.length}/${cap} fighting`;
   if (queue.length) info += ` · ${queue.length} waiting`;
-  if (players.length >= cap && net.mode !== 'queue' && !member) info += ` · ROOM FULL: you will be #${queue.length + 1} in the queue`;
-  if (member) info += net.isAdmin() ? ' · you are the admin' : '';
+  if (players.length >= cap && net.mode !== 'queue' && !member) info += ` · FULL: you will be #${queue.length + 1} in the queue`;
+  if (admin) info += ' · you are the admin';
   document.getElementById('lInfo').textContent = info;
   document.getElementById('lInfo').classList.toggle('full', players.length >= cap);
   // the queue, numbered, with our own place marked
@@ -1887,7 +1898,7 @@ document.getElementById('lHelp').addEventListener('click', e => { e.preventDefau
 // The menu also holds the room panel (SPEC §17): its name (the admin can rename it), the AI row (the
 // admin's − / +) and its humans, with "Make admin" buttons for the admin. The admin cannot leave while
 // another human is in the room: Leave is disabled until someone else is made admin. An admin who is
-// the only human is told that leaving closes the room.
+// the only human stays admin on the room's screen (the room closes if it then goes back to the list).
 let leaveOpen = false;
 const leaveEl = document.getElementById('leave');
 function leaveMenu(open) {
@@ -1921,7 +1932,7 @@ function renderLeave() {
   const m = net.meta.get(net.id), admin = net.isAdmin(), others = otherHumans();
   let note = net.mode === 'queue' ? 'You will lose your place in the queue.' : `Your score${m ? ` of ${m.score}` : ''} will be lost.`;
   if (admin && others.length) { note = 'You are the admin. Make someone admin first, then you can leave:'; yes.disabled = true; }
-  else if (admin) { note = `You are the only player: leaving closes the room "${net.lobby.rname}" (and its AI players go too).`; yes.textContent = 'Leave and close'; }
+  else if (admin) note += ' You stay the admin, on the room\'s screen.';
   document.getElementById('lvNote').textContent = note;
   setText('lvRName', net.lobby.rname || '');
   document.getElementById('lvRenameRow').classList.toggle('hidden2', !admin);

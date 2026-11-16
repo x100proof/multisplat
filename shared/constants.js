@@ -84,7 +84,8 @@ export function cleanName(s) {
 // share another bucket (burst 4, one more every 2 s). Room names use the player-name allowlist plus
 // the apostrophe (so the default "Ann's room" is a name one could type), 1-20 characters.
 export const ROOM = Object.freeze({ max: 10, perIp: 2, nameMax: 20,
-  createBurst: 2, createRefillMs: 15000, editBurst: 4, editRefillMs: 2000 });
+  createBurst: 2, createRefillMs: 15000, editBurst: 4, editRefillMs: 2000,
+  pendingMs: 600000 });   // a room held open only by its pending admin closes after 10 min without an admin action
 export const ROOM_NAME_RE = /^[A-Za-z0-9 _'-]{1,20}$/;
 export function cleanRoomName(s) {
   if (typeof s !== 'string') return null;

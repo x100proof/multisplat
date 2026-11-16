@@ -32,12 +32,19 @@ function open({ ip = nextIp(), origin = srv.origin, path = '/ws' } = {}) {
   });
 }
 const send = (c, m) => c.ws.send(JSON.stringify(m));
-// Create a room as a new admin: resolves to { c, room, id } once welcomed. `keep` pings every 0.5 s so the
+// Create a room (SPEC §17: the connection is its pending admin, not in it) and FIGHT (a hello into it):
+// resolves to the join welcome.
+async function createAndFight(c, name, room = '', color = 0) {
+  send(c, { t: 'create', name, room });
+  const l = await waitFor(() => c.msgs.find(m => m.t === 'lobby' && m.mine), { timeout: 3000, what: 'our room after create' });
+  send(c, { t: 'hello', name, color, room: l.room });
+  return waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { timeout: 3000, what: 'a welcome after FIGHT' });
+}
+// Create a room and join it as its admin: resolves to { c, room, id }. `keep` pings every 0.5 s so the
 // 5 s heartbeat leaves a long-running case alone.
 async function mkRoom({ ip = nextIp(), name = 'abuser', room = '', keep = false } = {}) {
   const c = await open({ ip });
-  send(c, { t: 'create', name, color: 0, room });
-  const w = await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { timeout: 3000, what: 'a welcome after create' });
+  const w = await createAndFight(c, name, room);
   if (keep) { const t = setInterval(() => { if (c.ws.readyState === WebSocket.OPEN) send(c, { t: 'ping', id: 0, ct: 0 }); }, 500); c.ws.on('close', () => clearInterval(t)); }
   return { c, room: w.room, id: w.id };
 }
@@ -48,7 +55,8 @@ async function joinRoom(room, { ip = nextIp(), name = 'joiner' } = {}) {
   const w = await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { timeout: 3000, what: 'a welcome after hello' });
   return { c, room, id: w.id };
 }
-// An admin alone leaves (its room closes at once, freeing the address's quota), then the socket closes.
+// An admin alone leaves (it stays the room's pending admin) and the socket closes (the room then closes
+// at once, freeing the address's quota).
 async function leaveClose(c) { send(c, { t: 'leave' }); await sleep(60); c.ws.close(); await c.closed; }
 const roomsOpen = async () => (await admin('/state')).rooms.length;
 const status = p => p.then(() => 101, e => e.status || e.message);
@@ -139,7 +147,7 @@ test('malformed JSON, unknown types and binary frames are kicked', async () => {
     [JSON.stringify({ t: 'view' }), 'malformed', 4002], [JSON.stringify({ t: 'view', room: 1.5 }), 'malformed', 4002],
     [JSON.stringify({ t: 'rename', name: 5 }), 'malformed', 4002], [JSON.stringify({ t: 'rename' }), 'malformed', 4002],
     [JSON.stringify({ t: 'admin', id: 'x' }), 'malformed', 4002], [JSON.stringify({ t: 'admin', id: 1.5 }), 'malformed', 4002], [JSON.stringify({ t: 'admin' }), 'malformed', 4002],
-    [JSON.stringify({ t: 'create', name: 'ok', color: 0, room: 7 }), 'malformed', 4002], [JSON.stringify({ t: 'create', name: 'a<b>', color: 0 }), 'bad hello', 4006],
+    [JSON.stringify({ t: 'create', name: 'ok', color: 0, room: 7 }), 'malformed', 4002], [JSON.stringify({ t: 'create', name: 5 }), 'malformed', 4002],
     [JSON.stringify({ t: 'bots', d: 2 }), 'malformed', 4002], [JSON.stringify({ t: 'bots', n: 8 }), 'malformed', 4002]]) {
     const c = await open();
     c.ws.send(send, { binary: Buffer.isBuffer(send) });
@@ -152,8 +160,9 @@ test('malformed JSON, unknown types and binary frames are kicked', async () => {
 test('clients cannot set ids, scores or positions', async () => {
   const c = await open();
   send(c, { t: 'create', name: 'sneaky', color: 1, room: 'Mine', id: 99, score: 1000, x: 5, y: 5, admin: 99, adminId: 99, cap: 99, creatorIp: 'forged-ip' });
-  await sleep(150);
-  const w = c.msgs.find(m => m.t === 'welcome' && m.id);
+  const l = await waitFor(() => c.msgs.find(m => m.t === 'lobby' && m.mine), { what: 'our room' });
+  send(c, { t: 'hello', name: 'sneaky', color: 1, room: l.room, id: 99, score: 1000, admin: 99 });
+  const w = await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { what: 'the join welcome' });
   assert.notEqual(w.id, 99);
   assert.equal(w.players.find(p => p.id === w.id).score, 0);
   assert.equal(w.admin, w.id, 'the creator is the admin, whatever it claims');
@@ -181,8 +190,7 @@ test('a third room from one address is refused (why ip); another address is fine
   assert.equal(c.ws.readyState, WebSocket.OPEN);
   const other = await mkRoom({ name: 'elsewhere' });
   await leaveClose(a.c); await sleep(100);
-  send(c, { t: 'create', name: 'three', color: 2, room: 'Third' });
-  await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { what: 'a room after one closed' });
+  await createAndFight(c, 'three', 'Third');
   for (const x of [b.c, c, other.c]) await leaveClose(x);
 });
 
@@ -211,8 +219,7 @@ test('at most 10 rooms: the 11th is refused (why full) and a freed place can be 
   // a hello into a full server's room still works; one room closes and the create then succeeds
   await leaveClose(rooms[0].c);
   await sleep(100);
-  send(c, { t: 'create', name: 'late', color: 0, room: '' });
-  await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { what: 'a room after one closed' });
+  await createAndFight(c, 'late');
   for (const r of [...rooms.slice(1), { c }]) await leaveClose(r.c);
   await waitFor(async () => (await roomsOpen()) === 0, { timeout: 3000, what: 'all rooms closed' });
 });
@@ -295,9 +302,7 @@ test('report flood: 6 per minute per IP, then 429', async () => {
 
 test('a forged resume token attaches nothing; the token is never stored', async () => {
   const c = await open();
-  c.ws.send(JSON.stringify({ t: 'create', name: 'reporter', color: 2, room: '' }));   // rooms (SPEC §17): a hello needs a room, so make one
-  await sleep(150);
-  const { token, id } = c.msgs.find(m => m.t === 'welcome' && m.id);
+  const { token, id } = await createAndFight(c, 'reporter', '', 2);   // rooms (SPEC §17): a hello needs a room, so make one
   const ok = await post(goodReport({ token }));
   const rec = await admin('/reports/' + ok.body.id);
   assert.equal(rec.meta.server.player.id, id);

@@ -39,8 +39,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
     meta: new Map(),                                   // id -> {name, color, score, deaths, away}
-    // the room list, and the selected (or our own) room's detail: name, admin id, roster, queue, bots (SPEC §17)
-    lobby: { rooms: [], maxRooms: 10, room: null, rname: null, admin: null, players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1 },
+    // the room list, and the selected (or our own) room's detail: name, admin id, roster, queue, bots,
+    // and `mine`: we are its admin (pending, before FIGHT, or as its player) (SPEC §17)
+    lobby: { rooms: [], maxRooms: 10, room: null, rname: null, admin: null, players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1, mine: false },
     me: null,                                          // the predicted local player (sim object)
     stats: { rtt: 0, rttAvg: 0, rttMax: 0, offset: 0, jitter: 0, reconnects: 0, snaps: 0, snapGapMax: 0,
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
@@ -165,10 +166,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     sentToken = net.token;
     // after a drop, ask to resume only: if the grace period is over the server says `expired`
     // and we go back to the lobby rather than silently joining as someone new
-    // A resume names no room (the token knows it); a fresh join names the room, a create the new room's name.
+    // A resume names no room (the token knows it); a fresh join names the room.
     const base = { name: want.name, color: want.color, ...(net.word ? { w: net.word } : {}) };
     if (net.token) send({ t: 'hello', ...base, token: net.token, ...(dropped ? { resume: true } : {}) });
-    else if (want.create) send({ t: 'create', ...base, room: want.rname || '' });
     else send({ t: 'hello', ...base, room: want.room });
   }
 
@@ -178,11 +178,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     dbg('life', 'join', { color, room });
     if (net.state === 'open') hello(); else if (net.state !== 'connecting') net.connect();
   };
-  // Create a room ('' for the default "<name>'s room") and join it as its admin.
-  net.create = function create(name, color, rname) {
-    want = { name, color, create: true, rname };
-    dbg('life', 'create room', { color, len: (rname || '').length });
-    if (net.state === 'open') hello(); else if (net.state !== 'connecting') net.connect();
+  // Create a room ('' for the default "<name>'s room"). It does not join: this connection is its
+  // admin (pending) and looks at it; FIGHT then joins it (SPEC §17). `name`: our player name, if any.
+  net.create = function create(rname, name) {
+    dbg('life', 'create room', { len: (rname || '').length });
+    send({ t: 'create', room: rname || '', ...(name ? { name } : {}) });
   };
   // Look at room `id` from the lobby (its roster, snapshots and events), or at none (0).
   net.viewRoom = function viewRoom(id) {
@@ -193,7 +193,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   // Admin only (the server checks): rename our room, hand the admin role to player `id`.
   net.rename = function rename(name) { dbg('life', 'rename room', { len: name.length }); send({ t: 'rename', name }); };
   net.makeAdmin = function makeAdmin(id) { dbg('life', 'make admin', { id }); send({ t: 'admin', id }); };
-  net.isAdmin = () => net.id != null && net.mode !== 'viewer' && net.lobby.admin === net.id;
+  net.isAdmin = () => !!net.lobby.mine;
   // Forget what we drew of the room we looked at (another room, or none, is coming).
   function resetView() {
     snaps.length = 0; evq.length = 0; taken.clear(); arrOff = null; walk.clear();
@@ -281,7 +281,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
-    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap });
+    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap, mine: m.admin === m.id });
     dbg('life', m.state === 'play' ? 'in arena' : 'queued', { id: m.id, queuePos: m.queuePos, resumed: m.resumed });
     if (wasDrop) sendReport('auto', 'reconnected after drop');
     status('open');
@@ -293,9 +293,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     const room = m.room ?? null;
     if (room !== net.lobby.room) { resetView(); dbg('life', 'room view', { from: net.lobby.room, to: room }); onRoom(room); }
     net.lobby = { rooms: Array.isArray(m.rooms) ? m.rooms : net.lobby.rooms, maxRooms: m.maxRooms || net.lobby.maxRooms,
-      room, rname: m.rname ?? null, admin: m.admin ?? null,
+      room, rname: m.rname ?? null, admin: m.admin ?? null, mine: !!m.mine,
       players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
       bots: Number.isInteger(m.bots) ? m.bots : net.lobby.bots, botMax: Number.isInteger(m.botMax) ? m.botMax : net.lobby.botMax };
+    if (net.lobby.mine && net.id == null && room) viewWant = room;   // our new room (create), looked at after a reconnect too
     for (const p of net.lobby.players) net.meta.set(p.id, { ...(net.meta.get(p.id) || {}), ...p });
     if (net.id != null && net.mode === 'queue') {
       const i = net.lobby.queue.findIndex(q => q.id === net.id);
@@ -330,7 +331,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.id === net.id) dbg('life', 'renamed', { id: e.id });
         onLobby(net.lobby);
       } else if (e.type === 'admin') {    // the admin role moved (SPEC §17): a transfer or the old admin gone for good
-        net.lobby.admin = e.id;
+        net.lobby.admin = e.id; net.lobby.mine = e.id != null && e.id === net.id;
         if (e.id === net.id) dbg('life', 'made admin', { why: e.why });
         onLobby(net.lobby);
       } else if (e.type === 'room') {     // the admin renamed the room

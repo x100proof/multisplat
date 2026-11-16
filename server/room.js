@@ -22,6 +22,9 @@ export class Room {
     this.arena = arena; this.id = id; this.name = name; this.creatorIp = creatorIp;
     this.cfg = arena.cfg; this.level = arena.level; this.maxPlayers = arena.maxPlayers;
     this.adminId = null;          // the record id of the admin (a human in this room) — SPEC §17
+    this.adminConn = null;        // or the pending admin: a connection with no record (created the room, not fighting)
+    this.adminActAt = 0;          // the pending admin's last action (a room held only by it closes after ROOM.pendingMs)
+    this.pendingName = null;      // the creator's player name, shown in the room list while it is pending
     this.state = Sim.createWorld({ seed });
     this.state.tick = arena.tickNo;   // lockstep with every other room (see above)
     this.hist = Sim.createHistory();
@@ -133,7 +136,7 @@ export class Room {
     if (rn) evs.push(rn);
     this.arena.lobbyDirty = true;
     if (this.closing) return;   // closeRoom is removing the bots: nobody is left to tell
-    if (!this.humans().length) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
+    if (!this.humans().length && !this.adminConn) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
     if (rec.id === this.adminId) evs.push(this.setAdmin(this.successor(), 'auto'));
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
@@ -149,6 +152,7 @@ export class Room {
   setAdmin(rec, why, by = null) {
     const from = this.adminId;
     this.adminId = rec ? rec.id : null;
+    if (this.adminConn) { this.adminConn.adminOf = null; this.adminConn = null; }   // a pending admin handed over
     this.log(`admin from=${from ?? '-'} to=${this.adminId ?? '-'} why=${why}`);
     this.event('admin', by ? by.id : rec && rec.conn ? rec.conn.id : null, { from, to: this.adminId, why });
     this.arena.lobbyDirty = true;
@@ -218,7 +222,8 @@ export class Room {
   // One row of the room list every lobby visitor sees.
   summary() {
     const a = this.admin();
-    return { id: this.id, name: this.name, admin: a ? a.name : null, n: this.activeCount(), cap: this.maxPlayers,
+    const an = a ? a.name : this.adminConn ? this.pendingName : null;
+    return { id: this.id, name: this.name, admin: an, n: this.activeCount(), cap: this.maxPlayers,
       bots: this.bots.length, q: this.queue.length, watch: this.watchers() };
   }
 
@@ -339,7 +344,7 @@ export class Room {
   }
   adminView() {
     const a = this.admin(), st = this.state;
-    return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : null, creatorIp: this.creatorIp,
+    return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : this.adminConn ? { pending: true, conn: this.adminConn.id, name: this.pendingName } : null, creatorIp: this.creatorIp,
       ageS: Math.round((this.arena.now() - this.createdAt) / 1000), bots: this.bots.length, watchers: this.watchers(),
       stepMs: r2(this.stepMs), stepMaxMs: r2(this.stepMax),
       items: (st.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, st.itemT) * TICK_MS / 1000),

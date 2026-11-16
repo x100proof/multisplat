@@ -259,7 +259,8 @@ Client → server:
 { t: 'hello', name, color /* 0-11 */, room /* SPEC §17: the room id to join; not needed with a live token */,
   token? /* resume */, resume? /* true: resume only (an automatic
   reconnect); a dead token gets the `expired` welcome below instead of a fresh join */ }
-{ t: 'create', name, color, room /* the new room's name, '' = "<name>'s room" */ }   // create and join as admin
+{ t: 'create', room /* the new room's name, '' = default */, name? /* the creator's player name */ }
+                                        // create; the sender is its pending admin and looks at it (no join)
 { t: 'view', room /* id, or 0 = none */ }  // the room a lobby visitor looks at (roster, snapshots, events)
 { t: 'rename', name }                   // admin: rename the room (cleanRoomName)
 { t: 'admin', id }                      // admin: hand the role to human player `id` of the same room
@@ -278,12 +279,12 @@ Client → server:
 Server → client:
 
 ```js
-{ t: 'welcome', v: 2, tick, cap, colors, w /* word id, SPEC §13.5 */ } // on connect, before hello
-{ t: 'welcome', v: 2, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
+{ t: 'welcome', v: 3, tick, cap, colors, w /* word id, SPEC §13.5 */ } // on connect, before hello
+{ t: 'welcome', v: 3, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
                                                                // no record; the socket stays a viewer
-{ t: 'welcome', v: 2, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
+{ t: 'welcome', v: 3, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
   tick, queuePos, room, rname, admin /* the admin's player id */,
-  players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello or create
+  players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
   player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars], …],
   it: [[id, x, y, kind, n?], …], st: [[id, x, y, vx, owner], …] }
@@ -294,8 +295,8 @@ Server → client:
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
 { t: 'lobby', rooms: [{id, name, admin /* name */, n, cap, bots, q, watch}], maxRooms,
-  room /* the room played in or selected, or null */, rname, admin /* player id */,
-  players: [roster], queue: [...], cap, bots, botMax }   // that room's detail (empty without one); on connect and on
+  room /* the room played in or selected, or null */, rname, admin /* player id; null while pending */,
+  players: [roster], queue: [...], cap, bots, botMax, mine /* we are its admin */ }   // that room's detail (empty without one); on connect and on
                                        // any change (≤ 2/s); at once after hello, create, view, leave and a `bots` request
 { t: 'refused', what, why }            // SPEC §17: a request turned down without a kick
 { t: 'closed', room, name, why }       // the room this connection looked at closed (why: 'left' | 'empty')
@@ -361,28 +362,38 @@ random; its world starts at the arena's `tickNo`), `closeRoom(room, why)` (bots 
 `conn.room` is cleared). `conn.room` is the room a connection looks at: members always their own room,
 lobby visitors the one they selected with `view` (`setView` keeps `room.viewers` in step; the watcher count
 is the viewers without a record there). Handlers:
-- `onCreate`: a member is kicked (`protocol`); then the hello fields (`helloFields`: name, colour, word
-  id; else `bad hello`), the create bucket (`take(conn, 'createBucket', …)`; a miss is a `dropped()` and
-  `refused rate`), the room name (typed: `cleanRoomName`, else `refused name`; blank: `defaultRoomName`),
-  `maxRooms` (`refused full`) and `roomsOfIp` (rooms whose `creatorIp` is this address, `refused ip`).
-  Then `createRoom` and `join(…, admin = true)`.
+- `onCreate`: a member or a pending admin is kicked (`protocol`); string types (`malformed`); the
+  optional player name (`cleanName`, only for the default room name and the list), the create bucket
+  (`take(conn, 'createBucket', …)`; a miss is a `dropped()` and `refused rate`), the room name (typed:
+  `cleanRoomName`, else `refused name`; blank: `defaultRoomName` or "Room <id>"), `maxRooms` (`refused
+  full`) and `roomsOfIp` (rooms whose `creatorIp` is this address, `refused ip`). Then `createRoom`,
+  `setView` to it and `setPending(room, conn)`: the **pending admin** (`room.adminConn` = `conn`,
+  `conn.adminOf` = room, `room.adminId` null), plus a lobby. `setView` away from that room (or
+  `disconnect`) calls `pendingGone`: no human in the room closes it, else `setAdmin(successor, 'auto')`.
+  `join` binds a pending admin to its new record. `onLeave` of an admin who is the only human makes it the
+  pending admin again (`setPending`) before releasing the record. `tick` closes a room held only by its
+  pending admin after `ROOM.pendingMs` (10 min) without an admin action (`room.adminActAt`, touched by
+  `adminRoom`).
 - `onHello`: resume by token as before (into the record's room: `setView`, `room.promote`); otherwise
   `room` must be a positive integer (`bad hello`) of an open room (`refused join gone` + lobby).
   `join` applies the per-address record cap (all rooms), makes the record (`room.uniqueName`), sets
-  `conn.rec` and the view, makes it admin when asked (or when the room has none, which only test rooms
-  made by `createRoom` without a creator have), `room.add`s it and sends the welcome plus a lobby.
-- `onView`: a non-negative integer (else `malformed`); ignored for members; lobby at once.
+  `conn.rec` and the view, makes it admin if it is the room's pending admin (or when the room has no
+  admin at all, which only test rooms made by `createRoom` without a creator have), `room.add`s it and
+  sends the welcome plus a lobby.
+- `onView`: a non-negative integer (else `malformed`); ignored for members; a pending admin looking
+  away while humans are in its room is refused (`leave admin`); lobby at once.
 - `onRename` / `onAdmin`: type checks (`malformed`), the shared edit bucket (`editBucket`), admin only
-  (`adminRoom(conn)`: the room whose `adminId` is the sender's record), then `cleanRoomName` (rename,
+  (`adminRoom(conn)`: the room whose `adminId` is the sender's record, or whose pending admin it is), then `cleanRoomName` (rename,
   event `{type:'room'}` to the room's viewers) or a target that is another human record of the room
   (`room.setAdmin(to, 'transfer')`, event `{type:'admin'}`). Refusals go through `refuse(conn, what, why)`
   (a `refused-req` ring event and `{t:'refused'}`).
 - `onBots`: shape check (n ≤ maxPlayers − 1), the per-connection bucket, then admin only (`refused bots
   admin` plus a lobby), then the server-wide `botBucket` across all rooms.
 - `onLeave`: the admin is refused (`leave admin`) while `room.humans()` has someone else; otherwise the
-  record is released (an admin alone thereby closes the room) and a lobby follows.
-- `lobbyMsg(conn, cache)`: `rooms` (`room.summary()` each), `maxRooms` and the viewed room's `detail()`
-  (`room, rname, admin, players, queue, cap, bots, botMax`; empty without one). The coalesced broadcast
+  record is released (an admin alone stays as the pending admin) and a lobby follows.
+- `lobbyMsg(conn, cache)`: `rooms` (`room.summary()` each; a pending admin's name is the creator's
+  player name), `maxRooms`, the viewed room's `detail()` (`room, rname, admin, players, queue, cap, bots,
+  botMax`; empty without one) and the per-connection `mine`. The coalesced broadcast
   computes the list and each room's detail once (`cache`) and sends every connection its own message.
 - `tick()`: heartbeat, grace expiry and idle kicks over all records, `tickNo++`, then `room.step(now)`
   for every room (its time kept as `room.stepMs` (EMA) and `stepMax`), the lobby broadcast, input rates
@@ -426,7 +437,7 @@ is the viewers without a record there). Handlers:
   panel `#lvRoom` (`renderLeave`, re-run on every lobby update while open): the room name, the admin's
   rename row, the AI row (`renderBots('lv')`) and the room's humans with Make admin buttons. For an
   admin with other humans in the room Leave is disabled and the note says to make someone admin
-  first; an admin alone sees "Leave and close". The server enforces the rule too (`refused leave admin`).
+  first; an admin alone is told it stays the admin on the room's screen. The server enforces the rule too (`refused leave admin`).
 - **Inputs.** They are queued per record, at most 12, with older ones dropped. Each tick takes
   one input per playing record. If none is queued, the last keys repeat for up to 8 ticks, then 0.
   A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Every starved tick
@@ -877,25 +888,29 @@ editable physics.
     carries it. Player colours still tint headbands and glows.
 - **Music.** `initAudio` (on the first key, pointer or Fight) creates `music` unless `?nomusic`.
   M toggles `muted`, which silences both the SFX and the music. A hidden tab suspends the context.
-- **Lobby (§9, rooms §17).** An overlay over the live arena of the selected room (none: empty). It has:
-  - the logo,
-  - a name field (`cleanName`) and 12 swatches (those worn in the selected room greyed),
-  - the room list `#lRoomList` (a button per room: name, `★ admin`, `n/cap +queue`, `👁 watchers`;
-    pressed = selected, a click sends `viewRoom`; "No rooms yet — create one." when empty) under a
-    one-line explainer, and `#lCreateRow` (`#lRoomName`, `#lCreate` → `createRoom()`: `cleanRoomName`
-    or blank, then `net.create`; disabled with `#lCreateNote` at `maxRooms`, hidden for members),
-  - the selected room `#lRoom`: `#lRoomTitle`, `#lBack` (ALL ROOMS, viewers only), the admin's rename
-    row (`#lRenameIn`, `#lRenameBtn` → `renameRoom`), **Fight** (`fight()`: joins the selected room, or
-    for a member, the creator who lands here after Create room, just closes the lobby) and Watch, the
-    info line, the AI row (`renderBots('l')`: − / + for the admin, else hidden and "(the admin sets
-    this)"), the live player list with scores and the queue (`rosterRow`: an ADMIN tag, and for the
-    admin a small `button.mkadm` "Make admin" next to every other human). Lists with buttons are
-    rebuilt only when their content changes (`sameList`), so a lobby update between press and release
-    cannot swallow a click,
-  - **Fight**,
-  - the word id in the footer (`#lId`, ` · id: amber-otter`, set from `net.onWord`; SPEC §13.5),
-    where the "Report a problem" link was.
+- **Lobby (§9, rooms §17).** An overlay over the live arena of the viewed room (none: empty), with two
+  screens chosen by `net.lobby.room` in `renderLobby` (no explanatory text and no controls help on either):
+  - `#scrRooms` (no room viewed): the logo, the room list `#lRoomList` (a big button per room: name,
+    `★ admin`, `n/cap`; a click sends `viewRoom`; "No rooms yet — create one below." when empty; kept
+    current behind the room screen too), and Create a room (`#lRoomName`, `#lCreate` → `createRoom()`:
+    `cleanRoomName` or blank, then `net.create(rname, remembered name)`; disabled with `#lCreateNote` at
+    `maxRooms`). The server answers with a lobby for the new room with `mine`, which opens its screen.
+  - `#scrRoom` (a room viewed, or our own): `#lBack` "← Rooms" (`backToRooms()`: `viewRoom(0)`, viewers
+    only; refused locally and by the server for an admin with other humans in the room) and
+    `#lRoomTitle`; the name field (`cleanName`) and 12 swatches (those worn in the room greyed); **Fight**
+    (`fight()`: joins the room, its pending admin included; for a member just closes the lobby) and
+    Watch with its line; the info line; the admin's rename row (`#lRenameIn`, `#lRenameBtn` →
+    `renameRoom`) and AI row (`renderBots('l')`: − / + for the admin, else the count read-only, no row at
+    0); the live player list with scores and the queue (`rosterRow`: an ADMIN tag, and for the admin a
+    small `button.mkadm` "Make admin" next to every other human). Lists with buttons are rebuilt only when
+    their content changes (`sameList`), so a lobby update between press and release cannot swallow a click,
+  - `#lErr` (notices, both screens), and the footer: How to play and the word id (`#lId`,
+    ` · id: amber-otter`, set from `net.onWord`; SPEC §13.5).
+  - On a short screen (`max-height: 460px`) the card tightens and the room screen drops the logo, so FIGHT
+    stays in view on a phone on its side; the room list scrolls inside itself so CREATE does too.
 
+  Admin rights on the page are `net.isAdmin()` = `net.lobby.mine` (from the server's lobby, the welcome,
+  and the `admin` event).
   The name and colour are saved in `localStorage` (`multisplat-name`, `multisplat-color`).
   After a kick the lobby comes back and shows the reason. `onRefused` maps `refused` reasons to text
   (`REFUSED`) in `#lErr` and the Esc menu's `#lvErr` (a refused join reopens the lobby); `onRoomClosed`

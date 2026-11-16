@@ -5,7 +5,8 @@
 // every page sees, that lengthens the holder's reach in a scripted check and is lost on death.
 // Also AI players, and spectator mode (watchTest, SPEC §16), and rooms (SPEC §17: create, join, admin
 // transfer, leaving as admin, renames, the 10-room limit). Every section runs in a room: its first
-// player creates one (openPlayer opts.create), later ones select it in the list (opts.room).
+// player creates one (openPlayer opts.create), later ones tap it in the list (opts.room). The lobby has
+// two screens: the room list (Create a room under it) and one room's screen (name, colour, FIGHT).
 //
 //   node test/multiclient.js            (Chromium from $PLAYWRIGHT_CHROMIUM or playwright's cache)
 import assert from 'node:assert/strict';
@@ -30,26 +31,32 @@ async function openPage(srv, name, viewport = { width: 960, height: 576 }) {
   await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
   return { page, name };
 }
-// Click room `id` in the lobby's list and wait for the server to say we look at it.
+// Tap room `id` in the room list and wait for the server to say we look at it (its screen opens).
 async function selectRoom(p, id) {
   await p.page.click(`#lRoomList button[data-room="${id}"]`);
   await p.page.waitForFunction(id => __mp.net.lobby.room === id, id, { timeout: 5000 });
 }
-// Create a room from the lobby (`rname`: its name or '' for "<name>'s room"): the creator is in it as
-// admin at once and the lobby stays open on it. Resolves to the room id.
-async function createRoom(p, name, color, rname = '') {
+// Name and colour on a room's screen.
+async function pickYou(p, name, color) {
   await p.page.fill('#lName', name);
   await p.page.click(`#lColors .sw:nth-child(${color + 1})`);
+}
+// Create a room from the room list (`rname`: its name or '' for the default): the creator is its admin
+// (pending: not in the arena) and lands on its screen, where it then sets name and colour. Resolves to
+// the room id.
+async function createRoom(p, name, color, rname = '') {
   if (rname) await p.page.fill('#lRoomName', rname);
   await p.page.click('#lCreate');
-  await p.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.lobby.room, null, { timeout: 10000 });
+  await p.page.waitForFunction(() => __mp.net.lobby.mine && __mp.net.lobby.room && !document.getElementById('scrRoom').classList.contains('hidden'), null, { timeout: 10000 });
+  assert.equal(await p.page.evaluate(() => __mp.net.mode), 'viewer', 'create does not join');
+  await pickYou(p, name, color);
   return p.page.evaluate(() => __mp.net.lobby.room);
 }
-// opts.create (true, or the room's name): this page creates a room and FIGHT then closes the lobby;
-// opts.room (an id): select that room, then FIGHT. Returns { page, name, id, room }.
+// opts.create (true, or the room's name): this page creates a room, then FIGHT;
+// opts.room (an id): tap that room, then FIGHT. Returns { page, name, id, room }.
 async function openPlayer(srv, name, color, opts = {}) {
   const p = await openPage(srv, name);
-  if (opts.room) { await p.page.fill('#lName', name); await p.page.click(`#lColors .sw:nth-child(${color + 1})`); await selectRoom(p, opts.room); p.room = opts.room; }
+  if (opts.room) { await selectRoom(p, opts.room); await pickYou(p, name, color); p.room = opts.room; }
   else p.room = await createRoom(p, name, color, typeof opts.create === 'string' ? opts.create : '');
   await p.page.click('#lFight');
   await p.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive && !__mp.lobbyOpen, null, { timeout: 10000 });
@@ -402,6 +409,7 @@ async function leaveTest() {
   await A.page.click('#lvYes');
   u = await ui(A);
   assert.ok(u.lobby && !u.menu && u.id == null && u.mode === 'viewer', 'Leave returns to the lobby as a viewer');
+  await waitFor(() => A.page.evaluate(r => __mp.net.lobby.room === r && !document.getElementById('scrRoom').classList.contains('hidden'), B.room), { what: 'the leaver lands on the room\'s screen' });
   await waitFor(async () => { const v = await ui(B); return v.ids.length === 1 && v.ids[0] === B.id; }, { what: 'the leaver vanishes for the other player' });
   await waitFor(async () => (await ui(A)).ids.length === 1, { what: 'the lobby view still follows the arena' });
   await A.page.keyboard.press('Escape');
@@ -652,9 +660,10 @@ async function fullscreenTest() {
   let f = await fs();
   assert.ok(f.shown && f.right < 10 && f.top < 10, 'the button sits top right in the lobby: ' + JSON.stringify(f));
   assert.equal(f.on, false);
-  // F while typing a name does nothing
-  await page.click('#lName'); await page.keyboard.press('KeyF');
-  assert.deepEqual((await fs()).calls, [], 'F in the name field types');
+  // F while typing a room name does nothing
+  await page.click('#lRoomName'); await page.keyboard.press('KeyF');
+  assert.deepEqual((await fs()).calls, [], 'F in the room name field types');
+  await page.fill('#lRoomName', '');
   // the button toggles, and its state follows
   await page.click('#fsBtn');
   await waitFor(async () => (await fs()).on, { what: 'full screen on' });
@@ -747,12 +756,15 @@ async function phoneTest() {
     await pinch(v.w / 2, v.h / 2, 'the lobby');
     assert.ok(await page.evaluate(() => parseFloat(getComputedStyle(document.getElementById('lName')).fontSize) >= 16), `${v.name}: the name field is at least 16px (no iOS focus zoom)`);
     assert.equal(await page.evaluate(() => { const e = new Event('gesturestart', { cancelable: true, bubbles: true }); document.body.dispatchEvent(e); return e.defaultPrevented; }), true, `${v.name}: Safari gesture events are cancelled`);
-    // lobby: type a name, tap FIGHT (not clicks)
+    // the room list: CREATE on screen; tap it (not clicks), then on the room's screen type a name, tap FIGHT
+    const cr = await centre('lCreate');
+    assert.ok(cr.t >= 0 && cr.b <= v.h && cr.l >= 0 && cr.r <= v.w, `${v.name}: CREATE is on screen`);
+    await page.tap('#lCreate');                    // a room of its own: its screen opens, with FIGHT
+    await page.waitForFunction(() => __mp.net.lobby.mine && __mp.net.lobby.room && !document.getElementById('scrRoom').classList.contains('hidden'), null, { timeout: 10000 });
     await page.tap('#lName'); await page.keyboard.type('Phone');
-    await page.tap('#lCreate');                    // a room of its own; FIGHT (in the room panel) then closes the lobby
-    await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.lobby.room, null, { timeout: 10000 });
     const f = await centre('lFight');
-    assert.ok(f.y > 0 && f.b <= v.h, `${v.name}: FIGHT is on screen`);
+    assert.ok(f.t >= 0 && f.b <= v.h, `${v.name}: FIGHT is on screen`);
+    assert.ok(await page.evaluate(() => document.getElementById('lobby').scrollTop === 0), `${v.name}: no scrolling needed`);
     await page.touchscreen.tap(f.x, f.y);
     await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
     await sleep(400);
@@ -859,20 +871,21 @@ async function staleBuildTest() {
 }
 
 // AI players (SPEC §15, §17): the admin's − / + change the count live for everyone looking at the room;
-// the other page sees the buttons hidden and disabled and "(the admin sets this)", and a forced bots
+// the other page sees the buttons hidden and disabled (no row at all while 0), and a forced bots
 // message from it is refused without a kick; bots fight in the room wearing the reserved colour, which
-// is not among the swatches; + stops at 7 (8 slots with the admin); a human arriving at the full room
-// is queued and gets the slot when − frees one, and − removes the newest bot.
+// is not among the swatches; + stops at 7 (8 slots once the admin fights); a human arriving at the full
+// room is queued and gets the slot when − (in the admin's Esc menu) frees one, and − removes the newest bot.
 async function botTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
   const V = await openPage(srv, 'V');
-  const room = await createRoom(V, 'Boss', 0);           // V is the admin and stays on its lobby
+  const room = await createRoom(V, 'Boss', 0);           // V is the (pending) admin, on its room's screen
   const W = await openViewer(srv, 'W', room);            // a plain lobby viewer of the room
   const ui = p => p.page.evaluate(() => ({ n: document.getElementById('lBotN').textContent,
     dec: document.getElementById('lBotDec').disabled, inc: document.getElementById('lBotInc').disabled,
     hid: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).classList.contains('hidden2') && getComputedStyle(document.getElementById(id)).display === 'none'),
     ro: document.getElementById('lBotRO').textContent, err: document.getElementById('lErr').textContent,
+    row: !document.getElementById('lBots').classList.contains('hidden2'),
     bots: (__mp.net.lobby.players || []).filter(q => q.bot), botMax: __mp.net.lobby.botMax, swatches: document.querySelectorAll('#lColors .sw').length,
     inArena: __mp.state.players.map(q => q.id) }));
   const both = (n, what) => waitFor(async () => (await ui(V)).n === String(n) && (await ui(W)).n === String(n), { what });
@@ -881,7 +894,7 @@ async function botTest() {
   assert.ok(u.dec && !u.inc && !u.hid[0] && !u.hid[1] && u.ro === '', 'the admin has − (nothing to remove) and + shown');
   u = await ui(W);
   assert.ok(u.dec && u.inc && u.hid[0] && u.hid[1], '− / + are hidden and disabled for the other page');
-  assert.match(u.ro, /the admin sets this/);
+  assert.ok(!u.row, 'no AI row at all for the other page while there are none');
   assert.equal(u.botMax, 7, 'at most 7 AI players (8 slots)');
   // a forced bots message from the non-admin is refused (no kick), nothing changes
   await W.page.evaluate(() => __mp.net.bots(1));
@@ -898,6 +911,7 @@ async function botTest() {
   const hex = await V.page.evaluate(async () => (await import('/shared/constants.js')).BOT.hex);
   await waitFor(async () => { const u = await ui(W); return u.bots.length === 2 && u.bots.every(b => u.inArena.includes(b.id)); }, { what: 'bots in the room' });
   u = await ui(W);
+  assert.ok(u.row && u.hid[0], 'the other page sees the count read-only');
   assert.equal(u.swatches, 12, 'twelve human swatches, none for bots');
   for (const b of u.bots) { assert.equal(b.color, 12); assert.match(b.name, /^AI \d+$/); }
   const dot = await W.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => [li.querySelector('.nm').textContent, getComputedStyle(li.querySelector('.dot')).backgroundColor]).filter(([n]) => n.startsWith('AI')));
@@ -907,12 +921,18 @@ async function botTest() {
   for (let i = 0; i < 8; i++) { if (!(await ui(V)).inc) await V.page.click('#lBotInc'); await sleep(300); }
   await both(7, 'seven bots at most');
   assert.ok((await ui(V)).inc, '+ disabled at the limit');
+  await waitFor(async () => (await ui(V)).inArena.length === 7, { what: '7 bots in the room (the pending admin takes no slot)' });
+  // the admin presses FIGHT (8 in the room, still admin); a human is queued, and takes the slot freed by −
+  // from the admin's Esc menu
+  await V.page.click('#lFight');
+  await V.page.waitForFunction(() => __mp.net.mode === 'play' && !__mp.lobbyOpen && __mp.net.isAdmin(), null, { timeout: 10000 });
   await waitFor(async () => (await ui(V)).inArena.length === 8, { what: '8 in the room' });
-  // the room is full (admin + 7): a human is queued, and takes the slot freed by −
   await W.page.fill('#lName', 'Human');
   await W.page.click('#lFight');
   await W.page.waitForFunction(() => __mp.net.mode === 'queue', null, { timeout: 10000 });
-  await V.page.click('#lBotDec');
+  await V.page.keyboard.press('Escape');
+  await waitFor(() => V.page.evaluate(() => __mp.leaveOpen && !document.getElementById('lvBotDec').disabled), { what: 'the Esc menu with −' });
+  await V.page.click('#lvBotDec');
   await waitFor(async () => (await ui(V)).n === '6', { what: '− removes one' });
   await W.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
   // (read on V, which got the lobby at once; other pages get it with the next coalesced broadcast)
@@ -955,13 +975,13 @@ async function watchTest() {
   }
   await waitFor(() => H.page.evaluate(() => __mp.state.players.length === 8), { what: 'a full room' });
   const Q = await openPage(srv, 'Q');
-  await Q.page.fill('#lName', 'Queued'); await selectRoom(Q, H.room); await Q.page.click('#lFight');
+  await selectRoom(Q, H.room); await Q.page.fill('#lName', 'Queued'); await Q.page.click('#lFight');
   await Q.page.waitForFunction(() => __mp.net.mode === 'queue');
   const W = await openPage(srv, 'W');
   const st = () => W.page.evaluate(() => ({ lobby: __mp.lobbyOpen, w: __mp.watching, mode: __mp.net.mode, id: __mp.net.id,
     players: __mp.net.lobby.players.length, queue: __mp.net.lobby.queue.length, ids: __mp.state.players.map(p => p.id),
     bar: document.getElementById('watch').classList.contains('hidden') ? null : document.getElementById('watch').textContent }));
-  assert.ok(await W.page.isDisabled('#lWatch') || await W.page.isHidden('#lWatch'), 'Watch needs a selected room');
+  assert.ok(await W.page.isHidden('#lWatch'), 'no Watch on the room list');
   await selectRoom(W, H.room);
   assert.ok(!(await W.page.isDisabled('#lWatch')), 'Watch is open to a lobby viewer of a full room with a queue');
   await W.page.click('#lWatch');
@@ -1002,7 +1022,7 @@ async function watchTest() {
   s = await st(); assert.equal(s.w.chosen, null, '↓ back to the leader');
   // input from the watching page reaches nobody: still a viewer with no player
   assert.equal(s.mode, 'viewer'); assert.equal(s.players, 8);
-  // Esc: back to the lobby (still on the room), and Fight from there still queues
+  // Esc: back to the room's screen, and Fight from there still queues
   await W.page.keyboard.press('Escape');
   await waitFor(async () => (await st()).lobby, { what: 'Esc returns to the lobby' });
   s = await st(); assert.equal(s.w.on, false); assert.equal(s.bar, null);
@@ -1015,26 +1035,31 @@ async function watchTest() {
 }
 
 // ---------- rooms (SPEC §17) ----------
-const listOf = p => p.page.evaluate(() => [...document.querySelectorAll('#lRoomList button')].map(b => ({ id: +b.dataset.room, text: b.textContent, pressed: b.getAttribute('aria-pressed') })));
+const listOf = p => p.page.evaluate(() => [...document.querySelectorAll('#lRoomList button')].map(b => ({ id: +b.dataset.room, text: b.textContent })));
+const onScreen = (p, scr) => p.page.evaluate(id => !document.getElementById(id).classList.contains('hidden'), scr);
 const rosterOf = p => p.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => ({ name: li.querySelector('.nm').firstChild.textContent, admin: !!li.querySelector('.adm'), mk: !!li.querySelector('button.mkadm') })));
 
 // Create, list, join, isolation: the empty list says so; a created room shows up on another page with
-// its name, its admin and 1/8; a second page joins it (select + FIGHT) and both see each other; a page
-// in another room never gets this room's players in its snapshots.
+// its name, its admin and 1/8; tapping it opens its screen and ← Rooms goes back; a second page joins
+// it (tap + FIGHT) and both see each other; a page in another room never gets this room's players in
+// its snapshots.
 async function roomsTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
   const E = await openPage(srv, 'E');
-  await waitFor(() => E.page.evaluate(() => document.querySelector('#lRoomList li.empty') && document.querySelector('#lRoomList li.empty').textContent === 'No rooms yet — create one.'), { what: 'the empty-state text' });
-  assert.ok(await E.page.isHidden('#lRoom'), 'no room panel while none is selected');
+  await waitFor(() => E.page.evaluate(() => document.querySelector('#lRoomList li.empty') && document.querySelector('#lRoomList li.empty').textContent === 'No rooms yet — create one below.'), { what: 'the empty-state text' });
+  assert.ok(await onScreen(E, 'scrRooms') && !(await onScreen(E, 'scrRoom')), 'the room list, no room screen');
+  assert.ok(await E.page.isHidden('#lName') && await E.page.isHidden('#lFight'), 'no name or FIGHT on the room list');
   const A = await openPlayer(srv, 'Ann', 0, { create: 'Lair' });
   await waitFor(async () => (await listOf(E)).some(r => r.id === A.room), { what: 'the new room in the other page\'s list' });
   let r = (await listOf(E)).find(r => r.id === A.room);
-  assert.ok(r.text.includes('Lair') && r.text.includes('Ann') && r.text.includes('1/8'), 'name, admin and 1/8: ' + r.text);
-  assert.equal(r.pressed, 'false');
+  assert.equal(r.text, 'Lair★ Ann1/8', 'name, admin and 1/8: ' + r.text);
   await selectRoom(E, A.room);
-  assert.equal((await listOf(E)).find(r => r.id === A.room).pressed, 'true', 'the selected room is pressed');
+  assert.ok(await onScreen(E, 'scrRoom') && !(await onScreen(E, 'scrRooms')), 'tapping a room opens its screen');
   assert.equal(await E.page.textContent('#lRoomTitle'), 'Lair');
+  await E.page.click('#lBack');
+  await E.page.waitForFunction(() => __mp.net.lobby.room === null && !document.getElementById('scrRooms').classList.contains('hidden'));
+  await selectRoom(E, A.room);
   assert.deepEqual(await rosterOf(E), [{ name: 'Ann', admin: true, mk: false }]);
   const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
   for (const p of [A, B]) await waitFor(async () => (await rosterOf(p)).length === 2, { what: `both in the roster on ${p.name}` });
@@ -1060,22 +1085,28 @@ async function roomsTest() {
 
 // Admin transfer: "Make admin" only next to other humans (not self, not a bot), the confirm dialog
 // (right text, Cancel focused, Cancel and Esc do nothing, Confirm transfers); the new admin gets the
-// buttons and the enabled AI controls, the old one loses them. Then the Esc menu: Leave is blocked for
-// the admin with another human present, the transfer works from the menu, the old admin leaves; the
-// sole admin's menu reads "Leave and close" and a watcher of that room is sent back to the list.
+// buttons and the enabled AI controls, the old one loses them. The creator here is a pending admin
+// (created, not fighting): ← Rooms is refused while Bob is in the room. Then the Esc menu: Leave is
+// blocked for the admin with another human present, the transfer works from the menu, the old admin
+// leaves; the sole admin leaves the fight onto the room's screen (still admin), and going back to the
+// list closes the room: a watcher of it is sent back to the list with the closed message.
 async function adminTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
   const A = await openPage(srv, 'A');
-  A.room = await createRoom(A, 'Ann', 0, 'Keep');        // admin, lobby still open
+  A.room = await createRoom(A, 'Ann', 0, 'Keep');        // pending admin, on the room's screen
   const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
-  const aId = await A.page.evaluate(() => __mp.net.id);
   await A.page.click('#lBotInc');
   await waitFor(() => A.page.evaluate(() => __mp.net.lobby.bots === 1), { what: 'one bot' });
-  await waitFor(async () => (await rosterOf(A)).length === 3, { what: 'three rows' });
+  await waitFor(async () => (await rosterOf(A)).length === 2, { what: 'two rows (Bob and the bot; Ann is not fighting)' });
   const rows = await rosterOf(A);
   assert.deepEqual(rows.filter(x => x.mk).map(x => x.name), ['Bob'], 'Make admin next to the joiner only: ' + JSON.stringify(rows));
-  assert.ok(rows.find(x => x.name.startsWith('Ann')).admin && !rows.find(x => x.name === 'Bob').admin);
+  assert.ok(!rows.find(x => x.name === 'Bob').admin);
+  // the pending admin cannot go back to the list while Bob is in the room
+  await A.page.click('#lBack');
+  await waitFor(() => A.page.evaluate(() => /Make someone admin first/.test(document.getElementById('lErr').textContent)), { what: 'the hand-over notice' });
+  await sleep(300);
+  assert.equal(await A.page.evaluate(() => __mp.net.lobby.room), A.room, 'still on the room');
   assert.equal(await B.page.evaluate(() => document.querySelectorAll('#lPlayers button.mkadm').length), 0, 'no buttons for a non-admin');
   const adminOf = p => p.page.evaluate(() => __mp.net.lobby.admin);
   const dlg = p => p.page.evaluate(() => ({ open: !document.getElementById('adm').classList.contains('hidden'), text: document.getElementById('admText').textContent,
@@ -1091,7 +1122,8 @@ async function adminTest() {
   await A.page.keyboard.press('Escape');
   assert.ok(!(await dlg(A)).open, 'Esc closes the dialog');
   await sleep(700);
-  assert.equal(await adminOf(A), aId); assert.equal(await adminOf(B), aId, 'nothing changed after Cancel and Esc');
+  assert.equal(await adminOf(A), null); assert.equal(await adminOf(B), null, 'nothing changed after Cancel and Esc (Ann is admin, pending)');
+  assert.ok(await A.page.evaluate(() => __mp.net.isAdmin()));
   await ask(A);
   await A.page.click('#admYes');
   await waitFor(async () => (await adminOf(A)) === B.id && (await adminOf(B)) === B.id, { what: 'admin moved to Bob on both pages' });
@@ -1105,9 +1137,10 @@ async function adminTest() {
   assert.deepEqual(await ctl(A), { mk: [], hid: [true, true], dis: [true, true], rename: false });
   log('admin: Make admin beside humans only, the dialog (Cancel and Esc do nothing, Confirm transfers), controls follow the role');
 
-  // --- Esc menu. Ann (not admin now) closes her lobby and plays on; Bob is the admin.
+  // --- Esc menu. Ann (not admin now) fights; Bob is the admin.
   await A.page.click('#lFight');
-  await waitFor(() => A.page.evaluate(() => !__mp.lobbyOpen), { what: 'lobby closed' });
+  await waitFor(() => A.page.evaluate(() => !__mp.lobbyOpen && __mp.net.id != null), { what: 'lobby closed' });
+  const aId = await A.page.evaluate(() => __mp.net.id);
   await B.page.keyboard.press('Escape');
   const menu = p => p.page.evaluate(() => ({ open: __mp.leaveOpen, yes: document.getElementById('lvYes').disabled, yesText: document.getElementById('lvYes').textContent,
     note: document.getElementById('lvNote').textContent, mk: document.querySelectorAll('#lvPlayers button.mkadm').length }));
@@ -1123,21 +1156,26 @@ async function adminTest() {
   assert.equal((await menu(B)).yesText, 'Leave');
   await B.page.click('#lvYes');
   await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && __mp.net.mode === 'viewer' && __mp.net.id == null), { what: 'Bob back in the lobby as a viewer' });
-  // --- Ann is the only human and the admin: "Leave and close". Bob watches the room meanwhile.
+  // --- Ann is the only human and the admin: leaving the fight keeps her admin on the room's screen.
+  // Bob watches the room meanwhile.
   await B.page.click('#lWatch');
   await waitFor(() => B.page.evaluate(() => __mp.watching.on), { what: 'Bob watching' });
   await A.page.keyboard.press('Escape');
   await waitFor(async () => (await menu(A)).open, { what: 'Ann\'s Esc menu' });
-  await waitFor(async () => (await menu(A)).yesText === 'Leave and close', { what: 'Leave and close' });
+  await waitFor(async () => /You stay the admin/.test((await menu(A)).note), { what: 'the stay-admin note' });
   m = await menu(A);
-  assert.ok(!m.yes); assert.match(m.note, /closes the room/);
+  assert.ok(!m.yes); assert.equal(m.yesText, 'Leave');
   await A.page.click('#lvYes');
+  await waitFor(() => A.page.evaluate(r => __mp.lobbyOpen && __mp.net.lobby.room === r && __mp.net.isAdmin() && __mp.net.id == null, A.room), { what: 'Ann on the room\'s screen, still admin' });
+  assert.equal(await roomsOpen(srv), 1, 'the room stays open');
+  await A.page.click('#lBack');                          // and back to the list closes it
   await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && /has closed/.test(document.getElementById('lErr').textContent)), { what: 'the watcher is back at the list with the closed message' });
   assert.match(await B.page.textContent('#lErr'), /The room "Keep" has closed\./);
   assert.equal(await B.page.evaluate(() => __mp.net.lobby.room), null);
   await waitFor(async () => (await listOf(B)).length === 0, { what: 'the room is gone from the list' });
   assert.equal(await roomsOpen(srv), 0);
-  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves and closes, a watcher gets the closed message');
+  assert.equal(await A.page.evaluate(() => __mp.net.lobby.room), null);
+  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves to the room screen, ← Rooms closes it, a watcher gets the closed message');
   for (const p of [A, B]) await p.page.context().close();
   await srv.stop();
 }
@@ -1148,7 +1186,7 @@ async function renameRoomTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
   const A = await openPage(srv, 'A');
-  A.room = await createRoom(A, 'Ann', 0, 'Old');
+  A.room = await createRoom(A, 'Ann', 0, 'Old');          // pending admin: renames before fighting
   const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
   const V = await openViewer(srv, 'V', A.room);
   const seen = (p, name) => waitFor(() => p.page.evaluate(n => __mp.net.lobby.rname === n && document.getElementById('lRoomTitle').textContent === n &&
@@ -1157,8 +1195,9 @@ async function renameRoomTest() {
   await A.page.fill('#lRenameIn', 'New Name'); await A.page.click('#lRenameBtn');
   for (const p of [A, B, V]) await seen(p, 'New Name');
   assert.equal(await A.page.inputValue('#lRenameIn'), '', 'the field is cleared');
-  // from the Esc menu (Ann closes her lobby first)
+  // from the Esc menu (Ann fights first, and stays admin)
   await A.page.click('#lFight');
+  await A.page.waitForFunction(() => __mp.net.mode === 'play' && !__mp.lobbyOpen && __mp.net.isAdmin(), null, { timeout: 10000 });
   await A.page.keyboard.press('Escape');
   await waitFor(() => A.page.evaluate(() => __mp.leaveOpen), { what: 'Esc menu' });
   assert.equal(await A.page.textContent('#lvRName'), 'New Name');
@@ -1186,8 +1225,8 @@ async function limitTest() {
     const ws = new WebSocket(srv.wsUrl, { origin: srv.origin, headers: { 'X-Real-IP': `fd00::${n + 1}` } });
     const timer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'ping', id: 0, ct: 0 })); }, 500);
     ws.on('close', () => clearInterval(timer)); ws.on('error', rej);
-    ws.on('message', d => { const m = JSON.parse(d); if (m.t === 'welcome' && m.id) res({ ws, room: m.room }); });
-    ws.on('open', () => ws.send(JSON.stringify({ t: 'create', name: `Raw${n}`, color: n % 12, room: `Raw room ${n}` })));
+    ws.on('message', d => { const m = JSON.parse(d); if (m.t === 'lobby' && m.mine) res({ ws, room: m.room }); });
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'create', name: `Raw${n}`, room: `Raw room ${n}` })));
   });
   try {
     for (let n = 0; n < 8; n++) raw.push(await rawRoom(n));
@@ -1197,12 +1236,11 @@ async function limitTest() {
     await waitFor(async () => (await listOf(F)).length === 10, { what: 'ten rooms in the list' });
     assert.ok(await F.page.isDisabled('#lCreate'), 'CREATE ROOM is disabled at 10 rooms');
     assert.match(await F.page.textContent('#lCreateNote'), /10 rooms are open, the most there can be/);
-    await F.page.fill('#lName', 'Late');
     await F.page.evaluate(() => __mp.createRoom());          // forced: the server still says no
     await waitFor(() => F.page.evaluate(() => /10 rooms are open/.test(document.getElementById('lErr').textContent)), { what: 'the refusal text' });
     assert.equal(await F.page.evaluate(() => __mp.net.mode), 'viewer'); assert.equal(await roomsOpen(srv), 10);
-    // a raw admin alone leaves: its room closes at once and the button is back
-    raw[0].ws.send(JSON.stringify({ t: 'leave' }));
+    // a raw (pending) admin alone looks away: its room closes at once and the button is back
+    raw[0].ws.send(JSON.stringify({ t: 'view', room: 0 }));
     await waitFor(async () => !(await F.page.isDisabled('#lCreate')), { what: 'CREATE ROOM enabled again' });
     assert.equal(await F.page.textContent('#lCreateNote'), '');
     log('limit: 10 rooms (8 raw + 2 browser), CREATE ROOM disabled with its note, a forced create refused, back to enabled after one closes');

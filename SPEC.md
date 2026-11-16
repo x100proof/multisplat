@@ -276,12 +276,13 @@ reverb) but **fast and aggressive**:
 
 ## 9. Lobby and HUD
 
-- **Lobby screen:** a logo, a name field (1–16 chars, allowlist `[A-Za-z0-9 _-]`, trimmed, and
+- **Lobby:** two screens (§17). The first lists the rooms. A room's own screen has a name field (1–16 chars, allowlist `[A-Za-z0-9 _-]`, trimmed, and
   validated on the server too), a palette of 12 neon colour swatches (**no two fighters share a colour**: swatches worn by
   players in the arena are greyed out, and the server gives a player whose colour is taken the
   next free one), a live list of players
   with their scores, and the queue position if the arena is full. There is a Fight button with a
-  Watch button beside it (§16), and an "AI players" row with − / count / + (§15).
+  Watch button beside it (§16), and an "AI players" row with − / count / + (§15). No controls help in
+  the lobby: the controls are in How to play.
 - **In-game HUD:**
   - Your HP, your score and your ninja-star count (§5.2).
   - **Scores for everyone along the top:** a strip across the top of the screen with every
@@ -622,9 +623,9 @@ Server-side bots that fight like players, added and removed from the lobby.
 
 Watch the fight without joining, and follow any ninja.
 
-- **Lobby:** a **Watch** button beside Fight (same row, the quieter outline style, both at least 48 px
-  tall), with a line under them: "Watch: no name needed and it takes no slot, even when the room is
-  full. Click or tap a ninja to follow them." Watch applies to the selected room (§17), needs no name, is open with a full room or a
+- **Lobby:** a **Watch** button beside Fight on a room's screen (§17) (same row, the quieter outline style, both at least 48 px
+  tall), with a line under them: "Watch: no name needed, takes no slot. Click or tap a ninja to follow
+  them." Watch applies to that room, needs no name, is open with a full room or a
   queue, and is disabled only for a page that is already in a room or its queue.
 - **Protocol.** A watcher is an ordinary lobby viewer with the lobby closed: it sends no
   `hello`, has no record, takes no slot and no queue place, and is not in the roster. Its `view`
@@ -652,7 +653,7 @@ Watch the fight without joining, and follow any ninja.
   step through the ninjas in score order, **↓** goes back to the leader. All of this is local to the
   page; nothing is sent.
 - **Leaving:** **Esc** (no confirm menu: there is nothing to lose), the Lobby button, or ✕ on touch
-  goes back to the lobby, where Fight works as usual. An Esc that leaves full screen does not also
+  goes back to the room's screen, where Fight works as usual. An Esc that leaves full screen does not also
   leave watching (§9). How to play has a "Watching" section.
 - **Code and tests:** the target rules are pure functions in `shared/spectate.js` (`pickAt`,
   `leaderOf`, `followTarget`, `cycleTarget`); `test/spectate.test.js` covers them and the server
@@ -665,20 +666,37 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
 
 - **Rooms and limits.** Anyone can create a room; **at most 10** are open at once. Each has **8 slots**,
   AI players included, its own FIFO queue, scores, pickups, stars, bots, chat, events and snapshots. There
-  is no permanent room: a room exists while it has a human. Room ids count up from 1 and are never reused.
-- **Lobby.** The lobby lists the open rooms (name, admin's name, fighters/8, queue, watchers) and has a
-  **Create room** field and button (name optional). With 10 rooms the button is disabled with an
-  explanation; with none the list says "No rooms yet — create one." Selecting a room shows its roster,
-  queue, AI row, Fight and Watch, which apply to that room; "All rooms" goes back to the plain list. A
-  lobby visitor sees the arena of the room it selected behind the lobby (and none without one).
-- **Creating.** The creator joins the new room at once as a player and is its **admin**; the lobby stays
-  open on the room so the admin can name it and add AI players, then Fight goes in. A blank name gives
-  "<admin name>'s room". Room names use the player-name rules (trimmed, double spaces collapsed, allowlist
+  is no permanent room: a room exists while it has a human or its pending admin (below). Room ids count up from 1 and are never reused.
+- **Lobby: two screens, kept calm (no explanatory text, no controls help; How to play explains).**
+  - **Rooms** (the first screen): the "multisplat" title, the list of open rooms, each a big tappable row
+    with exactly its name, its admin's name (★) and its players/8 (AI included); with none, "No rooms yet —
+    create one below." Under it, **Create a room**: an optional name field and CREATE (disabled at 10 rooms
+    with "10 rooms are open, the most there can be."). A footer with the How to play link and the log id.
+  - **A room** (after tapping one, or creating one): "← Rooms" and the room's name; the name field, colour
+    swatches, FIGHT and WATCH with the watch line (§16), a status line ("n/8 fighting · n waiting · you are
+    the admin"); for the admin only the rename row and the AI −/+ row (others see the AI count read-only,
+    or no row at 0); "In the room" (the roster, with Make admin buttons for the admin) and the queue. It is
+    shown while the page looks at the room (`view`), and the arena behind it is that room's. "← Rooms" sends
+    `view` 0. A page that leaves the fight (Esc → Leave) or stops watching lands on the room's screen. When
+    the room closes the page goes back to the list with "The room "<name>" has closed."
+  - Both screens fit a phone on its side (844×390) with the primary action (a room row or CREATE; FIGHT) in
+    view without scrolling, a phone held upright, and desktop.
+- **Creating.** CREATE makes the room but does **not** join it: the creating connection becomes its
+  **pending admin** (admin with no player record and no slot) and lands on the room's screen, where it can
+  rename it, set the AI players and watch. FIGHT (a `hello` into the room) joins it as a normal player who
+  stays admin (bound to the player record from then on). A blank name gives "<name>'s room" with the
+  creator's remembered player name, else "Room <id>". If the pending admin leaves the room's screen (back to
+  the list, another room) or disconnects while no human is in the room, the room closes (its bots go too);
+  with humans in it, it must hand over first (the server refuses a `view` elsewhere: `refused` leave/admin),
+  and a pending admin who disconnects passes the role at once to the human who has been there longest. A
+  player admin who is the only human and leaves the fight becomes the pending admin again. A room held only
+  by its pending admin closes after **10 minutes** without an admin action (create, rename, bots, admin).
+  Room names use the player-name rules (trimmed, double spaces collapsed, allowlist
   `[A-Za-z0-9 _-]`) plus the apostrophe, **1–20 characters**, checked on both sides. Names need not be
   unique (the list shows the admin too).
-- **The admin** (one per room, always a human in it, playing or queued):
-  - adds and removes the room's AI players (§15) and **renames** the room, from the lobby (while the room
-    is selected) or the Esc menu;
+- **The admin** (one per room: a human in it, playing or queued, or its pending admin):
+  - adds and removes the room's AI players (§15) and **renames** the room, from the room's screen (also
+    while pending) or the Esc menu;
   - **hands the role on** with a small "Make admin" button next to every other human's name (not bots,
     not oneself) in the room roster in the lobby and in the Esc menu, visible to the admin only. Every tap
     opens a confirmation dialog: "Make <name> the admin of <room>? You will lose admin." with Cancel
@@ -688,13 +706,13 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
     (event `admin`) and the new admin's controls appear at once;
   - **cannot leave for good without handing over** while another human is in the room: the Esc menu then
     says "Make someone admin first", lists the room's humans with Make admin buttons and disables Leave
-    (the server refuses such a `leave` too). An admin who is the only human is warned that leaving closes
-    the room; confirming closes it.
+    (the server refuses such a `leave` too). An admin who is the only human leaves the fight onto the room's
+    screen and stays admin (pending).
   - If the admin's connection drops, the role stays through the 5 s resume grace (§6.4). When the admin
     is gone for good (the grace ran out, a kick, or replaced), the role passes automatically to the human
     who has been in the room longest, preferring connected ones (event `admin` with `why: 'auto'`).
 - **Closing.** A room closes when its last human is gone for good (leave, kick or grace expiry; a human
-  away inside the grace keeps it open). Its bots are removed. Everyone looking at it (watchers, lobby
+  away inside the grace keeps it open) and it has no pending admin, or as under Creating. Its bots are removed. Everyone looking at it (watchers, lobby
   visitors who selected it) gets `closed` and goes back to the room list with a short message.
 - **Per room:** name de-duplication and passing a freed name on (§9), colour uniqueness (§9), the queue
   and promotion, chat (§9), the AI players (§15), watching (§16). **Global:** connection caps
@@ -702,19 +720,22 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   room), the heartbeat, the input and message buckets, the bots' server-wide budget. One server timer steps
   every room once per tick, so all rooms share one tick number.
 - **Abuse limits (public write paths).** A connection plays in at most one room, so it is admin of at
-  most one (a `create` or `hello` from a connection already in a room is a `protocol` kick). At most **2
+  most one (a `create` or `hello` from a connection already in a room, or a `create` from a pending admin,
+  is a `protocol` kick). At most **2
   open rooms created from one address** (the client IP as in §10, `TRUST_PROXY` included). Creating is
   limited per connection (burst 2, then one per 15 s); renames and admin transfers share another bucket
   (burst 4, then one per 2 s); a request over a bucket is refused and counts toward the flood kick.
-- **Protocol** (version 2; an older page reloads through the build check, §10):
-  - client → server: `{t:'create', name, color, room}` (create a room named `room`, '' for the default,
-    and join it as admin); `{t:'hello', name, color, room: id}` (join; a resume `hello` with its token
+- **Protocol** (version 3; an older page reloads through the build check, §10):
+  - client → server: `{t:'create', room, name?}` (create a room named `room`, '' for the default; `name`
+    is the creator's player name, optional; the sender becomes its pending admin and looks at it, and does
+    not join); `{t:'hello', name, color, room: id}` (join; a resume `hello` with its token
     needs no room); `{t:'view', room: id|0}` (the room a lobby visitor looks at; 0 for none);
     `{t:'rename', name}`; `{t:'admin', id}`; `bots` and `leave` as before with the admin rules above.
     Wrong types are `malformed` kicks (a missing or non-integer `room` in a fresh `hello` is `bad hello`);
   - server → client: `lobby` carries `rooms: [{id, name, admin, n, cap, bots, q, watch}]`, `maxRooms`, and
-    for the room the connection plays in or selected `room`, `rname`, `admin` (the admin's player id) plus
-    the existing roster fields; the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
+    for the room the connection plays in or selected `room`, `rname`, `admin` (the admin's player id; null
+    while the admin is pending) plus the existing roster fields, and `mine` (this connection is that room's
+    admin, pending or as its player); the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
     what, why}` turns a request down without a kick (`create`: `full` | `ip` | `rate` | `name`; `join`:
     `gone`; `leave`: `admin`; `rename`: `admin` | `name` | `rate`; `admin`: `admin` | `target` | `rate`;
     `bots`: `admin`); `{t:'closed', room, name, why}`; events `{type:'admin', id, from, why}` and
@@ -723,5 +744,5 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   queue, watchers, pickups, its share of the tick); ring events and log lines of a room carry its id
   (`room-create`, `room-rename`, `admin`, `room-close`, `refused-req` …); streamed client log entries are
   tagged with the room (§13.5). The admin listener stays loopback-only.
-- **Help.** How to play has a "Rooms" section; the lobby explains rooms in one line above the list.
+- **Help.** How to play has a "Rooms" section; the lobby itself has no explanatory text.
 - **CPU.** 10 rooms × 8 fighters (one human and 7 bots each) must stay well inside the 16.7 ms tick.

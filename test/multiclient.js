@@ -565,19 +565,20 @@ async function staleBuildTest() {
   const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
   const page = await ctx.newPage();
   page.on('pageerror', e => errors.push(`Stale: ${e.message}`));
-  // serve this page an index.html stamped with an old build id, once
-  let faked = 0;
-  await page.route(u => new URL(u).pathname === '/', async route => {
-    const r = await route.fetch(); let body = await r.text();
-    if (faked++ === 0) body = body.replace(/(<meta name="build" content=")[0-9a-f]+/, '$1deadbeef00');
-    await route.fulfill({ response: r, body });
-  });
-  await page.goto(srv.url);
-  await page.waitForFunction(() => window.__mp && __mp.net && __mp.net.build && __mp.net.build === __mp.net.serverBuild, null, { timeout: 10000 });
-  assert.equal(faked, 2, 'the stale page reloaded itself exactly once');
-  await sleep(1500);
-  assert.equal(faked, 2, 'and does not loop');
-  log('stale build: the page reloaded itself once and now matches the server');
+  const ready = () => page.waitForFunction(() => window.__mp && __mp.net && __mp.net.state === 'open' && __mp.net.serverBuild, null, { timeout: 10000 });
+  await page.goto(srv.url); await ready();
+  const b = await page.evaluate(() => ({ page: __mp.net.build, server: __mp.net.serverBuild, meta: document.querySelector('meta[name="build"]').content }));
+  assert.match(b.server, /^[0-9a-f]{10}$/); assert.equal(b.page, b.server); assert.equal(b.meta, b.server);
+  // pretend this page came from an older build, then reconnect as after a deploy: it reloads itself
+  await page.evaluate(() => { window.__marker = 1; __mp.net.build = 'deadbeef00'; __mp.net.drop(); });
+  await page.waitForFunction(() => !window.__marker && window.__mp && __mp.net && __mp.net.state === 'open', null, { timeout: 10000 });
+  await ready();
+  assert.equal(await page.evaluate(() => __mp.net.build === __mp.net.serverBuild), true, 'after the reload the page matches the server');
+  // the same mismatch again for the same server build must not reload a second time (no loops)
+  await page.evaluate(() => { window.__marker = 2; __mp.net.build = 'deadbeef00'; __mp.net.drop(); });
+  await sleep(3000);
+  assert.equal(await page.evaluate(() => window.__marker), 2, 'no second reload for the same build');
+  log('stale build: the page reloaded itself once and does not loop');
   await ctx.close(); await srv.stop();
 }
 

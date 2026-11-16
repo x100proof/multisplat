@@ -50,7 +50,7 @@ from `/shared/*.js`.
   `spawnMinDist 64`) and the pickup tunables `itemMinTicks 1200`, `itemMaxTicks 2400` (20–40 s),
   `itemMax 2`, `itemClear 32`, and the ninja-star tunables (SPEC §5.2): `starMinTicks 300`,
   `starMaxTicks 600` (5–10 s), `starMax 4`, `starGive 3`, `starCarry 9`, `throwCd 15`, `starSpeed 6`,
-  `starRange 240`, `starDmg 20`, `starKnockX 1.6`, `starKnockY -1.6` (a small knockback).
+  `starDmg 20`, `starKnockX 1.6`, `starKnockY -1.6` (a small knockback).
 - `LONG_REACH = 1.6` (the holder's sword-box length factor) is a separate constant, not in `DEFAULTS`,
   because the offline debug panel edits `cfg` and reach must always match the server.
   `ITEM_W 8`, `ITEM_H 14` is a pickup's body (both kinds). `STAR_W 4`, `STAR_H 4` is a flying star's
@@ -182,7 +182,7 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
   `movePlayer` and `predictStep` never throw (the client does not predict it).
 - **Flight** (`stepStars`, after the slashes, before the pickups; in throw order). The star sweeps
   `vx` along x, cut short by the first solid tile column its leading edge would enter (`isSolid`:
-  planks do not stop it) and by `starRange` (240) in total. Inside the swept box (4 units tall) it hits
+  planks do not stop it); there is no range limit (the side edges are solid, so every star ends). Inside the swept box (4 units tall) it hits
   the nearest living player along the flight who is not the thrower and has no `iframes` (ties go to
   the lower id): `starDmg` 20, knockback `(1.6 × dir, -1.6)` (×1.4 on a kill), `hitStun`, `lastHitBy`
   = the thrower, `hit` event with `move: 'star'`, `star` and `dir`; on 0 HP `kill(…, 'star')` credits

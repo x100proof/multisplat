@@ -39,7 +39,7 @@ export const DEFAULTS = Object.freeze({
   // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; +3 each, carry 9; throw
   // cooldown 15 ticks; flight 6 units/tick for 240 units; 20 damage and a small knockback
   starMinTicks: 300, starMaxTicks: 600, starMax: 4, starGive: 3, starCarry: 9,
-  throwCd: 5, starSpeed: 6, starRange: 240, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
+  throwCd: 5, starSpeed: 6, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
 });
 
 // Long sword (SPEC §5.1): the holder's swordBoxOf length is scaled by this, for chop and sweep.

@@ -159,7 +159,8 @@ ARCHITECTURE.md    the code as implemented
   a new input bit, edge-triggered like slash, with a very short cooldown (5 ticks), so three quick presses throw three stars. A player in
   hit-stun can't throw. Throwing ends spawn invulnerability, like attacking.
 - **Flight:** a star flies fast (6 units per tick) in a straight horizontal line from hand
-  height. It stops at the first solid tile (planks don't stop it) or after 240 units. It hits
+  height. It stops only at the first solid tile (planks don't stop it): there is no range limit, so it
+  crosses the whole arena and can hit players off-screen. It hits
   the first living, vulnerable player it touches other than the thrower: **20 damage**, a small
   knockback and the usual hit-stun, and it is then spent. Stars are simulated on the server in
   the shared sim. They are not lag-compensated.

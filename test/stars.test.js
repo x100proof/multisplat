@@ -133,7 +133,7 @@ test('throw: not in hit-stun; throwing ends spawn invulnerability', () => {
   assert.equal(q.iframes, 0, 'spawn protection ended by the throw');
 });
 
-test('flight: 6 units a tick from hand height in the facing direction, gone after 240 units', () => {
+test('flight: 6 units a tick from hand height in the facing direction, no range: flies on to the wall', () => {
   const w = world(1);
   const p = place(w, 1, 100, 1 * 16 + 3, -1); p.stars = 1; p.onGround = false;   // in the open air near the ceiling, facing left
   Object.assign(p, { x: 300, px: 300, y: 40, py: 40 });
@@ -148,11 +148,11 @@ test('flight: 6 units a tick from hand height in the facing direction, gone afte
   assert.equal(st.x, x0 - 6, 'moved 6 on the throw tick');
   const xs = [];
   let end = null;
-  for (let t = 0; t < 60 && !end; t++) { const e = S.step(w, {}); end = e.find(x => x.type === 'starEnd'); if (!end) xs.push(w.stars[0].x); }
+  for (let t = 0; t < 200 && !end; t++) { const e = S.step(w, {}); end = e.find(x => x.type === 'starEnd'); if (!end) xs.push(w.stars[0].x); }
   for (let i = 1; i < xs.length; i++) assert.equal(xs[i - 1] - xs[i], 6);
   assert.ok(end, 'the star ends');
-  assert.equal(end.wall, false, 'by range, not a wall');
-  assert.ok(Math.abs(x0 - end.x - 240) < 1e-9, `flew 240 units (${x0 - end.x})`);
+  assert.equal(end.wall, true, 'by a wall, not a range');
+  assert.ok(x0 - end.x > 240, `flew past the old 240-unit range (${x0 - end.x})`);
   assert.equal(w.stars.length, 0);
 });
 

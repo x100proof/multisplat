@@ -336,7 +336,7 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
       events.push({ type: 'break', tick: state.tick, id: a.id, item: it.id, x: it.x, y: it.y });
     }
   }
-  // 5. ninja stars in flight: move, stop at solid tiles or the range, hit the first player
+  // 5. ninja stars in flight: move, stop at solid tiles (no range limit), hit the first player
   stepStars(state, cfg, L, events);
   // 6. pickups: taken on body contact, in id order; then the spawn countdowns
   stepItems(state, cfg, L, events);
@@ -357,13 +357,14 @@ function throwStar(state, p, cfg, events) {
 }
 
 // One tick of flight for every star, in throw order. The star sweeps from x to x + vx; the sweep is
-// cut short at the first solid tile (planks don't stop it) and at cfg.starRange. Inside the sweep it
+// cut short at the first solid tile (planks don't stop it); there is no range: a star crosses the
+// whole arena (outside the side edges is solid, so it always ends). Inside the sweep it
 // hits the first living, vulnerable player other than the thrower that it touches (nearest along
 // the flight, ties to the lower id): starDmg, a small knockback along the flight, hit-stun.
 function stepStars(state, cfg, L, events) {
   for (let i = 0; i < state.stars.length; i++) {
     const st = state.stars[i], dir = st.vx > 0 ? 1 : -1, half = STAR_W / 2, speed = Math.abs(st.vx);
-    let travel = Math.max(0, Math.min(speed, cfg.starRange - st.dist)), wall = false;
+    let travel = speed, wall = false;
     // solid tiles: the columns the leading edge enters during the sweep
     const top = Math.floor((st.y - STAR_H / 2) / T), bot = Math.floor((st.y + STAR_H / 2 - .01) / T);
     const lead = st.x + dir * half;
@@ -389,7 +390,7 @@ function stepStars(state, cfg, L, events) {
       continue;
     }
     st.x = x1; st.dist += travel;
-    if (wall || st.dist >= cfg.starRange) {
+    if (wall) {
       state.stars.splice(i--, 1);
       events.push({ type: 'starEnd', tick: state.tick, star: st.id, x: st.x, y: st.y, wall });
     }

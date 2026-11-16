@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LEVEL, isSolid, isPlat, tileAt, pickSpawn, spawnPos } from '../shared/level.js';
-import { T, PW, PH } from '../shared/constants.js';
+import { T, PW, PH, ITEM_W, ITEM_H } from '../shared/constants.js';
 
 const L = LEVEL;
 
@@ -70,4 +70,31 @@ test('pickSpawn favours far points', () => {
   let far = 0;
   for (let i = 0; i < 500; i++) { const s = pickSpawn(L, [p], rand); if (s.x > L.w * T / 2) far++; }
   assert.ok(far > 300, `right half chosen ${far}/500`);
+});
+
+test('long-sword item points: >= 6, on every tier, on footing, clear of spikes, reachable', () => {
+  const pts = L.items;
+  assert.ok(pts.length >= 6);
+  const standable = (tx, ty) => isSolid(L, tx, ty) || isPlat(L, tx, ty);
+  const surfaces = new Set(L.spawns.map(s => s.y));
+  assert.deepEqual(new Set(pts.map(p => p.y)), surfaces, 'one or more on every surface level spawns use (floor and 4 tiers)');
+  const seen = new Set();
+  for (const p of pts) {
+    const key = p.x + ',' + p.y;
+    assert.ok(!seen.has(key), 'distinct ' + key); seen.add(key);
+    assert.equal(p.y % T, 0, 'y is a tile top');
+    const ty = p.y / T, l = Math.floor((p.x - ITEM_W / 2) / T), r = Math.floor((p.x + ITEM_W / 2 - .01) / T);
+    for (let tx = l; tx <= r; tx++) {
+      assert.ok(standable(tx, ty), `footing under ${key}`);
+      for (let y = Math.floor((p.y - Math.max(ITEM_H, PH)) / T); y < ty; y++) assert.equal(tileAt(L, tx, y), '.', `air at ${key}`);
+      for (let y = 0; y < L.h; y++) assert.notEqual(tileAt(L, tx, y), '^', `no spikes in the column of ${key}`);
+    }
+    // reachable: a spawn on the same surface, connected by walkable tiles with headroom
+    const s = L.spawns.find(sp => sp.y === p.y && (() => {
+      const a = Math.floor(Math.min(sp.x, p.x) / T), b = Math.floor(Math.max(sp.x, p.x) / T);
+      for (let tx = a; tx <= b; tx++) if (!standable(tx, ty) || tileAt(L, tx, ty - 1) !== '.') return false;
+      return true;
+    })());
+    assert.ok(s, 'walkable from a spawn: ' + key);
+  }
 });

@@ -32,8 +32,19 @@ const SPAWNS = [
   [104, 48], [312, 48],                            // tier 4
 ].map(([x, y]) => ({ x, y }));
 
+// Long-sword item points (SPEC §5.1), given like spawns: x = centre, y = top of the surface the
+// pickup lies on. Two per surface level, none on or above the spike columns (12-13).
+const ITEMS = [
+  [72, 272], [344, 272],     // floor, either side of the floor spikes
+  [152, 208], [264, 208],    // tier 1: the small planks
+  [168, 144], [248, 144],    // tier 2: inner ends of the long planks
+  [56, 96], [360, 96],       // tier 3: wall ledges
+  [136, 48], [280, 48],      // tier 4: high planks
+].map(([x, y]) => Object.freeze({ x, y }));
+
 export const LEVEL = Object.freeze({
   w: MAP[0].length, h: MAP.length, grid: Object.freeze(MAP.slice()), spawns: Object.freeze(SPAWNS),
+  items: Object.freeze(ITEMS),
 });
 
 export const tileAt = (L, tx, ty) => (ty >= 0 && ty < L.h && tx >= 0 && tx < L.w ? L.grid[ty][tx] : '.');

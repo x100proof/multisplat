@@ -33,7 +33,16 @@ export const DEFAULTS = Object.freeze({
   hitStun: 10, stunMoveMul: .25,
   spawnIframes: 90, respawnTicks: 120, creditTicks: 300,
   spawnMinDist: 64,
+  // long-sword pickups (SPEC §5.1): a new one 20-40 s after the previous appeared, at most 2 lying
+  // at once, at an item point with no player within itemClear units
+  itemMinTicks: 1200, itemMaxTicks: 2400, itemMax: 2, itemClear: 32,
 });
+
+// Long sword (SPEC §5.1): the holder's swordBoxOf length is scaled by this, for chop and sweep.
+// Not in DEFAULTS on purpose: the client debug panel edits cfg, and reach must match the server.
+export const LONG_REACH = 1.6;
+// A pickup's body, centred on its item point's x and resting on the point's surface (y).
+export const ITEM_W = 8, ITEM_H = 14;
 
 // Netcode values shared by the server and the client (SPEC §6).
 export const NET = Object.freeze({

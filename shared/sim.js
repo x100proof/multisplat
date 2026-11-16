@@ -4,7 +4,7 @@
 // starting state plus the same per-tick input bitmasks always gives the same result.
 //
 // Movement and the sword are ported from NinjaRunner (updatePlay, moveBody, swordBoxOf).
-import { T, KEY, FX, PW, PH, ATK_LEN, ATK_CD, COMBO_T, DEFAULTS, HISTORY_TICKS } from './constants.js';
+import { T, KEY, FX, PW, PH, ATK_LEN, ATK_CD, COMBO_T, DEFAULTS, HISTORY_TICKS, LONG_REACH, ITEM_W, ITEM_H } from './constants.js';
 import { LEVEL, isSolid, isPlat, tileAt, pickSpawn, spawnPos } from './level.js';
 
 export { KEY, FX, DEFAULTS, LEVEL };
@@ -20,7 +20,9 @@ export function nextRand(state) {
 export function createWorld({ seed = 1 } = {}) {
   let s = Math.floor(Math.abs(seed)) % RNG_M;
   if (s === 0) s = 1;
-  return { tick: 0, rng: s, players: [] };
+  // items: long-sword pickups lying in the arena [{id, x, y}]; itemT: ticks until the next one may
+  // appear (-1 = not drawn yet; drawn on the first step); itemSeq: the last pickup id used.
+  return { tick: 0, rng: s, players: [], items: [], itemT: -1, itemSeq: 0 };
 }
 
 function newPlayer(id) {
@@ -30,7 +32,7 @@ function newPlayer(id) {
     atk: 0, atkCd: 0, atkType: 'chop', combo: 0, swing: 0, hitSet: [],
     hp: 0, alive: false, iframes: 0, stun: 0, respawn: 0,
     lastHitBy: null, lastHitTick: -1, score: 0, deaths: 0,
-    keys: 0, fx: 0, standOn: null,
+    keys: 0, fx: 0, standOn: null, long: false,
   };
 }
 
@@ -60,7 +62,7 @@ function spawnPlayer(state, p, cfg, L, events) {
     x: pos.x, y: pos.y, px: pos.x, py: pos.y, vx: 0, vy: 0, face: s.x < L.w * T / 2 ? 1 : -1,
     onGround: false, coyote: 0, buf: 0, atk: 0, atkCd: 0, atkType: 'chop', combo: 0, hitSet: [],
     hp: cfg.maxHp, alive: true, iframes: cfg.spawnIframes, stun: 0, respawn: 0,
-    lastHitBy: null, lastHitTick: -1, standOn: null,
+    lastHitBy: null, lastHitTick: -1, standOn: null, long: false,
   });
   events.push({ type: 'spawn', tick: state.tick, id: p.id, x: p.x, y: p.y });
 }
@@ -96,11 +98,13 @@ export function moveBody(e, L = LEVEL) {
   return hit;   // returned, not stored, so the state's shape stays stable
 }
 
-// Sword hitbox for a swing, NinjaRunner swordBoxOf.
+// Sword hitbox for a swing, NinjaRunner swordBoxOf. A long-sword holder (p.long) has the box's
+// length scaled by LONG_REACH. The box stays anchored at its near edge, 2 units inside the body on
+// the facing side, and grows outward in the facing direction only (never back through the body).
 export function swordBoxOf(p) {
-  return p.atkType === 'sweep'
-    ? { x: p.face > 0 ? p.x + p.w - 2 : p.x - 20, y: p.y + 1, w: 22, h: 10 }
-    : { x: p.face > 0 ? p.x + p.w - 2 : p.x - 16, y: p.y - 5, w: 18, h: p.h + 8 };
+  const sweep = p.atkType === 'sweep', len = (sweep ? 22 : 18) * (p.long ? LONG_REACH : 1);
+  const x = p.face > 0 ? p.x + p.w - 2 : p.x + 2 - len;
+  return sweep ? { x, y: p.y + 1, w: len, h: 10 } : { x, y: p.y - 5, w: len, h: p.h + 8 };
 }
 export const swordLive = p => p.alive && p.atk > 3 && p.atk <= ATK_LEN - 2;
 
@@ -238,6 +242,9 @@ export function slashHits(attacker, targets) {
 }
 
 function kill(state, v, killerId, move, cfg, events) {
+  const held = v.long, killer = killerId != null ? getPlayer(state, killerId) : null;
+  const longKill = !!(killer && killer.long && (move === 'chop' || move === 'sweep'));
+  v.long = false;                               // a long sword is lost on death, never dropped
   v.alive = false; v.hp = 0; v.deaths++; v.respawn = cfg.respawnTicks;
   v.atk = 0; v.stun = 0; v.iframes = 0; v.buf = 0;
   let credit = killerId;
@@ -246,7 +253,8 @@ function kill(state, v, killerId, move, cfg, events) {
   if (k) k.score++;
   nextRand(state);
   events.push({ type: 'kill', tick: state.tick, killer: k ? k.id : null, victim: v.id, move, seed: state.rng,
-                x: v.x, y: v.y, vx: v.vx, vy: v.vy, face: v.face });
+                x: v.x, y: v.y, vx: v.vx, vy: v.vy, face: v.face,
+                ...(longKill ? { long: true } : {}), ...(held ? { held: true } : {}) });
 }
 
 // Kill a player from outside the normal rules (e.g. a disconnect). Credit rules still apply.
@@ -304,7 +312,48 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
     if (dead) kill(state, v, a.id, a.atkType, cfg, events);
     else v.stun = cfg.hitStun;
   }
+  // 5. long-sword pickups: taken on body contact by a living player without one, in id order
+  stepItems(state, cfg, L, events);
   return events;
+}
+
+// ---------- long-sword pickups (SPEC §5.1) ----------
+export const itemBox = it => ({ x: it.x - ITEM_W / 2, y: it.y - ITEM_H, w: ITEM_W, h: ITEM_H });
+
+// Item points that may take a new pickup: no pickup on them and no living player's feet within
+// cfg.itemClear units. In level order.
+export function freeItemPoints(state, cfg = DEFAULTS, L = LEVEL) {
+  const c2 = cfg.itemClear * cfg.itemClear, live = state.players.filter(p => p.alive);
+  return (L.items || []).filter(pt => !state.items.some(it => it.x === pt.x && it.y === pt.y) &&
+    live.every(p => { const dx = p.x + p.w / 2 - pt.x, dy = p.y + p.h - pt.y; return dx * dx + dy * dy >= c2; }));
+}
+
+const drawItemT = (state, cfg) => cfg.itemMinTicks + Math.floor(nextRand(state) * (cfg.itemMaxTicks - cfg.itemMinTicks + 1));
+
+function stepItems(state, cfg, L, events) {
+  if (!state.items) { state.items = []; state.itemT = -1; state.itemSeq = 0; }   // a pre-M5 state
+  // pickups: each lying item, in list order, goes to the lowest-id living toucher without one
+  for (let i = 0; i < state.items.length; i++) {
+    const it = state.items[i], box = itemBox(it);
+    const p = state.players.find(q => q.alive && !q.long && overlap(q, box));
+    if (!p) continue;
+    p.long = true;
+    state.items.splice(i--, 1);
+    events.push({ type: 'pickup', tick: state.tick, id: p.id, item: it.id, x: it.x, y: it.y });
+  }
+  // spawning: the countdown is drawn when a pickup appears (and on the first step) and runs only
+  // while there is room for another; when it is due and no point is free, it retries every tick
+  if (state.itemT < 0) state.itemT = drawItemT(state, cfg);
+  if (state.items.length >= cfg.itemMax) return;
+  if (state.itemT > 0) state.itemT--;
+  if (state.itemT > 0) return;
+  const free = freeItemPoints(state, cfg, L);
+  if (!free.length) return;
+  const pt = free[Math.floor(nextRand(state) * free.length) % free.length];
+  const it = { id: ++state.itemSeq, x: pt.x, y: pt.y };
+  state.items.push(it);
+  state.itemT = drawItemT(state, cfg);
+  events.push({ type: 'item', tick: state.tick, id: it.id, x: it.x, y: it.y });
 }
 
 // Re-simulate only one player for client prediction: its own movement, then collisions against

@@ -1,9 +1,12 @@
 // Client-side remote debugging (SPEC §13.1): a ring buffer of structured log entries that all
-// client code writes through dbg(), and the debug report sent to POST /debug/report.
+// client code writes through dbg(), the debug report sent to POST /debug/report, and the stream
+// of the same entries to the server over the game WebSocket (SPEC §13.5), kept there for an hour.
 //
 // A report holds: the environment, net statistics, the local player's state and the ring. It never
 // holds keystrokes. The resume token rides along only so the server can attach its own view of
 // this connection; the server drops it before storing anything.
+import { LOG } from '/shared/logid.js';
+
 const RING_MAX = 300;
 const REPORT_MAX = 16000;                  // bytes; the server refuses over 16 KiB
 const AUTO_MIN_GAP_MS = 60000, AUTO_MAX = 5;
@@ -15,6 +18,8 @@ let tickOf = () => 0;
 let sourceOf = () => ({});
 let lastAuto = -Infinity, autoCount = 0;
 export let lastReportId = null;
+export let wordId = null;                  // the log word id the server gave this browser (§13.5)
+export function setWordId(w) { wordId = w; }
 
 const cut = s => (typeof s === 'string' && s.length > STR_MAX ? s.slice(0, STR_MAX) : s);
 
@@ -24,6 +29,7 @@ export function dbg(cat, msg, data) {
   if (data !== undefined) e.data = data;
   ring.push(e);
   if (ring.length > RING_MAX) ring.shift();
+  queueForStream(e);
   if (VERBOSE) console.debug(`[${cat}] ${msg}`, data ?? '');
 }
 // Verbose-only entries (every snapshot, every correction): cheap no-ops otherwise.
@@ -51,6 +57,7 @@ export function buildReport(kind, reason) {
   const base = { v: 1, kind, reason: cut(reason || ''), ts: new Date().toISOString(),
     env: sanitize(env), net: sanitize(net), player: sanitize(player) };
   if (token) base.token = token;
+  if (wordId) base.w = wordId;
   let list = ring.map(e => sanitize(e));
   let body = JSON.stringify({ ...base, entries: list });
   if (bytes(body) > REPORT_MAX) {
@@ -100,4 +107,50 @@ export function installErrorHandlers() {
     sendReport('auto', 'unhandledrejection');
   });
   document.addEventListener('visibilitychange', () => dbg('life', document.hidden ? 'tab hidden' : 'tab visible'));
+}
+
+// ---------- streaming (SPEC §13.5) ----------
+// Every entry except the verbose ones (?debug=1 snapshots and corrections) is also queued for the
+// server, which keeps an hour of them per word id. net.js registers the sink (the open game
+// socket); the queue is flushed every LOG.flushMs and when the tab is hidden or closed, packed into
+// messages of at most LOG.msgBytes / LOG.maxEntries, LOG.perFlush messages per flush. Past
+// LOG.queueMax unsent entries the oldest are dropped and reported as `lost` in the next message.
+const outq = [];
+let lost = 0, sink = null;
+const thinAt = new Map();
+function queueForStream(e) {
+  if (e.cat === 'verbose') return;
+  const key = e.cat + ' ' + e.msg, gap = LOG.thin[key];
+  if (gap) { const t = thinAt.get(key) ?? -Infinity; if (e.ts - t < gap) return; thinAt.set(key, e.ts); }
+  outq.push(e);
+  if (outq.length > LOG.queueMax) { outq.shift(); lost++; }
+}
+// sink(str) sends one message and returns true, or false if it cannot right now.
+export function setLogSink(fn) { sink = fn; }
+// One entry as it goes on the wire: sanitized, and cut down if it alone would not fit a message.
+function wireEntry(e) {
+  const o = sanitize(e);
+  if (bytes(JSON.stringify(o)) > LOG.msgBytes - 60) { o.msg = String(o.msg).slice(0, 120); if (o.data !== undefined) o.data = JSON.stringify(o.data).slice(0, 200); }
+  if (bytes(JSON.stringify(o)) > LOG.msgBytes - 60) delete o.data;
+  return o;
+}
+export function flushLog() {
+  if (!sink) return;
+  for (let k = 0; k < LOG.perFlush && (outq.length || lost); k++) {
+    const batch = [], head = lost ? { t: 'log', lost } : { t: 'log' };
+    let size = bytes(JSON.stringify({ ...head, e: [] }));
+    let n = 0;
+    for (; n < outq.length && batch.length < LOG.maxEntries; n++) {
+      const w = wireEntry(outq[n]), b = bytes(JSON.stringify(w)) + 1;
+      if (size + b > LOG.msgBytes) break;
+      batch.push(w); size += b;
+    }
+    if (!sink(JSON.stringify({ ...head, e: batch }))) return;
+    outq.splice(0, n); lost = 0;
+  }
+}
+if (typeof addEventListener === 'function') {
+  setInterval(flushLog, LOG.flushMs);
+  addEventListener('pagehide', flushLog);
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => { if (document.hidden) flushLog(); });
 }

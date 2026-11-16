@@ -18,14 +18,16 @@ shared/sim.js         deterministic 60 Hz world step (movement, player collision
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
+server/logs.js        streamed client logs: per word id, the last hour in memory, with caps (SPEC §13.5)
+shared/logid.js       word ids (`amber-otter`: 100 adjectives x 100 nouns) and the LOG streaming limits
 public/index.html     markup + CSS (lobby, HUD, respawn message, debug panel)
 public/game.js        client: rendering, input (keys, pad, touch), SFX, camera, lobby, HUD, debug panel; offline sandbox
 public/gore.js        gore simulation (DOM-free, seeded by kill.seed): particles, gibs, fountains, decals, pools
 public/music.js       the combat score as data, its offline pre-render into two loops, the live player
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
-public/debug.js       client log ring (dbg), debug report builder and sender
+public/debug.js       client log ring (dbg), debug report builder and sender, log streaming queue
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, gore, music, hygiene)
+test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, gore, music, logs, hygiene)
 test/multiclient.js   headless Chromium: 3 players, fight, kill feed, score strip, gore fingerprint and blood styles, resume, debug report, NET_SIM prediction, long sword, leave, ninja stars, heartbeat
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
@@ -247,12 +249,16 @@ Client → server:
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
 { t: 'chat', text }                     // SPEC §9: a chat line (rules below); a non-string text is a `malformed` kick
 { t: 'bots', d: 1|-1 } | { t: 'bots', n } // SPEC §15: one AI player more/fewer, or n in all (0..botMax); else a `malformed` kick
+{ t: 'log', e: [{ ts, tick, cat, msg, data? }…], lost? } // SPEC §13.5: streamed debug entries (≤ 20 kept, own bucket
+                                        // 6 + 1/s); a non-array e is a `malformed` kick
+// hello may also carry w: the browser's word id (SPEC §13.5); an invalid one is ignored.
+// The socket URL may carry it too: /ws?id=amber-otter.
 ```
 
 Server → client:
 
 ```js
-{ t: 'welcome', v: 1, tick, cap, colors }                     // on connect, before hello
+{ t: 'welcome', v: 1, tick, cap, colors, w /* word id, SPEC §13.5 */ } // on connect, before hello
 { t: 'welcome', v: 1, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
                                                                // no record; the socket stays a viewer
 { t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
@@ -383,7 +389,7 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   each player's `stars`; the CLI prints `star pickups`, `stars in flight` and `stars=n` per player.
   `PRESS_BITS` (carried over a skipped input) includes `THROW`; the input-mask check is `KEY_MASK` (63).
   `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
-  a token.
+  a token. Log word ids and the `log` message (SPEC §13.5) are under server/logs.js below.
 
 ## server/debug.js
 
@@ -392,7 +398,8 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   `drop`, `timeout` (heartbeat, with `player` and `silentMs`), `leave`, `kick` (with `reason`), `ratelimit`, `overrun`, `refused` (upgrade refusals,
   with `why`), `report` and `report-rejected`.
 - `validateReport(body)` returns `{report, token}`, with the token removed from the report. Rules:
-  - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId`,
+  - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId, w`
+    (`w`: the word id, SPEC §13.5),
   - `entries` ≤ 300,
   - strings are cut to 300 characters, line breaks become spaces, and other control characters
     (C0, DEL, C1, U+2028/2029 and the bidi controls) are removed,
@@ -417,11 +424,38 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
     and an append that would take it over 50 MB is refused, so today's file cannot grow past the
     cap between prunes. If a write fails or the cap is reached, the answer is 503.
   - `adminHandler` / `listenAdmin(port)`: GET-only JSON on `127.0.0.1` (hard-coded). Routes:
-    `/state`, `/events?n=`, `/reports?n=` (summaries, newest first) and `/reports/<id>`.
+    `/state`, `/events?n=`, `/reports?n=` (summaries, newest first), `/reports/<id>`, and the
+    streamed logs `/logs` and `/logs/<word|name|ip>` (`arena.logs`, see server/logs.js).
+
+## server/logs.js (SPEC §13.5)
+
+`createLogStore({now, keepMs, rand, maxIds, maxPerId, maxBytes})` (defaults: `Date.now`, 1 h, crypto,
+2000, 4000, 32 MB) keeps, per word id, `{names, ips, first, seen, entries, lost, bad}` in memory
+only. Each stored entry is `{at, c, size, e}`: the server's receive time, connection id, its JSON
+size and the cleaned client entry (`validateEntry`: keys `ts, tick, cat, msg, data` only, finite
+numbers, `cat` lower case and not `verbose`, strings through `debug.js` `clean()`). The arena owns
+one (`arena.logs`, the `logs` option) and:
+- `connect` calls `assign(transport.word)` (the `/ws?id=` the server passed on; a valid list pair is
+  kept, else a fresh random id, avoiding ids already held) and `touch(word, {ip})`, and sends the
+  word in the connection welcome; `hello` may switch to a valid `w` and `touch`es the cleaned name;
+  `disconnect` `touch`es (last seen). `connView` shows `word` and `logDropped`, so reports' server
+  view and `tools/debug.js state` have it.
+- `onLog` charges the connection's own bucket (`LOG.burst` 6, `LOG.perSec` 1; a miss counts in
+  `conn.logDropped` and goes through `dropped()`, the flood-kick path) and calls `add(word, e[0..20],
+  {ip, conn, lost})`; entries past 20 and the client's own `lost` count are added to `lost`.
+- Pruning (at most every 10 s on writes, always before `list`/`find`) drops entries older than
+  `keepMs` and ids with no entries not seen within it. Caps: past `maxPerId` the id's oldest go;
+  a new id past `maxIds` evicts one (no entries first, then oldest seen); past `maxBytes` the
+  oldest entries anywhere go, an eighth of that id's at a time.
+- `list()` (newest seen first) and `find(q)` (exact word, any name case-insensitively, or any IP;
+  entries oldest first with ISO `at`) serve the admin listener's `/logs` and `/logs/<q>`.
 
 ## tools/debug.js
 
-`node tools/debug.js [--port N] state | events [n] | reports [n] | report <id> | tail`. The port is
+`node tools/debug.js [--port N] state | events [n] | reports [n] | report <id> | tail | logs | log <word|name|ip>`.
+`logs` prints one line per identity (last seen, word, name, IPs, entry count, lost/refused counts);
+`log <q>` prints each matching identity's header and then one line per entry: server time,
+connection, client clock, tick, `[cat] msg` and the data as JSON, under an untrusted-input line. The port is
 `--port` or `DEBUG_PORT`. It prints `# UNTRUSTED INPUT: …` above report listings and bodies.
 Every line it prints has C0 (except newline), DEL, C1 and bidi control characters replaced with
 U+FFFD, so a stored report cannot drive the terminal even if intake cleaning were bypassed.
@@ -441,7 +475,9 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
   - `stats`: `rtt`, `rttAvg`, `rttMax`, `offset`, `jitter`, `reconnects`, `snaps`, the `predErr`
     ring, `snapsSnapped` and more.
 - **Connection.**
-  - `connect()` opens `ws(s)://<page host>/ws`. The page loads as a viewer, so the lobby is live.
+  - `connect()` opens `ws(s)://<page host>/ws`, with `?id=<word>` once the browser has a word id
+    (`net.word`, from `localStorage` `multisplat-id`; the connection welcome's `w` replaces and saves it,
+    then `net.onWord(word)` runs; `hello` carries it as `w`). The page loads as a viewer, so the lobby is live.
   - `join(name, color)` sends `hello`, with the token if there is one.
   - On an unexpected close it reconnects with backoff (0.5 s doubling to 8 s, ±25 %), and the next
     `hello` carries the token and `resume: true`. An `expired` welcome (the 5 s window is over)
@@ -604,6 +640,12 @@ reverb), made aggressive.
   limited to one per 60 s and five per page.
 - `installErrorHandlers` logs `error`/`unhandledrejection` (and sends an auto report) and tab
   visibility.
+- **Streaming (SPEC §13.5).** `dbg` also queues each entry (not `verbose`; `sync rtt` and `perf slow
+  frame` thinned by `LOG.thin`) for the server, at most `LOG.queueMax` (200; older ones are counted in
+  `lost`). `flushLog()` runs every `LOG.flushMs` (4 s), on `pagehide` and when the tab is hidden: up
+  to `LOG.perFlush` (3) `{t:'log', e, lost?}` messages of ≤ 1000 bytes and ≤ 20 entries, through the
+  sink `net.js` registers with `setLogSink` (it sends on the open game socket, or returns false and
+  the entries wait). `setWordId` sets the word id that reports carry as `w`.
 
 Automatic reports are sent on an uncaught error, a kick, a refused resume, and after a reconnect
 that followed a drop.
@@ -735,7 +777,8 @@ editable physics.
   - a name field (`cleanName`) and 8 swatches,
   - the live player list with scores, the slot count and the queue length,
   - **Fight**,
-  - a "Report a problem" link that shows the report id.
+  - the word id in the footer (`#lId`, ` · id: amber-otter`, set from `net.onWord`; SPEC §13.5),
+    where the "Report a problem" link was.
 
   The name and colour are saved in `localStorage` (`multisplat-name`, `multisplat-color`).
   After a kick the lobby comes back and shows the reason.
@@ -834,6 +877,13 @@ editable physics.
   `step` using the longer box; loss on a sword kill, spikes and leave, standard reach after respawn,
   and the `long`/`held` kill flags.
 - `server.test.js`: traversal, MIME types, HEAD, 404, 405.
+- `logs.test.js` (SPEC §13.5; fake clocks): the word list and exact id validation; ids assigned on
+  connect, a valid offered one kept (URL and `hello`), bad ones replaced or ignored; the typed name
+  and the server's IP tagged (a payload `ip` ignored); `log` entries stored with server metadata,
+  forged keys, `verbose` and junk refused and counted, strings cleaned, the 20-entry cap and `lost`,
+  a non-array `e` kicked; the 6 + 1/s bucket and the flood kick; one-hour pruning of entries and
+  ids; the per-id, id-count and byte caps; `/logs` and `/logs/<word|name|ip>` on the admin
+  handler; `w` in reports and the server view.
 - `arena.test.js` (no sockets, fake clock):
   - welcome/hello/join/spawn/snapshot,
   - name validation and `#2`,
@@ -897,6 +947,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - sends a manual debug report and reads it back with `tools/debug.js report <id>`: the
     untrusted-input line, the server's view of that player, and no token in the files,
   - runs `tools/debug.js state`,
+  - checks the word id in the lobby footer, in `localStorage` and in the report, a different id on
+    another page, and that `tools/debug.js log <word>` prints the page's streamed `net connect` and
+    `life join` entries with its name and IP, and `logs` lists it,
   - on a second server with `NET_SIM=120,2`, has two players pace for 8 s and asserts a
     prediction-error RMS under 3 units,
   - on a third server with `ITEM_SECS=1,2 ITEM_POINTS=0,1` (floor pickups only), with two players and

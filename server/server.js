@@ -202,15 +202,22 @@ export async function startServer(cfg = loadConfig(), { log = console.log } = {}
     socket.once('close', uncount);
     wss.handleUpgrade(req, socket, head, ws => {
       if (pending) { pending = false; pendingUpgrades--; }
-      onSocket(ws, ip, uncount);
+      onSocket(ws, ip, uncount, wordOf(req.url));
     });
   });
 
-  function onSocket(ws, ip, uncount) {
+  // The log word id a returning browser offers as /ws?id=amber-otter (SPEC §13.5). The arena
+  // accepts it only if it is a valid pair from the word list.
+  function wordOf(url) {
+    const q = (url || '').split('?')[1];
+    try { return q ? new URLSearchParams(q).get('id') : null; } catch { return null; }
+  }
+
+  function onSocket(ws, ip, uncount, word) {
     const sim = cfg.netSim;
     const outQ = sim && delayer(sim), inQ = sim && delayer(sim);
     const conn = arena.connect({
-      ip,
+      ip, word,
       send: s => {
         if (ws.readyState !== ws.OPEN) return;
         if (ws.bufferedAmount > 256 * 1024) return ws.terminate();   // a client that stopped reading
@@ -221,8 +228,8 @@ export async function startServer(cfg = loadConfig(), { log = console.log } = {}
         if (outQ) outQ(go); else go();
       },
     });
-    log(`connect conn=${conn.id} ip=${ip}`);
-    events.push('connect', conn.id, { ip });
+    log(`connect conn=${conn.id} ip=${ip} word=${conn.word}`);
+    events.push('connect', conn.id, { ip, word: conn.word });
     ws.on('message', (data, isBinary) => {
       if (isBinary) return arena.kick(conn, 'malformed');
       if (inQ) inQ(() => arena.onMessage(conn, data)); else arena.onMessage(conn, data);

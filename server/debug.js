@@ -14,7 +14,7 @@ const PER_IP_PER_MIN = 6, TOTAL_PER_MIN = 120;
 const KEEP_DAYS = 14, KEEP_BYTES = 50 * 1024 * 1024;
 // Top-level keys a report may carry. Anything else is a 400. `meta` is what the server adds, so a
 // client can never supply it.
-const REPORT_KEYS = new Set(['v', 'kind', 'reason', 'ts', 'env', 'net', 'player', 'entries', 'token', 'reportId']);
+const REPORT_KEYS = new Set(['v', 'kind', 'reason', 'ts', 'env', 'net', 'player', 'entries', 'token', 'reportId', 'w']);   // w: the word id (§13.5)
 const FILE_RE = /^reports-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const ID_RE = /^[a-z0-9]{8}$/;
 
@@ -36,7 +36,7 @@ export function createEventRing(size = 2000) {
 // (and the bidi controls, which can make a terminal show text in a misleading order)
 const CTRL = new RegExp('[\\u0000-\\u0008\\u000e-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028-\\u202e\\u2066-\\u2069]', 'g');
 const SPACE = /[\t\n\v\f\r]+/g;   // line breaks and tabs become one space
-function clean(v, depth = 0) {
+export function clean(v, depth = 0) {
   if (v === null || typeof v === 'boolean') return v;
   if (typeof v === 'number') { if (!Number.isFinite(v)) throw new Error('number'); return v; }
   if (typeof v === 'string') return v.replace(SPACE, ' ').replace(CTRL, '').slice(0, MAX_STR);
@@ -213,6 +213,11 @@ export function createDebug({ dir, allowedOrigins, clientIp, arena, events, log 
     if (url.pathname === '/reports') return listReports(n).then(r => json(200, r), () => json(500, { error: 'read' }));
     const m = url.pathname.match(/^\/reports\/([^/]+)$/);
     if (m) return getReport(m[1]).then(r => (r ? json(200, r) : json(404, { error: 'not found' })), () => json(500, { error: 'read' }));
+    // Streamed client logs (SPEC §13.5), in memory in the arena: /logs lists identities, /logs/<q>
+    // gives the entries of those matching a word id, a name or an IP.
+    if (url.pathname === '/logs') return json(200, arena.logs.list());
+    const q = url.pathname.match(/^\/logs\/([^/]{1,200})$/);
+    if (q) { let k; try { k = decodeURIComponent(q[1]); } catch { return json(400, { error: 'bad query' }); } return json(200, arena.logs.find(k)); }
     json(404, { error: 'not found' });
   }
 

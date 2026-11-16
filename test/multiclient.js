@@ -542,21 +542,22 @@ async function starTest() {
   await installBot(T.page, { mode: 'fetch' });
   await waitFor(() => T.page.evaluate(() => (__mp.net.me && __mp.net.me.stars) >= 3), { timeout: 30000, every: 100, what: 'Thrower restocks stars' });
   await stopBot(T.page);
+  // (up to 8 presses: with bundles of 5-15 and a carry of 30 the thrower may hold many, and may pick
+  // more up mid-burst, so compare the swishes with the throws the server made, counted from t0)
   const held = await T.page.evaluate(() => {
-    const n = __mp.net.me.stars, s = { t: 0, left: n };
-    window.__swish0 = __mp.debug.entries().filter(e => e.msg === 'throw swish').length;
+    const n = Math.min(8, __mp.net.me.stars), s = window.__burst = { t: 0, left: n, t0: performance.now(), tick0: __mp.state.tick };
     __mp.autopilot = () => (++s.t % 7 === 0 && s.left > 0 ? (s.left--, 32) : 0);
     return n;
   });
-  const burst = await waitFor(async () => {
-    const u = await T.page.evaluate(() => ({ me: __mp.net.me.stars, swishes: __mp.debug.entries().filter(e => e.msg === 'throw swish').length - window.__swish0 }));
-    return u.me === 0 ? u : null;
-  }, { timeout: 5000, every: 100, what: 'the burst empties the stars' });
-  await new Promise(r => setTimeout(r, 300));
-  const swishes = await T.page.evaluate(() => __mp.debug.entries().filter(e => e.msg === 'throw swish').length - window.__swish0);
+  await waitFor(() => T.page.evaluate(() => window.__burst.left === 0), { timeout: 5000, every: 100, what: 'the burst is pressed' });
+  await new Promise(r => setTimeout(r, 600));
   await stopBot(T.page);
-  assert.equal(swishes, held, `a swish for each of ${held} quick throws (heard ${swishes})`);
-  log(`stars: rapid fire of ${held}, ${swishes} swishes (count ${burst.me})`);
+  const burst = await T.page.evaluate(id => ({
+    swishes: __mp.debug.entries().filter(e => e.msg === 'throw swish' && e.ts >= window.__burst.t0).length,
+    throws: __mp.events.filter(e => e.type === 'throw' && e.id === id && e.tick >= window.__burst.tick0).length }), T.id);
+  assert.equal(burst.throws, held, `the server made all ${held} quick throws (${burst.throws})`);
+  assert.equal(burst.swishes, held, `a swish for each of ${held} quick throws (heard ${burst.swishes})`);
+  log(`stars: rapid fire of ${held}, ${burst.swishes} swishes, ${burst.throws} throws`);
   // admin state and the CLI list star pickups, stars in flight and counts
   const st = await debugCli(srv, 'state');
   assert.match(st, /star pickups \(\d\)/); assert.match(st, /stars in flight \(\d\)/); assert.match(st, /stars=\d/);

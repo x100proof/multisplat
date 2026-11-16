@@ -3,11 +3,16 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS, cleanName } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
+import { createNet } from './net.js';
+import { dbg, setTickSource, setReportSource, sendReport, installErrorHandlers, entries as dbgEntries } from './debug.js';
 const { swordBoxOf } = Sim;
 
 const QS = new URLSearchParams(location.search);
+// Online (the default) talks to the server; ?offline runs M1's local sandbox with a dummy.
+const ONLINE = !QS.has('offline');
+installErrorHandlers();
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let SCALE = 1;   // device pixels per world unit
 
@@ -245,7 +250,11 @@ function initAudio() {
     const opts = {};
     opts.latencyHint = QS.get('latency') || (LITE_AUDIO ? 'playback' : 'interactive');
     if (+QS.get('rate')) opts.sampleRate = +QS.get('rate');
-    try { AC = new (window.AudioContext || window.webkitAudioContext)(opts); } catch (e) { /* no audio */ }
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(opts); } catch (e) { dbg('audio', 'no audio context', { err: String(e.message) }); }
+    if (AC) {
+      dbg('audio', 'context created', { mode: LITE_AUDIO ? 'lite' : 'full', rate: AC.sampleRate, state: AC.state });
+      AC.onstatechange = () => dbg('audio', 'context ' + AC.state);
+    }
   }
   if (AC && AC.state === 'suspended') AC.resume();
 }
@@ -293,6 +302,11 @@ const KEYMAP = {
   ArrowLeft: KEY.LEFT, ArrowRight: KEY.RIGHT, ArrowUp: KEY.JUMP, KeyZ: KEY.JUMP,
   ShiftLeft: KEY.RUN, ShiftRight: KEY.RUN, KeyX: KEY.RUN, Space: KEY.SLASH,
 };
+let lastDevice = null;
+function noteDevice(d) { if (d !== lastDevice) { lastDevice = d; dbg('input', 'device ' + d); } }
+addEventListener('gamepadconnected', e => dbg('input', 'gamepad connected', { id: String(e.gamepad.id).slice(0, 60) }));
+addEventListener('gamepaddisconnected', () => dbg('input', 'gamepad disconnected'));
+addEventListener('orientationchange', () => dbg('input', 'orientation', { type: screen.orientation ? screen.orientation.type : String(window.orientation) }));
 function padBits() {
   let b = 0;
   for (const gp of (navigator.getGamepads ? navigator.getGamepads() : [])) {
@@ -304,6 +318,7 @@ function padBits() {
     if (btn(2) || btn(1)) b |= KEY.SLASH;               // X / B
     if (btn(4) || btn(5) || btn(6) || btn(7)) b |= KEY.RUN;   // bumpers / triggers
   }
+  if (b) noteDevice('gamepad');
   return b;
 }
 function heldBits() {
@@ -312,7 +327,10 @@ function heldBits() {
   return b | padBits();
 }
 addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') { if (e.code === 'Enter') fight(); return; }
+  if (lobbyOpen && e.code === 'Enter') { fight(); return; }
   if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
+  noteDevice('keyboard');
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') e.target.blur(); // keep keys driving the game
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
   initAudio();
@@ -327,12 +345,21 @@ addEventListener('pointerdown', () => initAudio());
 // ---------- world ----------
 const S = { tick: 0, camX: 0, camY: 0, shake: 0 };   // view state (the sim state is `state`)
 const L = { ...LEVEL, bloody: new Set() };          // the arena plus spikes that have drawn blood
-const ME = 1, DUMMY = 2;
-const colorOf = id => (id === ME ? COLORS[0] : COLORS[(id * 3) % COLORS.length]);
+let ME = 1;                    // the local player's id (assigned by the server when online)
+const DUMMY = 2;
+const metaOf = id => (ONLINE ? net.meta.get(id) : null);
+const colorOf = id => {
+  const m = metaOf(id);
+  if (m) return COLORS[m.color] || COLORS[0];
+  return id === ME ? COLORS[0] : COLORS[(id * 3) % COLORS.length];
+};
+const nameOf = id => { const m = metaOf(id); return m ? m.name : id === ME ? 'you' : 'dummy'; };
+const simCfg = () => (ONLINE ? DEFAULTS : CFG);
 let state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
 const eventLog = [];          // recent sim events, for scripted checks
 let corpses = [], popups = [];
 const forced = {};            // window.__mp.input: per-id bitmask overrides for scripted checks
+let autopilot = null;         // window.__mp.autopilot = (me, players) => bitmask, for scripted play
 
 function onEvents(evs) {
   for (const e of evs) {
@@ -355,6 +382,7 @@ function onEvents(evs) {
     } else if (e.type === 'spawn') {
       if (e.id === ME) { sfx.check(); snapCamera(); }
     }
+    // M3 hook: kill feed, gore (e.seed), music intensity go here.
   }
 }
 
@@ -389,28 +417,46 @@ function dummyKeys(d, me) {
 function update() {
   S.tick++;
   if (S.shake > 0) S.shake--;
+  if (ONLINE) updateOnline(); else updateOffline();
+  corpses = corpses.filter(c => { c.vy += .3; c.x += c.vx; c.y += c.vy; if (c.impaled) c.vx = c.vy = 0; return --c.t > 0; });
+  popups = popups.filter(p => (p.y -= .5, --p.t > 0));
+  followCamera();
+}
+
+function playFx(p) {
+  if (!p.fx) return;
+  if (p.fx & FX.JUMP) sfx.jump();
+  if (p.fx & FX.SLASH) sfx.slash();
+  if (p.fx & FX.BONK) sfx.bonk();
+  if (p.fx & FX.LAND && p.standOn != null) sfx.stomp();
+}
+
+// Online: sample input, predict our player and queue the input for the server (sent per frame).
+function updateOnline() {
+  ME = net.id ?? -1;
+  let k = lobbyOpen ? 0 : heldBits() | latch;
+  latch = 0;
+  if (forced[ME] !== undefined) k = forced[ME];
+  if (autopilot && net.me) { try { k = autopilot(net.me, state.players) | 0; } catch (e) { dbg('error', 'autopilot: ' + e.message); } }
+  net.localTick(k);
+  if (net.me && net.me.alive) playFx(net.me);
+  onEvents(net.dueEvents());
+}
+
+function updateOffline() {
   const me = Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
   const inputs = { [ME]: heldBits() | latch, [DUMMY]: dummyKeys(d, me) };
   latch = 0;
   for (const id in forced) inputs[id] = forced[id];
   if (CFG.invincible && me) me.iframes = Math.max(me.iframes, 2);
   onEvents(Sim.step(state, inputs, { cfg: CFG }));
-  for (const p of state.players) {
-    if (!p.alive || !p.fx) continue;
-    if (p.fx & FX.JUMP) sfx.jump();
-    if (p.fx & FX.SLASH) sfx.slash();
-    if (p.fx & FX.BONK) sfx.bonk();
-    if (p.fx & FX.LAND && p.standOn != null) sfx.stomp();
-  }
-  corpses = corpses.filter(c => { c.vy += .3; c.x += c.vx; c.y += c.vy; if (c.impaled) c.vx = c.vy = 0; return --c.t > 0; });
-  popups = popups.filter(p => (p.y -= .5, --p.t > 0));
-  followCamera();
+  for (const p of state.players) if (p.alive) playFx(p);
 }
 
 // ---------- camera: follows the local player, clamped to the arena ----------
 const clampCam = x => Math.max(0, Math.min(L.w * T - VW, x));
 const clampCamY = y => Math.max(0, Math.min(L.h * T - VH, y));
-const focus = () => Sim.getPlayer(state, ME) || { x: L.w * T / 2, y: L.h * T / 2, w: 10, h: 13 };
+const focus = () => Sim.getPlayer(state, ME) || (ONLINE && !lobbyOpen && state.players.find(p => p.alive)) || { x: L.w * T / 2, y: L.h * T / 2, w: 10, h: 13 };
 const camTargetX = () => focus().x + 5 - VW / 2;
 const camTargetY = () => focus().y + focus().h / 2 - VH * .55;
 function snapCamera() { S.camX = clampCam(camTargetX()); S.camY = clampCamY(camTargetY()); }
@@ -639,6 +685,7 @@ function render() {
       if (p.atk > 0) drawSword(p, px, py);
     }
     drawHpBar(p, px, py, col);
+    if (ONLINE) drawNameTag(p, px, py, col);
   }
 
   if (CFG.hitboxes) {
@@ -671,7 +718,8 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   // HUD (DOM)
-  const me = Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
+  if (ONLINE) hudOnline();
+  const me = !ONLINE && Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
   if (me) {
     setText('hHp', `HP ${Math.max(0, me.hp)}`);
     document.getElementById('hHp').classList.toggle('low', me.alive && me.hp <= 34);
@@ -681,9 +729,37 @@ function render() {
   if (S.tick > 600) document.getElementById('help').classList.add('gone');
 }
 
+// Online HUD: own HP and score, respawn countdown, queue position, connection state.
+// (M3 adds the kill feed and the Tab scoreboard here.)
+function hudOnline() {
+  const me = net.me, m = metaOf(ME);
+  setText('hHp', me ? `HP ${Math.max(0, me.hp)}` : '');
+  document.getElementById('hHp').classList.toggle('low', !!me && me.alive && me.hp <= 34);
+  setText('hScore', m && !lobbyOpen ? `SCORE ${m.score}` : '');
+  let msg = '';
+  if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
+  else if (!lobbyOpen && net.mode === 'queue') msg = `ARENA FULL · QUEUE #${net.queuePos}`;
+  else if (me && !me.alive) msg = `SPLAT · respawn in ${(Math.max(0, me.respawn) / 60).toFixed(1)}`;
+  setText('msg', msg);
+}
+
+// Name tag above the HP bar. Names come from the server (allowlisted characters only).
+function drawNameTag(p, px, py, col) {
+  const m = metaOf(p.id);
+  if (!m) return;
+  ctx.save();
+  ctx.font = '700 5px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center';
+  ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(5,3,10,.85)';
+  const label = m.away ? m.name + ' (away)' : m.name;
+  ctx.strokeText(label, px + p.w / 2, py - 9);
+  ctx.fillStyle = p.id === ME ? '#ffffff' : col;
+  ctx.fillText(label, px + p.w / 2, py - 9);
+  ctx.restore();
+}
+
 // HP bar floating above a player's head, in the player's colour, red when low.
 function drawHpBar(p, px, py, col) {
-  const w = 14, x = px + p.w / 2 - w / 2, y = py - 7, k = Math.max(0, p.hp) / CFG.maxHp;
+  const w = 14, x = px + p.w / 2 - w / 2, y = py - 7, k = Math.max(0, p.hp) / simCfg().maxHp;
   ctx.fillStyle = 'rgba(5,3,10,.75)'; rrect(ctx, x - .5, y - .5, w + 1, 2.6, .8); ctx.fill();
   ctx.save(); ctx.shadowColor = ctx.fillStyle = k > .34 ? col : NEON.pink; ctx.shadowBlur = blur(2);
   if (k > 0) { rrect(ctx, x, y, w * k, 1.6, .6); ctx.fill(); }
@@ -726,7 +802,7 @@ const DBG_SPEC = [
     ['gameSpeed', 'Game speed', .1, 2, .05],
   ]],
 ];
-const dbg = document.getElementById('dbg');
+const panel = document.getElementById('dbg');
 function saveCfg() {
   const changed = {};
   for (const k in CFG) if (CFG[k] !== ALL_DEFAULTS[k]) changed[k] = CFG[k];
@@ -738,33 +814,42 @@ function jumpInfo() {
   const air = 2 * CFG.jumpVel / CFG.gravity;
   return `Jump height ≈ ${h.toFixed(1)} tiles · walk-jump ≈ ${(air * CFG.walkSpeed / T).toFixed(1)} tiles · run-jump ≈ ${(air * CFG.runSpeed / T).toFixed(1)} tiles`;
 }
-let fpsEl = null;
+let fpsEl = null, netEl = null, errCv = null, reportEl = null;
 function buildDebug() {
-  dbg.innerHTML = '';
+  panel.innerHTML = '';
   const h = document.createElement('h2'); h.innerHTML = '<span>Debug</span><span style="color:#bbb;font-weight:400">D to close</span>';
-  dbg.appendChild(h);
-  fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; dbg.appendChild(fpsEl);
-  const info = document.createElement('div'); info.className = 'info'; dbg.appendChild(info);
+  panel.appendChild(h);
+  fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; panel.appendChild(fpsEl);
+  if (ONLINE) {
+    netEl = document.createElement('div'); netEl.className = 'info stat'; netEl.style.whiteSpace = 'pre-line'; panel.appendChild(netEl);
+    const gl = document.createElement('div'); gl.className = 'info'; gl.textContent = 'Prediction error (units, last 6 s; line = 2)'; panel.appendChild(gl);
+    errCv = document.createElement('canvas'); errCv.width = 256; errCv.height = 48; errCv.className = 'graph'; panel.appendChild(errCv);
+    const lock = document.createElement('div'); lock.className = 'info'; lock.style.color = '#ff6ec7';
+    lock.textContent = 'Online: physics and combat values are the server\'s and are locked.'; panel.appendChild(lock);
+  }
+  const info = document.createElement('div'); info.className = 'info'; panel.appendChild(info);
   const refresh = () => { info.textContent = jumpInfo(); };
   for (const [group, items] of DBG_SPEC) {
-    const g = document.createElement('h3'); g.textContent = group; dbg.appendChild(g);
+    const g = document.createElement('h3'); g.textContent = group; panel.appendChild(g);
     for (const [key, name, min, max, step] of items) {
       const lab = document.createElement('label');
       const n = document.createElement('span'); n.textContent = name;
       const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(CFG[key], step);
       const r = document.createElement('input');
-      Object.assign(r, { type: 'range', min, max, step, value: CFG[key] });
+      Object.assign(r, { type: 'range', min, max, step, value: ONLINE ? ALL_DEFAULTS[key] : CFG[key], disabled: ONLINE });
+      if (ONLINE) v.textContent = fmt(ALL_DEFAULTS[key], step);
       r.addEventListener('input', () => { CFG[key] = +r.value; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
       r.addEventListener('dblclick', () => { CFG[key] = ALL_DEFAULTS[key]; r.value = CFG[key]; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
-      lab.append(n, v, r); dbg.appendChild(lab);
+      lab.append(n, v, r); panel.appendChild(lab);
     }
   }
-  const g = document.createElement('h3'); g.textContent = 'Cheats & view'; dbg.appendChild(g);
-  for (const [key, name] of [['hitboxes', 'Show hitboxes'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']]) {
+  const g = document.createElement('h3'); g.textContent = 'Cheats & view'; panel.appendChild(g);
+  const toggles = [['hitboxes', 'Show hitboxes'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
+  for (const [key, name] of ONLINE ? toggles.slice(0, 1) : toggles) {
     const lab = document.createElement('label'); lab.className = 'chk';
     const c = document.createElement('input'); c.type = 'checkbox'; c.checked = CFG[key];
     c.addEventListener('change', () => { CFG[key] = c.checked; saveCfg(); });
-    lab.append(c, document.createTextNode(name)); dbg.appendChild(lab);
+    lab.append(c, document.createTextNode(name)); panel.appendChild(lab);
   }
   const btns = document.createElement('div'); btns.className = 'btns';
   const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); btns.appendChild(b); return b; };
@@ -774,44 +859,187 @@ function buildDebug() {
     catch (e) { copy.textContent = 'Copy failed'; }
     setTimeout(() => { copy.textContent = 'Copy values'; }, 1200);
   });
-  mkBtn('Restart', () => resetWorld());
-  dbg.appendChild(btns);
+  if (!ONLINE) mkBtn('Restart', () => resetWorld());
+  panel.appendChild(btns);
+  const rb = document.createElement('div'); rb.className = 'btns';
+  const send = document.createElement('button'); send.textContent = 'Send debug report'; rb.appendChild(send);
+  panel.appendChild(rb);
+  reportEl = document.createElement('div'); reportEl.className = 'info stat'; panel.appendChild(reportEl);
+  send.addEventListener('click', async () => {
+    send.disabled = true; reportEl.textContent = 'Sending…';
+    const id = await sendReport('manual', 'debug panel');
+    reportEl.textContent = id ? `Report id: ${id} (quote this when asking for help)` : 'Report could not be sent.';
+    send.disabled = false;
+  });
   const tip = document.createElement('div'); tip.className = 'info'; tip.style.marginTop = '6px';
   tip.textContent = 'Double-click a slider to reset it. Settings are saved in this browser.';
-  dbg.appendChild(tip);
+  panel.appendChild(tip);
   refresh();
 }
+// Net statistics and the prediction-error graph, refreshed twice a second while the panel is open.
+function refreshNetDebug() {
+  if (!netEl) return;
+  const st = net.stats;
+  netEl.textContent = `RTT ${st.rtt.toFixed(0)} ms (avg ${st.rttAvg.toFixed(0)}, max ${st.rttMax.toFixed(0)}) · ${net.state}\n` +
+    `snapshot jitter ${st.jitter.toFixed(1)} ms · id ${net.id ?? '-'} · ${net.mode}\n` +
+    `pred err RMS ${net.predErrRms().toFixed(2)} · snaps ${st.snapsSnapped} · reconnects ${st.reconnects}`;
+  const g = errCv.getContext('2d'), W = errCv.width, H = errCv.height, max = 4;
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = 'rgba(255,42,109,.6)'; g.beginPath(); g.moveTo(0, H - 2 / max * H); g.lineTo(W, H - 2 / max * H); g.stroke();
+  const e = st.predErr, n = e.length;
+  g.strokeStyle = '#39ff14'; g.beginPath();
+  for (let i = 0; i < n; i++) { const x = W - (n - i) * W / 180, y = H - Math.min(max, e[i]) / max * H; i ? g.lineTo(x, y) : g.moveTo(x, y); }
+  g.stroke();
+}
 function toggleDebug() {
-  if (dbg.classList.toggle('hidden')) return;
+  if (panel.classList.toggle('hidden')) return;
   buildDebug();
 }
 
 // ---------- loop: fixed 60 Hz steps, render every frame ----------
 let acc = 0, last = performance.now(), fpsN = 0, fpsT = last, fps = 0;
 let paused = false;   // window.__mp.pause() stops the clock so a script can step by hand
+let fpsLogT = last;
 function frame(t) {
+  if (t - last > 50 && !document.hidden && t - last < 5000) dbg('perf', 'slow frame', { ms: Math.round(t - last) });
   if (!paused) {
-    acc += Math.min(100, t - last) * CFG.gameSpeed;
+    acc += Math.min(100, t - last) * (ONLINE ? 1 : CFG.gameSpeed);
     while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
   }
   last = t;
+  if (ONLINE) {
+    net.flush();
+    state = net.view(t);
+    for (const f of state.fx) { const p = Sim.getPlayer(state, f.id); if (p && p.alive) playFx(f); }
+  }
   render();
   fpsN++;
   if (t - fpsT >= 500) {
     fps = fpsN * 1000 / (t - fpsT); fpsN = 0; fpsT = t;
-    if (fpsEl && !dbg.classList.contains('hidden')) {
+    if (fpsEl && !panel.classList.contains('hidden')) {
       const me = Sim.getPlayer(state, ME);
       fpsEl.textContent = `FPS ${fps.toFixed(0)} · tick ${state.tick}` + (me ? ` · x ${me.x.toFixed(1)} y ${me.y.toFixed(1)}` : '');
+      if (ONLINE) refreshNetDebug();
     }
   }
+  if (t - fpsLogT >= 5000) { fpsLogT = t; if (!document.hidden) dbg('perf', 'fps', { fps: Math.round(fps) }); }
   requestAnimationFrame(frame);
 }
-resetWorld();
+
+// ---------- online: connection, lobby screen ----------
+const net = ONLINE ? createNet({ onLobby: () => renderLobby(), onStatus: s => onNetStatus(s) }) : null;
+let lobbyOpen = ONLINE;
+const LS_NAME = 'multisplat-name', LS_COLOR = 'multisplat-color';
+const lobbyEl = document.getElementById('lobby');
+let pickedColor = 0;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+
+function setupLobby() {
+  const nameIn = document.getElementById('lName');
+  nameIn.value = lsGet(LS_NAME) || '';
+  pickedColor = Math.max(0, Math.min(COLORS.length - 1, +lsGet(LS_COLOR) || 0));
+  const sw = document.getElementById('lColors');
+  COLORS.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.style.setProperty('--c', c); b.title = `colour ${i + 1}`; b.dataset.i = i;
+    b.addEventListener('click', () => { pickedColor = i; lsSet(LS_COLOR, String(i)); markColor(); });
+    sw.appendChild(b);
+  });
+  markColor();
+  document.getElementById('lFight').addEventListener('click', fight);
+  document.getElementById('lReport').addEventListener('click', async e => {
+    e.preventDefault();
+    const out = document.getElementById('lReportId');
+    out.textContent = 'sending…';
+    const id = await sendReport('manual', 'lobby link');
+    out.textContent = id ? `report id ${id}` : 'could not send';
+  });
+}
+function markColor() { for (const b of document.querySelectorAll('#lColors .sw')) b.classList.toggle('on', +b.dataset.i === pickedColor); }
+
+function fight() {
+  if (!lobbyOpen) return;
+  const raw = document.getElementById('lName').value;
+  const name = cleanName(raw);
+  const err = document.getElementById('lErr');
+  if (!name) { err.textContent = 'Name: 1–16 letters, digits, space, _ or -'; return; }
+  err.textContent = '';
+  lsSet(LS_NAME, name);
+  initAudio();
+  net.join(name, pickedColor);
+  lobbyOpen = false;
+  lobbyEl.classList.add('hidden');
+  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+  snapCamera();
+}
+
+function renderLobby() {
+  if (!ONLINE) return;
+  const { players, queue, cap } = net.lobby;
+  const list = document.getElementById('lPlayers');
+  list.textContent = '';
+  const sorted = [...players].sort((a, b) => b.score - a.score);
+  for (const p of sorted) {
+    const li = document.createElement('li');
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = COLORS[p.color] || '#fff';
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = p.name + (p.away ? ' (away)' : '');
+    const sc = document.createElement('span'); sc.className = 'sc'; sc.textContent = String(p.score);
+    li.append(dot, nm, sc); list.appendChild(li);
+  }
+  if (!players.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'Nobody is fighting yet.'; list.appendChild(li); }
+  let info = `${players.length}/${cap} fighting`;
+  if (queue.length) info += ` · ${queue.length} waiting`;
+  if (players.length >= cap) info += ' · arena full: you will queue';
+  document.getElementById('lInfo').textContent = info;
+}
+
+function onNetStatus(s) {
+  if (s === 'kicked') {
+    dbg('life', 'back to lobby', { reason: net.kickReason });
+    lobbyOpen = true;
+    lobbyEl.classList.remove('hidden');
+    document.getElementById('lErr').textContent = net.kickReason === 'idle' ? 'You were idle for 2 minutes.' : `Disconnected by the server (${net.kickReason || 'kick'}).`;
+  }
+  document.getElementById('lStatus').textContent = s === 'open' ? '' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…' : '';
+}
+
+setTickSource(() => (ONLINE ? net.serverTick : state.tick));
+setReportSource(() => {
+  const changed = {};
+  for (const k in CFG) if (CFG[k] !== ALL_DEFAULTS[k]) changed[k] = CFG[k];
+  const me = ONLINE ? net.me : Sim.getPlayer(state, ME);
+  return {
+    token: ONLINE ? net.token : null,
+    env: { ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
+      touch: matchMedia('(pointer: coarse)').matches, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
+      online: ONLINE, cfg: changed, page: location.pathname },
+    net: ONLINE ? { state: net.state, mode: net.mode, id: net.id, rttAvg: net.stats.rttAvg, rttMax: net.stats.rttMax,
+      jitterMs: net.stats.jitter, predErrRms: net.predErrRms(), reconnects: net.stats.reconnects, snaps: net.stats.snaps,
+      snapCorrections: net.stats.snapsSnapped, pending: net.pending(), queuePos: net.queuePos, fps: Math.round(fps) } : { fps: Math.round(fps) },
+    player: me ? { id: me.id, x: me.x, y: me.y, vx: me.vx, vy: me.vy, hp: me.hp, alive: me.alive, onGround: me.onGround,
+      atk: me.atk, stun: me.stun, iframes: me.iframes, respawn: me.respawn, score: me.score, deaths: me.deaths } : null,
+  };
+});
+
+if (ONLINE) {
+  setupLobby();
+  renderLobby();
+  document.getElementById('help').classList.add('gone');
+  net.connect();
+} else {
+  lobbyEl.classList.add('hidden');
+  resetWorld();
+}
 requestAnimationFrame(frame);
 
 // Scripted checks: state, sim and helpers. input[id] = bitmask overrides that player's keys.
 window.__mp = {
-  get state() { return state; }, sim: Sim, cfg: CFG, level: L, localId: ME, dummyId: DUMMY,
+  get state() { return state; }, sim: Sim, cfg: CFG, level: L, get localId() { return ME; }, dummyId: DUMMY,
+  online: ONLINE, net, get lobbyOpen() { return lobbyOpen; }, fight,
+  debug: { entries: dbgEntries, send: sendReport },
+  get autopilot() { return autopilot; }, set autopilot(f) { autopilot = f; },
   events: eventLog, input: forced, get fps() { return fps; },
   pause() { paused = true; }, resume() { paused = false; last = performance.now(); acc = 0; },
   step(n = 1) { for (let i = 0; i < n; i++) update(); },

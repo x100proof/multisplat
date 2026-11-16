@@ -294,6 +294,18 @@ committed.
 | `DEBUG_PORT` | unset | When set, a read-only admin listener (§13) on this port. It **always** binds `127.0.0.1`, whatever `HOST` is. |
 | `NET_SIM` | unset | **Test only:** `delayMs,jitterPct` for artificial latency. Refused when `NODE_ENV=production`. |
 
+**Caching and versions (a refresh always gets the latest):**
+- Every static response carries `Cache-Control: no-cache` and an `ETag`, so the browser
+  revalidates each file on every load and gets either the new file or a 304. Nothing is ever
+  served from cache without asking.
+- At start the server computes a **build id**, a short hash of everything under `public/` and
+  `shared/`. It puts the id into the served `index.html` (a `<meta name="build">` tag and a
+  `?v=<id>` on the entry script) and into every `welcome`.
+- A page whose build id differs from the server's is stale, for example a tab left open across
+  a deploy, which reconnects to the new server. It shows "New version, reloading" and reloads
+  itself, at most once per build id so a mismatch can never loop. The build id is shown in the
+  debug panel and included in debug reports.
+
 **WebSocket server limits:**
 - `maxPayload` 1 KB.
 - Origin checked against `ALLOWED_ORIGINS`.
@@ -443,7 +455,8 @@ tests passing and a commit.
    SFX, unit tests, and a multiclient assertion that a pickup extends reach and is lost on death.
 6. **M6: Later changes**, one commit each: leaving with Escape (§6.4), no spike traps (§3), the
    5 s heartbeat (§6.4), scores for everyone along the top (§9), neon blood by default with a
-   real-gore option (§7), ninja stars (§5.2), and the full-screen button (§9).
+   real-gore option (§7), ninja stars (§5.2), the full-screen button (§9), and cache
+   validation with a build id (§10).
 
 **Repo conventions:**
 - `ARCHITECTURE.md` describes the code as it actually is and is updated in the same commit as

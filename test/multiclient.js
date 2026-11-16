@@ -1131,8 +1131,10 @@ async function adminTest() {
   const ctl = p => p.page.evaluate(() => ({ mk: [...document.querySelectorAll('#lPlayers button.mkadm')].map(b => b.dataset.name),
     hid: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).classList.contains('hidden2')),
     dis: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).disabled), rename: !document.getElementById('lRenameRow').classList.contains('hidden2') }));
-  await waitFor(async () => (await ctl(B)).mk.length === 1, { what: 'Make admin on the new admin' });
-  assert.deepEqual(await ctl(B), { mk: ['Ann'], hid: [false, false], dis: [false, false], rename: true });
+  // (Ann never pressed FIGHT, so she has no player record and is not in the roster: Bob has nobody to
+  // hand admin to yet; the Esc-menu check below has her fight first)
+  await waitFor(async () => (await ctl(B)).rename, { what: 'the admin controls on the new admin' });
+  assert.deepEqual(await ctl(B), { mk: [], hid: [false, false], dis: [false, false], rename: true });
   await waitFor(async () => (await ctl(A)).mk.length === 0, { what: 'Make admin gone from the old admin' });
   assert.deepEqual(await ctl(A), { mk: [], hid: [true, true], dis: [true, true], rename: false });
   log('admin: Make admin beside humans only, the dialog (Cancel and Esc do nothing, Confirm transfers), controls follow the role');

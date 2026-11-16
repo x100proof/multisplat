@@ -1017,3 +1017,18 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   bot walking but not moving for 12–25 ticks hops. Client: `net.bots(d)`; `net.lobby.bots/botMax`;
   `#lBots` (− `#lBotN` +) in the lobby, rendered in `renderLobby`; colours looked up in `PALETTE`.
   Tests: `test/bots.test.js`, `botTest` in `test/multiclient.js`.
+- **Spectator mode** (SPEC §16). No server or protocol change: a watcher is a lobby viewer
+  (`net.mode` `'viewer'`, no `hello`) with the lobby closed. `shared/spectate.js`: `PICK_TOL`
+  (mouse 6, touch 14 units), `pickAt(players, x, y, tol)` (nearest living ninja, body or name tag),
+  `byScore`, `leaderOf(players, rows)`, `followTarget(players, rows, chosen)` (→ `{chosen, id}`,
+  `chosen` dropped once that ninja has left) and `cycleTarget(players, rows, cur, dir)`. In `game.js`
+  (block after the leave menu): `watching`, `watchChosen` (picked by the watcher, or null for the
+  leader), `watchId` (followed now); `watch(on)` (Watch button `#lWatch`, `#wLobby`, Esc, ✕ `tLeave`)
+  and `watchUi(on)` (`body.watching`, the `#watch` bar; `backToLobby` calls it, so a kick also ends
+  watching); `watchTarget()` re-resolves the target and is what `focus()` uses for the camera;
+  `toWorld` / `toClient` map CSS px ↔ world units through the canvas rect (turned stage included);
+  a `pointerdown` on `#stage` picks with `pickAt`; `watchKey` (← → ↓) runs after the Escape line of
+  the `keydown` handler; `watchHud` (from `hudOnline`) fills `#wWho` / `#wWhy`; `drawWatchRing` marks
+  the followed ninja; the strip adds `.watched` to its chip. `__mp.watch(on)`, `__mp.watching`
+  (`{on, id, chosen}`) and `__mp.screenOf(id)` (client px) are for tests. Tests:
+  `test/spectate.test.js`, `watchTest` in `test/multiclient.js`.

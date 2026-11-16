@@ -271,8 +271,8 @@ reverb) but **fast and aggressive**:
   validated on the server too), a palette of 12 neon colour swatches (**no two fighters share a colour**: swatches worn by
   players in the arena are greyed out, and the server gives a player whose colour is taken the
   next free one), a live list of players
-  with their scores, and the queue position if the arena is full. There is a Fight button, and an
-  "AI players" row with − / count / + (§15).
+  with their scores, and the queue position if the arena is full. There is a Fight button with a
+  Watch button beside it (§16), and an "AI players" row with − / count / + (§15).
 - **In-game HUD:**
   - Your HP, your score and your ninja-star count (§5.2).
   - **Scores for everyone along the top:** a strip across the top of the screen with every
@@ -549,3 +549,42 @@ Server-side bots that fight like players, added and removed from the lobby.
 - **Tests:** `test/bots.test.js` (limits, the reserved colour, slots, the brain's inputs, a 60 s
   headless fight in which bots kill and are killed, determinism); a `test/multiclient.js` section
   (− / + live on two pages, bots in the arena in their colour, a human still joins).
+
+## 16. Spectator mode (Watch)
+
+Watch the fight without joining, and follow any ninja.
+
+- **Lobby:** a **Watch** button beside Fight (same row, the quieter outline style, both at least 48 px
+  tall), with a line under them: "Watch: no name needed and it takes no slot, even when the arena is
+  full. Click or tap a ninja to follow them." Watch needs no name, is open with a full arena or a
+  queue, and is disabled only for a page that is already in the arena or the queue.
+- **No protocol change.** A watcher is an ordinary lobby viewer with the lobby closed: it sends no
+  `hello`, has no record, takes no slot and no queue place, and is not in the roster. The server
+  already sends every viewer each snapshot and event; a viewer's `input` (well-formed) and `chat`
+  are ignored, never kicked. A watcher counts toward `MAX_CONN` / `MAX_PER_IP` like any open
+  connection (the existing caps), and must keep pinging like one (§6.4).
+- **Screen:** the arena fills the screen as in play. There are no movement buttons, no chat, no HP,
+  stars or score of one's own. A bar (top centre; bottom centre on touch, where the thumb buttons are
+  gone) says "WATCHING *name*" in the followed ninja's colour, "(the leader)" while on the default,
+  and how to change it: "Click a ninja to follow them · click empty space for the leader · ← →
+  switch · Esc lobby" (touch: "Tap a ninja to follow them · tap empty space for the leader"), with a
+  **Lobby** button (44 px). The followed ninja has a pulsing ring of its colour at its feet and its
+  chip in the score strip is outlined.
+- **Camera:** by default it follows **the leader**: the first ninja in the score strip's order (score,
+  then fewer deaths, then id) who is in the arena. It stays on the leader while they lie dead (they
+  respawn in 2 s), so it does not swing away and back; a new leader takes over as the scores change.
+  With nobody in the arena it is centred.
+- **Following:** clicking or tapping a ninja follows it: hit-tested in world units against the
+  drawn (interpolated) living ninjas, body or name tag, within 6 units for a mouse and 14 for a
+  finger (about a fingertip on a phone), nearest wins; it works on a phone held upright (the turned
+  stage). A click on the arena away from everyone goes back to the leader. A followed ninja is kept
+  through death and respawn; when it leaves the arena the watcher falls back to the leader. **← →**
+  step through the ninjas in score order, **↓** goes back to the leader. All of this is local to the
+  page; nothing is sent.
+- **Leaving:** **Esc** (no confirm menu: there is nothing to lose), the Lobby button, or ✕ on touch
+  goes back to the lobby, where Fight works as usual. An Esc that leaves full screen does not also
+  leave watching (§9). How to play has a "Watching" section.
+- **Code and tests:** the target rules are pure functions in `shared/spectate.js` (`pickAt`,
+  `leaderOf`, `followTarget`, `cycleTarget`); `test/spectate.test.js` covers them and the server
+  facts above on the socket-less arena; `watchTest` in `test/multiclient.js` watches a full arena
+  with a queue, clicks a ninja, switches with the keys and goes back with Esc.

@@ -854,7 +854,8 @@ async function botTest() {
   assert.ok((await ui(V)).inc, '+ disabled with the arena full');
   await V.page.click('#lBotDec');
   await waitFor(async () => (await ui(V)).n === '10', { what: '− removes one' });
-  assert.ok(!(await W.page.evaluate(() => __mp.net.lobby.players.some(q => q.name === 'AI 11'))), 'the newest bot went first');
+  // (read on V, which got the lobby at once; other pages get it with the next coalesced broadcast)
+  assert.ok(!(await V.page.evaluate(() => __mp.net.lobby.players.some(q => q.name === 'AI 11'))), 'the newest bot went first');
   log('bots: − / + live on both lobby pages, reserved colour in the arena, at most 11, a human still joins');
   for (const p of [V, W]) await p.page.context().close();
   await srv.stop();

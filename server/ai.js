@@ -23,13 +23,15 @@ const TRY_NEAR = 40;           // simulate takeoffs only this close (units) to t
 function rand(b) { b.rng = (b.rng * 16807) % RNG_M; return b.rng / RNG_M; }
 
 // A fresh brain. `seed` is any integer; reaction time and aggression vary per bot, so a room of bots
-// does not move in lockstep: reaction 6-12 ticks (100-200 ms; the arena keeps 12 ticks of history), a 15-30 % chance per tick of
-// swinging once in reach (a few ticks of extra hesitation on top of the reaction time).
+// does not move in lockstep: reaction 6-12 ticks (100-200 ms; the arena keeps 12 ticks of history), a 5-10 % chance per tick of
+// swinging once in reach and a 20-40 tick pause after each swing; a 40-90 tick pause after landing
+// before the next jump (tuned down at the user's request: the bots jumped and slashed too much).
 export function newBrain(seed) {
   let s = Math.floor(Math.abs(seed)) % RNG_M; if (s === 0) s = 1;
-  const b = { rng: s, delay: 0, aggr: 0, target: null, thinkT: 0, prev: 0, air: 0, lastX: null, still: 0, unstick: 0, wander: 0, wanderT: 0 };
+  const b = { rng: s, delay: 0, aggr: 0, throwP: 0, slashWait: 0, jumpWait: 0, wasAir: false, target: null, thinkT: 0, prev: 0, air: 0, lastX: null, still: 0, unstick: 0, wander: 0, wanderT: 0 };
   b.delay = 6 + Math.floor(rand(b) * 7);
-  b.aggr = .15 + rand(b) * .15;
+  b.aggr = .05 + rand(b) * .05;
+  b.throwP = .075 + rand(b) * .075;                        // the throw rate the bots had before the tuning
   b.stillMax = 12 + Math.floor(rand(b) * 14);
   return b;
 }
@@ -155,7 +157,10 @@ function think(b, me, state, seen, cfg, L) {
   const nav = navOf(L, cfg), cx = cxOf(me), feet = me.y + me.h;
   const moved = b.lastX == null ? 1 : Math.abs(me.x - b.lastX);
   b.lastX = me.x;
-  if (me.onGround) b.air = 0;
+  if (me.onGround) { if (b.wasAir) b.jumpWait = 40 + Math.floor(rand(b) * 51); b.air = 0; }   // just landed: no jump for a while
+  b.wasAir = !me.onGround;
+  if (b.slashWait > 0) b.slashWait--;
+  if (me.onGround && b.jumpWait > 0) b.jumpWait--;
 
   // what the bot sees of the others
   const view = new Map();
@@ -177,21 +182,21 @@ function think(b, me, state, seen, cfg, L) {
   }
 
   let k = 0;
-  const ready = bit => !(b.prev & bit);                      // a press needs the key up the tick before
+  const ready = bit => !(b.prev & bit) && (bit !== KEY.JUMP || b.jumpWait <= 0) && (bit !== KEY.SLASH || b.slashWait <= 0);   // key up the tick before, and no pause
   if (tgt) {
     const tcx = cxOf(tgt), dx = tcx - cx, dy = tgt.y - me.y, toward = Math.sign(dx) || me.face;
     // slash: the chop box reaches len + 8 units ahead (centre to centre) and 13-18 units up or down
     const reach = (18 * (me.long ? LONG_REACH : 1)) + 6;
     if (Math.abs(dx) < reach && Math.abs(dy) < 15) {
       if (me.face !== toward) return dirKey(toward);          // turn first
-      if (me.atkCd <= 0 && me.atk === 0 && ready(KEY.SLASH) && tgt.iframes <= 20 && rand(b) < b.aggr) return KEY.SLASH;
+      if (me.atkCd <= 0 && me.atk === 0 && ready(KEY.SLASH) && tgt.iframes <= 20 && rand(b) < b.aggr) { b.slashWait = 20 + Math.floor(rand(b) * 21); return KEY.SLASH; }
       return me.onGround ? 0 : b.air;
     }
     // throw: stars in hand, the target on the same level, nothing solid in between, facing it
     if ((me.stars | 0) > 0 && Math.abs(dy) < 6 && Math.abs(dx) > reach + 6 && tgt.iframes <= 20 &&
         clearRow(L, Math.floor((me.y + 6) / T), cx, tcx)) {
       if (me.face !== toward) k = dirKey(toward);
-      else if ((me.throwCd | 0) <= 0 && ready(KEY.THROW) && rand(b) < b.aggr * .5) return KEY.THROW;
+      else if ((me.throwCd | 0) <= 0 && ready(KEY.THROW) && rand(b) < b.throwP) return KEY.THROW;
     }
   }
   if (!me.onGround) return b.air || k || (tgt ? dirKey(cxOf(tgt) - cx) : 0);

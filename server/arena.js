@@ -26,9 +26,9 @@ export const KICK = Object.freeze({
 const r2 = v => Math.round(v * 100) / 100;
 
 export class Arena {
-  constructor({ cfg = DEFAULTS, now = () => performance.now(), log = () => {}, event = () => {},
+  constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
     maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, maxPerIp = Infinity, seed } = {}) {
-    this.cfg = cfg; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
+    this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
     this.state = Sim.createWorld({ seed: seed ?? (randomBytes(4).readUInt32BE() % 2147483646) + 1 });
     this.hist = Sim.createHistory();
@@ -211,7 +211,7 @@ export class Arena {
 
   activate(rec, promoted) {
     rec.state = 'play'; rec.lastActive = this.now(); rec.inputs.length = 0;
-    const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg });
+    const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg, level: this.level });
     this.log(`${promoted ? 'promote' : 'join'} conn=${rec.conn ? rec.conn.id : '-'} id=${rec.id} name=${rec.name}`);
     this.event(promoted ? 'promote' : 'join', rec.conn ? rec.conn.id : null, { player: rec.id });
     this.pendingEvents.push(...evs.map(e => ({ ...e })));
@@ -321,7 +321,7 @@ export class Arena {
       const ms = Math.min(NET.rewindCapMs, NET.interpMs + (rec && rec.conn ? rec.conn.rtt : 0) / 2);
       return Sim.positionsAt(this.hist, st.tick - ms / TICK_MS);
     };
-    const evs = [...this.pendingEvents, ...Sim.step(st, inputs, { cfg: this.cfg, rewind })];
+    const evs = [...this.pendingEvents, ...Sim.step(st, inputs, { cfg: this.cfg, level: this.level, rewind })];
     this.pendingEvents = [];
     Sim.recordHistory(this.hist, st);
     for (const p of st.players) { const rec = this.recs.get(p.id); if (rec) rec.fx |= p.fx; }
@@ -365,7 +365,7 @@ export class Arena {
   }
 
   // Snapshot (SPEC §6.1): every player as [id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx],
-  // flags = alive 1 | onGround 2 | sweep 4. Each client also gets its own full player state (`me`)
+  // flags = alive 1 | onGround 2 | sweep 4 | long sword 8, plus the lying pickups `it` as [[id, x, y]]. Each client also gets its own full player state (`me`)
   // and its last processed input `seq`, for reconciliation.
   snapshot() {
     const st = this.state;
@@ -373,9 +373,10 @@ export class Arena {
       const rec = this.recs.get(q.id), fx = rec ? rec.fx : 0;
       if (rec) rec.fx = 0;
       return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
-        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0), q.iframes, q.stun, fx];
+        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx];
     });
-    const tail = ',"p":' + JSON.stringify(p) + '}';
+    const it = (st.items || []).map(i => [i.id, i.x, i.y]);
+    const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + '}';
     const head = '{"t":"snapshot","tick":' + st.tick;
     for (const c of this.conns) {
       const rec = c.rec;
@@ -420,10 +421,11 @@ export class Arena {
     return { id: rec.id, name: rec.name, color: rec.color, state: rec.conn ? rec.state : rec.state + ' (disconnected)',
       queuePos: this.queuePos(rec), conn: rec.conn ? rec.conn.id : null, lastSeq: rec.lastSeq, inputQueue: rec.inputs.length,
       idleS: Math.round((this.now() - rec.lastActive) / 1000),
-      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, score: p.score, deaths: p.deaths } : {}) };
+      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, score: p.score, deaths: p.deaths } : {}) };
   }
   adminState() {
     return { tick: this.state.tick, uptimeS: Math.round((this.now() - this.startedAt) / 1000),
+      items: (this.state.items || []).map(i => ({ ...i })), itemInS: r2(Math.max(0, this.state.itemT) * TICK_MS / 1000),
       players: [...this.recs.values()].filter(r => r.state === 'play').map(r => this.recView(r)),
       queue: this.queue.map(r => this.recView(r)), tickTime: this.tickTimeStats(),
       conns: [...this.conns].map(c => this.connView(c)) };

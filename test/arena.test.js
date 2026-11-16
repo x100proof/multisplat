@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as Sim from '../shared/sim.js';
-import { KEY, TICK_MS } from '../shared/constants.js';
+import { KEY, TICK_MS, DEFAULTS } from '../shared/constants.js';
 
 function setup(opts = {}) {
   let t = 1000;
@@ -276,6 +276,69 @@ test('lag compensation: a slash is tested against positions rewound by interp de
   assert.equal(hit.attacker, 1); assert.equal(hit.victim, 2);
 });
 
+test('long swords: item/pickup events relayed; snapshots carry pickups and long; a joiner sees them', () => {
+  const { conn, tick, arena } = setup({ cfg: { ...DEFAULTS, itemMinTicks: 30, itemMaxTicks: 30 } });
+  const a = conn(), b = conn(), viewer = conn();
+  a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  tick(80);
+  const items = a.events().filter(e => e.type === 'item');
+  assert.equal(items.length, 2, 'two appeared (30 ticks apart)');
+  assert.ok(viewer.events().some(e => e.type === 'item'), 'viewers get item events too');
+  let snap = a.last('snapshot');
+  assert.deepEqual(snap.it, arena.state.items.map(i => [i.id, i.x, i.y]));
+  assert.equal(snap.it.length, 2);
+  // put A on the first pickup
+  const it = arena.state.items[0], pa = Sim.getPlayer(arena.state, 1);
+  Object.assign(pa, { x: it.x - 5, y: it.y - 13, px: it.x - 5, py: it.y - 13, vx: 0, vy: 0, iframes: 0 });
+  tick(2);
+  const pick = a.events().find(e => e.type === 'pickup');
+  assert.deepEqual([pick.id, pick.item, pick.x, pick.y], [1, it.id, it.x, it.y]);
+  assert.ok(b.events().some(e => e.type === 'pickup' && e.id === 1));
+  snap = a.last('snapshot');
+  assert.equal(snap.me.long, true, 'the holder learns it from `me`');
+  assert.equal(snap.p.find(r => r[0] === 1)[8] & 8, 8, 'long flag bit for the holder');
+  assert.equal(snap.p.find(r => r[0] === 2)[8] & 8, 0);
+  assert.deepEqual(snap.it.map(r => r[0]), [items[1].id], 'the taken pickup is gone');
+  // a mid-game joiner learns pickups and holders from its first snapshot alone
+  const c = conn();
+  c.say({ t: 'hello', name: 'C', color: 2 });
+  tick(2);
+  const cs = c.last('snapshot');
+  assert.deepEqual(cs.it.map(r => r[0]), [items[1].id]);
+  assert.equal(cs.p.find(r => r[0] === 1)[8] & 8, 8);
+  assert.ok(JSON.stringify(cs).length < 2000, 'snapshot size stays small');
+  // admin state shows pickups and holders
+  const adm = arena.adminState();
+  assert.deepEqual(adm.items.map(i => i.id), [items[1].id]);
+  assert.equal(adm.players.find(p => p.id === 1).long, true);
+  assert.equal(adm.players.find(p => p.id === 2).long, false);
+  // the holder dies: the flag goes on every client's next snapshot, and the kill says it was held
+  const kills = Sim.killPlayer(arena.state, 1, 'self');
+  assert.equal(kills[0].held, true);
+  tick(2);
+  assert.equal(c.last('snapshot').p.find(r => r[0] === 1)[8] & 8, 0);
+  assert.equal(a.last('snapshot').me.long, false);
+});
+
+test('lag compensation with a long sword: the rewound check uses the longer box', () => {
+  for (const long of [false, true]) {
+    const { conn, tick, arena } = setup();
+    const a = conn(), v = conn();
+    a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
+    tick(100);
+    const st = arena.state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
+    st.itemT = 1e9;
+    Object.assign(pa, { x: 60, y: 259, vx: 0, vy: 0, face: 1, iframes: 0, long });
+    Object.assign(pv, { x: 90, y: 259, vx: 0, vy: 0, iframes: 0 });   // beyond standard reach (78), inside long (96.8)
+    a.conn.rtt = 60;
+    tick(12);
+    let seq = 1;
+    a.say({ t: 'input', seq: seq++, keys: KEY.SLASH });
+    for (let i = 0; i < 8; i++) { pv.x = 300; a.say({ t: 'input', seq: seq++, keys: 0 }); tick(1); }
+    assert.equal(a.events().filter(e => e.type === 'hit').length, long ? 1 : 0, 'long ' + long);
+  }
+});
+
 test('kills send score events and credit survives a leave', () => {
   const { conn, tick, arena } = setup();
   const a = conn(), v = conn();
@@ -312,6 +375,13 @@ test('config: defaults, origins, NET_SIM refused in production', () => {
   assert.equal(c.debugPort, null); assert.equal(c.trustProxy, false);
   assert.deepEqual(loadConfig({ NET_SIM: '120,2' }).netSim, { delayMs: 120, jitterPct: 2 });
   assert.throws(() => loadConfig({ NET_SIM: '120,2', NODE_ENV: 'production' }), /production/);
+  assert.equal(c.itemSecs, null);
+  assert.deepEqual(loadConfig({ ITEM_SECS: '2,3' }).itemSecs, { min: 2, max: 3 });
+  assert.throws(() => loadConfig({ ITEM_SECS: '2,3', NODE_ENV: 'production' }), /production/);
+  assert.throws(() => loadConfig({ ITEM_SECS: '3,2' }));
+  assert.deepEqual(loadConfig({ ITEM_POINTS: '0,1' }).itemPoints, [0, 1]);
+  assert.throws(() => loadConfig({ ITEM_POINTS: '0', NODE_ENV: 'production' }), /production/);
+  assert.throws(() => loadConfig({ ITEM_POINTS: '99' }));
   assert.throws(() => loadConfig({ PORT: 'abc' }));
 });
 

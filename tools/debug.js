@@ -65,7 +65,8 @@ async function main() {
       const s = await get('/state');
       out(`tick ${s.tick} · up ${s.uptimeS}s · tick time avg ${s.tickTime.avgMs} ms, p99 ${s.tickTime.p99Ms}, max ${s.tickTime.maxMs} (budget ${s.tickTime.budgetMs}), overruns ${s.tickTime.overruns}`);
       out(`players (${s.players.length}):`);
-      for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
+      for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
+      if (s.items) out(`long-sword pickups (${s.items.length}): ${s.items.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.itemInS}s when there is room`);
       out(`queue (${s.queue.length}):`);
       for (const p of s.queue) out(`  #${p.queuePos} ${p.id} ${JSON.stringify(p.name)} ${p.state}`);
       out(`connections (${s.conns.length}):`);

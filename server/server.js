@@ -2,13 +2,16 @@
 // player debug-report intake on POST /debug/report, and an optional loopback admin listener.
 //
 // All site-specific values come from the environment (SPEC §10): HOST, PORT, ALLOWED_ORIGINS,
-// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM (test only).
+// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM, ITEM_SECS and ITEM_POINTS (the last three
+// for tests only, refused when NODE_ENV=production).
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, sep, extname, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { Arena } from './arena.js';
+import { DEFAULTS, TICK_HZ } from '../shared/constants.js';
+import { LEVEL } from '../shared/level.js';
 import { createDebug, createEventRing } from './debug.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,6 +34,8 @@ export function loadConfig(vars = process.env) {
     debugDir: resolve(vars.DEBUG_DIR || join(ROOT, 'debug-reports')),
     debugPort: vars.DEBUG_PORT ? +vars.DEBUG_PORT : null,
     netSim: null,
+    itemSecs: null,
+    itemPoints: null,
   };
   if (cfg.debugPort !== null && (!Number.isInteger(cfg.debugPort) || cfg.debugPort < 0 || cfg.debugPort > 65535)) throw new Error('DEBUG_PORT must be a port number');
   if (vars.NET_SIM) {
@@ -38,6 +43,20 @@ export function loadConfig(vars = process.env) {
     const [d, j = 0] = vars.NET_SIM.split(',').map(Number);
     if (!(d >= 0) || !(j >= 0)) throw new Error('NET_SIM must be delayMs,jitterPct');
     cfg.netSim = { delayMs: d, jitterPct: j };
+  }
+  // ITEM_SECS=min,max shortens the long-sword spawn timer (SPEC §5.1 says 20-40 s) for tests.
+  if (vars.ITEM_SECS) {
+    if (vars.NODE_ENV === 'production') throw new Error('ITEM_SECS is for testing and is refused when NODE_ENV=production');
+    const [a, b = a] = vars.ITEM_SECS.split(',').map(Number);
+    if (!(a > 0) || !(b >= a)) throw new Error('ITEM_SECS must be minS,maxS');
+    cfg.itemSecs = { min: a, max: b };
+  }
+  // ITEM_POINTS=i,j,... restricts pickups to those LEVEL.items indexes (so a test bot can reach them).
+  if (vars.ITEM_POINTS) {
+    if (vars.NODE_ENV === 'production') throw new Error('ITEM_POINTS is for testing and is refused when NODE_ENV=production');
+    const idx = vars.ITEM_POINTS.split(',').map(Number);
+    if (!idx.every(i => Number.isInteger(i) && i >= 0 && i < LEVEL.items.length)) throw new Error('ITEM_POINTS must be item point indexes');
+    cfg.itemPoints = [...new Set(idx)];
   }
   return cfg;
 }
@@ -104,7 +123,11 @@ function delayer(sim) {
 
 export async function startServer(cfg = loadConfig(), { log = console.log } = {}) {
   const events = createEventRing(2000);
-  const arena = new Arena({ log, event: events.push, maxPerIp: cfg.maxPerIp });
+  const simCfg = cfg.itemSecs
+    ? { ...DEFAULTS, itemMinTicks: Math.round(cfg.itemSecs.min * TICK_HZ), itemMaxTicks: Math.round(cfg.itemSecs.max * TICK_HZ) }
+    : DEFAULTS;
+  const level = cfg.itemPoints ? { ...LEVEL, items: cfg.itemPoints.map(i => LEVEL.items[i]) } : LEVEL;
+  const arena = new Arena({ log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
   const clientIp = req => clientIpOf(req, cfg.trustProxy);
   const debug = createDebug({ dir: cfg.debugDir, allowedOrigins: cfg.allowedOrigins, clientIp, arena, events, log });
 
@@ -212,7 +235,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   try { cfg = loadConfig(); } catch (e) { console.error(`multisplat: ${e.message}`); process.exit(2); }
   startServer(cfg).then(s => {
     console.log(`multisplat listening on http://${cfg.host}:${s.port}` + (s.adminPort ? ` (admin on 127.0.0.1:${s.adminPort})` : '') +
-      (cfg.netSim ? ` NET_SIM=${cfg.netSim.delayMs},${cfg.netSim.jitterPct}` : ''));
+      (cfg.netSim ? ` NET_SIM=${cfg.netSim.delayMs},${cfg.netSim.jitterPct}` : '') +
+      (cfg.itemSecs ? ` ITEM_SECS=${cfg.itemSecs.min},${cfg.itemSecs.max}` : '') +
+      (cfg.itemPoints ? ` ITEM_POINTS=${cfg.itemPoints.join(',')}` : ''));
     const bye = sig => { console.log(`${sig}: shutting down`); s.close().then(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
     process.on('SIGINT', bye); process.on('SIGTERM', bye);
   }, e => { console.error(`multisplat: ${e.message}`); process.exit(1); });

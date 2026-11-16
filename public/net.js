@@ -15,9 +15,12 @@ const ERR_KEEP = 180;                                  // prediction-error sampl
 // Snapshot player array layout (server/arena.js snapshot()).
 function unpack(a) {
   return { id: a[0], x: a[1], y: a[2], vx: a[3], vy: a[4], face: a[5], hp: a[6], atk: a[7],
-    alive: !!(a[8] & 1), onGround: !!(a[8] & 2), atkType: a[8] & 4 ? 'sweep' : 'chop', iframes: a[9], stun: a[10], fx: a[11],
-    w: PW, h: PH };
+    alive: !!(a[8] & 1), onGround: !!(a[8] & 2), atkType: a[8] & 4 ? 'sweep' : 'chop', long: !!(a[8] & 8),
+    iframes: a[9], stun: a[10], fx: a[11], w: PW, h: PH };
 }
+// Long-sword pickups lying in the arena, from a snapshot's `it` ([[id, x, y]]). A snapshot from a
+// pre-M5 server has none.
+const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => ({ id: a[0], x: a[1], y: a[2] })) : []);
 
 export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {} } = {}) {
   const net = {
@@ -39,6 +42,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   const rtts = [];
   let seq = 0, pending = [], unsent = [];
   const snaps = [];                                    // [{tick, at, players: Map}]
+  const taken = new Set();                             // ids of pickups we took (hidden before the snapshots catch up)
   let arrOff = null, lastSnapAt = 0, lastFxTick = 0;
   const evq = [];
   const walk = new Map();                              // per remote id, for the run animation
@@ -175,9 +179,13 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         const mm = net.meta.get(e.id); if (mm) { mm.score = e.score; mm.deaths = e.deaths; }
       }
       if (e.type === 'spawn' && e.id === net.id) dbg('life', 'spawn', { x: Math.round(e.x), y: Math.round(e.y) });
-      if (e.type === 'kill' && e.victim === net.id) dbg('life', 'death', { killer: e.killer, move: e.move });
+      if (e.type === 'kill' && e.victim === net.id) {
+        dbg('life', 'death', { killer: e.killer, move: e.move });
+        if (e.held) dbg('life', 'long sword lost', { cause: 'death', move: e.move });
+      }
+      if (e.type === 'pickup' && e.id === net.id) { taken.add(e.item); dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y }); }
       // effects about me play at once; the rest when the interpolated view reaches their tick
-      const mine = e.victim === net.id || e.attacker === net.id || (e.type === 'spawn' && e.id === net.id) || !('x' in e);
+      const mine = e.victim === net.id || e.attacker === net.id || ((e.type === 'spawn' || e.type === 'pickup') && e.id === net.id) || !('x' in e);
       evq.push({ e, due: mine ? -Infinity : e.tick });
     }
   }
@@ -196,7 +204,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     const players = new Map();
     for (const a of m.p) players.set(a[0], unpack(a));
     if (snaps.length && m.tick <= snaps[snaps.length - 1].tick) return;
-    snaps.push({ tick: m.tick, at: now, players });
+    snaps.push({ tick: m.tick, at: now, players, items: unpackItems(m.it) });
+    const ids = new Set(); for (const s2 of snaps) for (const i of s2.items) ids.add(i.id);
+    for (const i of taken) if (!ids.has(i)) taken.delete(i);
     if (snaps.length > SNAP_KEEP) snaps.shift();
     net.serverTick = m.tick;
     s.snaps++;
@@ -303,7 +313,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (pb && pa.alive && pb.alive && Math.abs(pb.x - pa.x) + Math.abs(pb.y - pa.y) < 48) {
           p.x = pa.x + (pb.x - pa.x) * k; p.y = pa.y + (pb.y - pa.y) * k;
           p.vx = pa.vx + (pb.vx - pa.vx) * k; p.vy = pa.vy + (pb.vy - pa.vy) * k;
-          if (k > .5) Object.assign(p, { face: pb.face, atk: pb.atk, atkType: pb.atkType, onGround: pb.onGround, iframes: pb.iframes, stun: pb.stun, hp: pb.hp });
+          if (k > .5) Object.assign(p, { face: pb.face, atk: pb.atk, atkType: pb.atkType, onGround: pb.onGround, iframes: pb.iframes, stun: pb.stun, hp: pb.hp, long: pb.long });
         } else if (ext && pa.alive) { p.x += pa.vx * ext; p.y += pa.vy * ext; }
         const w = walk.get(p.id) || { x: p.x, walk: 0 };
         w.walk += Math.min(4, Math.abs(p.x - w.x)); w.x = p.x; walk.set(p.id, w);
@@ -320,7 +330,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       players.push({ ...net.me, x: net.me.x + smooth.x * f, y: net.me.y + smooth.y * f });
     }
     players.sort((a, b) => a.id - b.id);
-    return { tick: Math.floor(R), players, fx };
+    // pickups as of the render tick, minus any we took ourselves (released at once, not interpolated)
+    const at = snaps.length ? snaps[Math.max(0, snaps.findLastIndex(s => s.tick <= R))] : null;
+    const items = at ? at.items.filter(i => !taken.has(i.id)) : [];
+    return { tick: Math.floor(R), players, fx, items };
   };
 
   net.snapshots = snaps;

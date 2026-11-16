@@ -4,7 +4,7 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS, cleanName } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { createNet } from './net.js';
 import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
@@ -305,6 +305,14 @@ const sfx = {
   bonk: () => tone(140, .08, 'triangle', 90, .1),
   die: () => [523, 392, 330, 262].forEach((f, i) => tone(f, .16, 'square', null, .05, i * .15)),
   check: () => { tone(660, .1, 'triangle', null, .08); tone(880, .2, 'triangle', null, .08, .1); },
+  // long sword taken: a metallic draw (bright noise sweep) and a rising neon-bell arpeggio.
+  // v scales it: 1 for the one who took it, quieter for players nearby.
+  pickup: (v = 1) => {
+    noise(.35, .1 * v, 0, 6500); tone(1800, .3, 'sawtooth', 2600, .025 * v);
+    [659, 988, 1319, 1976].forEach((f, i) => tone(f, .22, 'triangle', null, .07 * v, .05 + i * .07));
+  },
+  // a long sword appeared: a soft, high shimmer
+  item: (v = 1) => { tone(1568, .5, 'sine', 2093, .035 * v); tone(2349, .4, 'sine', null, .02 * v, .12); },
 };
 
 // ---------- input: keyboard and gamepad -> one bitmask per tick ----------
@@ -453,7 +461,8 @@ function onEvents(evs) {
       }
     } else if (e.type === 'kill') {
       const v = Sim.getPlayer(state, e.victim);
-      feed.push({ killer: e.killer, victim: e.victim, move: e.move, t: performance.now(), kc: colorOf(e.killer), vc: colorOf(e.victim), kn: e.killer != null ? nameOf(e.killer) : null, vn: nameOf(e.victim) });
+      if (!ONLINE && e.victim === ME && e.held) dbg('life', 'long sword lost', { cause: 'death', move: e.move });
+      feed.push({ killer: e.killer, victim: e.victim, move: e.move, long: !!e.long, t: performance.now(), kc: colorOf(e.killer), vc: colorOf(e.victim), kn: e.killer != null ? nameOf(e.killer) : null, vn: nameOf(e.victim) });
       if (feed.length > 5) feed.shift();
       feedDirty = true;
       if (music) music.intensity();
@@ -462,6 +471,8 @@ function onEvents(evs) {
       if (CFG.gore) {
         const t0 = performance.now();
         goreKill(G, e, { meta: colorOf(e.victim) });
+        // a holder's sword piece is drawn long (drawing only: its physics and the fingerprint are unchanged)
+        if (e.held) for (const g of G.gibs) if (g.id === 'S' && g.victim === e.victim && g.age === 0) g.long = true;
         dbg('perf', 'gore: kill', { kill: killKey(e), move: e.move, parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, ms: +(performance.now() - t0).toFixed(2) });
         sfx.gush();
         if (e.move === 'spikes') sfx.impale();
@@ -477,6 +488,14 @@ function onEvents(evs) {
       if (e.victim === ME) sfx.die();
     } else if (e.type === 'spawn') {
       if (e.id === ME) { sfx.check(); snapCamera(); }
+    } else if (e.type === 'pickup') {
+      // the taker hears it fully, players within 160 units fainter with distance
+      const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
+      if (e.id === ME) sfx.pickup(1); else if (d < 160) sfx.pickup(.25 + .35 * (1 - d / 160));
+      if (!ONLINE && e.id === ME) dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y });
+    } else if (e.type === 'item') {
+      const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
+      if (d < 240) sfx.item(.4 + .6 * (1 - d / 240));
     }
     // (kills: the feed, the music's intensity, shake within 120 units and the gore, seeded by e.seed)
   }
@@ -622,9 +641,12 @@ function drawKanbei(P, x, y, face, opt, col) {
     oval(ctx, 2.6 - step, -1.05 - (run ? Math.max(0, -Math.cos(ph)) * .9 : 0), 1.9, 1.15);
   }
   // scabbard and hilt over the shoulder (behind the body)
-  ctx.strokeStyle = '#120e1e'; ctx.lineWidth = 1.5; line(ctx, -5.6, -14.2, 3.5, -1.8);
-  ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.1; line(ctx, -6.4, -15.3, -4.6, -12.6);
-  ctx.lineWidth = .7; line(ctx, -5.8, -12.1, -3.9, -13.3);
+  if (P.long) drawLongScabbard();
+  else {
+    ctx.strokeStyle = '#120e1e'; ctx.lineWidth = 1.5; line(ctx, -5.6, -14.2, 3.5, -1.8);
+    ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.1; line(ctx, -6.4, -15.3, -4.6, -12.6);
+    ctx.lineWidth = .7; line(ctx, -5.8, -12.1, -3.9, -13.3);
+  }
   // body with a cyan rim glow
   ctx.shadowColor = col; ctx.shadowBlur = blur(4);
   const g = ctx.createRadialGradient(-2, -10, 1, 0, -6.5, 8);
@@ -650,6 +672,55 @@ function drawKanbei(P, x, y, face, opt, col) {
   ctx.restore();
 }
 
+// A long-sword holder's scabbard (SPEC §5.1): the same line over the back, but LONG_REACH times
+// as long (the hilt rides high above the shoulder, the tip reaches past the heel), glowing and
+// pulsing in the long sword's electric cyan, so opponents can read the threat before a swing.
+// Kanbei's local space, facing +x.
+function drawLongScabbard() {
+  const ux = 9.1 / 15.39, uy = 12.4 / 15.39, len = 15.39 * LONG_REACH;   // the standard scabbard's direction
+  const x1 = 4.6, y1 = -.4, x0 = x1 - ux * len, y0 = y1 - uy * len;      // tip just past the heel, mouth up high
+  const pulse = .65 + .35 * Math.sin(S.tick * .12);
+  ctx.save(); ctx.lineCap = 'round';
+  ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(4 + 4 * pulse);
+  ctx.strokeStyle = '#0e1a2e'; ctx.lineWidth = 1.9; line(ctx, x0, y0, x1, y1);   // lacquered sheath
+  ctx.globalAlpha = .55 + .45 * pulse; ctx.strokeStyle = '#7df9ff'; ctx.lineWidth = .55;
+  line(ctx, x0 + ux, y0 + uy, x1, y1);                                           // glowing seam
+  ctx.globalAlpha = 1; ctx.shadowBlur = blur(3);
+  ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.2; line(ctx, x1 - ux * 1.6, y1 - uy * 1.6, x1, y1);   // bright chape
+  ctx.shadowBlur = 0;
+  // the hilt: a longer gold grip above the mouth, with a guard across it
+  ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.2; line(ctx, x0 - ux * 3.2, y0 - uy * 3.2, x0 + ux * .4, y0 + uy * .4);
+  ctx.lineWidth = .8; line(ctx, x0 - uy * 1.6, y0 + ux * 1.6, x0 + uy * 1.6, y0 - ux * 1.6);
+  ctx.restore();
+}
+
+// A long-sword pickup lying at its item point: a glowing blade standing point-up over a soft light
+// pool, bobbing slowly, its glow pulsing. x is the centre, y the surface it lies on (screen units).
+function drawItem(it, x, y) {
+  const t = S.tick + it.id * 37, bob = Math.sin(t * .05) * 1.4, pulse = .6 + .4 * Math.sin(t * .09);
+  const cy = y - ITEM_H / 2 - 1 + bob;
+  ctx.save(); ctx.lineCap = 'round';
+  // light pool on the surface
+  const g = ctx.createRadialGradient(x, y, 0, x, y, 9);
+  g.addColorStop(0, `rgba(125,249,255,${.35 * pulse})`); g.addColorStop(1, 'rgba(125,249,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(x - 9, y - 5, 18, 6);
+  // halo
+  const h = ctx.createRadialGradient(x, cy, 0, x, cy, 10);
+  h.addColorStop(0, `rgba(5,217,232,${.28 * pulse})`); h.addColorStop(1, 'rgba(5,217,232,0)');
+  ctx.fillStyle = h; ctx.beginPath(); ctx.arc(x, cy, 10, 0, TAU); ctx.fill();
+  // the sword, tilted a little, point up
+  ctx.translate(x, cy); ctx.rotate(.18 * Math.sin(t * .03));
+  ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.3; line(ctx, 0, 7, 0, 4);       // grip
+  ctx.lineWidth = .9; line(ctx, -2.2, 4, 2.2, 4);                                 // guard
+  ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(5 + 5 * pulse);
+  ctx.strokeStyle = '#7df9ff'; ctx.lineWidth = 1.6; line(ctx, 0, 4, 0, -8);       // blade
+  ctx.shadowBlur = blur(2); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .5; line(ctx, 0, 3.5, 0, -8.6);
+  // a glint running up the blade
+  const k = (t * .02) % 1.6;
+  if (k < 1) { ctx.globalAlpha = 1 - k; ctx.fillStyle = '#fff'; oval(ctx, 0, 4 - k * 12, .9, .9); }
+  ctx.restore();
+}
+
 // Headband tails: two tapered ribbons streaming behind the head. Longer and flatter when
 // running, drooping when still, lifting when falling. Drawn in Kanbei's local space.
 function drawTails(face, vx, vy, col) {
@@ -672,22 +743,33 @@ function drawTails(face, vx, vy, col) {
 
 // Sword swing: chop = blade sweeps from up-behind to down-in-front; sweep = flat horizontal swing.
 // (swordBoxOf, the hitbox, lives in shared/sim.js.)
+// A long sword (P.long) draws blade and arc longer by exactly the hitbox's extra length, so the
+// blade ends about where the longer box ends, and its trail is brighter (white core, more glow).
 function drawSword(P, px, py) {
-  const t = 1 - P.atk / ATK_LEN, e = 1 - (1 - t) ** 3, f = P.face;
+  const t = 1 - P.atk / ATK_LEN, e = 1 - (1 - t) ** 3, f = P.face, sweep = P.atkType === 'sweep';
   const ax = px + 5 + f * 3.5, ay = py + 7.5;
+  const extra = P.long ? (sweep ? 22 : 18) * (LONG_REACH - 1) : 0;   // the box's added length (swordBoxOf)
   let a, len;
   ctx.save(); ctx.lineCap = 'round';
-  ctx.shadowColor = ctx.strokeStyle = NEON.cyan; ctx.shadowBlur = blur(6);
-  if (P.atkType === 'sweep') {
-    ctx.globalAlpha = .55 * (1 - t * .5); ctx.lineWidth = 2.2;
-    ctx.beginPath(); ctx.ellipse(ax + f * 6, ay, 13, 3.2, 0, f > 0 ? -1.6 : Math.PI - 1.6 * e, f > 0 ? -1.6 + 1.6 * e + .8 : Math.PI + 1.6); ctx.stroke();
-    a = .25 - e * .45; len = 4 + 13 * Math.sin(e * Math.PI * .5 + .15);
+  ctx.shadowColor = ctx.strokeStyle = NEON.cyan; ctx.shadowBlur = blur(P.long ? 9 : 6);
+  const trail = draw => {                       // the arc; a long sword's gets a bright white core
+    draw(); ctx.stroke();
+    if (!P.long) return;
+    ctx.strokeStyle = '#e8fdff'; ctx.lineWidth *= .4; ctx.globalAlpha = Math.min(1, ctx.globalAlpha * 1.4);
+    draw(); ctx.stroke();
+  };
+  if (sweep) {
+    const k = 1 + extra / 17;                   // the blade at full stretch is 17 long
+    ctx.globalAlpha = (P.long ? .8 : .55) * (1 - t * .5); ctx.lineWidth = P.long ? 2.8 : 2.2;
+    trail(() => { ctx.beginPath(); ctx.ellipse(ax + f * 6 * k, ay, 13 * k, 3.2 * (P.long ? 1.25 : 1), 0, f > 0 ? -1.6 : Math.PI - 1.6 * e, f > 0 ? -1.6 + 1.6 * e + .8 : Math.PI + 1.6); });
+    a = .25 - e * .45; len = 4 + (13 + extra) * Math.sin(e * Math.PI * .5 + .15);
   } else {
-    const a0 = -2, a1 = 1; a = a0 + (a1 - a0) * e; len = 14;
-    ctx.globalAlpha = .55 * (1 - t * .6); ctx.lineWidth = 3.2;
-    ctx.beginPath();
-    if (f > 0) ctx.arc(ax, ay, 11.5, a0 + (a - a0) * .3, a); else ctx.arc(ax, ay, 11.5, Math.PI - a, Math.PI - (a0 + (a - a0) * .3));
-    ctx.stroke();
+    const a0 = -2, a1 = 1, r = 11.5 + extra; a = a0 + (a1 - a0) * e; len = 14 + extra;
+    ctx.globalAlpha = (P.long ? .8 : .55) * (1 - t * .6); ctx.lineWidth = P.long ? 4 : 3.2;
+    trail(() => {
+      ctx.beginPath();
+      if (f > 0) ctx.arc(ax, ay, r, a0 + (a - a0) * .3, a); else ctx.arc(ax, ay, r, Math.PI - a, Math.PI - (a0 + (a - a0) * .3));
+    });
   }
   ctx.globalAlpha = 1;
   const dx = Math.cos(a) * f, dy = Math.sin(a), hx = ax + dx * 3, hy = ay + dy * 3;
@@ -787,6 +869,12 @@ function render() {
   // the cut-up dead: body pieces, hoods and swords
   for (const g of G.gibs) drawGib(g, cx);
 
+  // long-sword pickups (online: as of the render tick; a snapshot without them means none)
+  for (const it of state.items || []) {
+    const x = it.x - cx;
+    if (x > -16 && x < VW + 16 && it.y > CY - 8 && it.y - 24 < CY + VH) drawItem(it, x, it.y);
+  }
+
   // players: the local one last, so it is drawn on top
   const order = state.players.filter(p => p.alive).sort((a, b) => (a.id === ME) - (b.id === ME));
   for (const p of order) {
@@ -825,6 +913,9 @@ function render() {
     }
     ctx.fillStyle = 'rgba(249,248,113,.8)';
     for (const s of L.spawns) ctx.fillRect(s.x - cx - 1, s.y - 2, 2, 2);
+    ctx.fillStyle = 'rgba(125,249,255,.9)';      // item points (cyan) and the lying pickups' boxes
+    for (const s of L.items || []) { ctx.beginPath(); ctx.moveTo(s.x - cx, s.y - 3.5); ctx.lineTo(s.x - cx + 1.5, s.y - 2); ctx.lineTo(s.x - cx, s.y - .5); ctx.lineTo(s.x - cx - 1.5, s.y - 2); ctx.fill(); }
+    for (const it of state.items || []) box(Sim.itemBox(it), '#7df9ff');
   }
 
   // rain slanting across everything
@@ -865,7 +956,7 @@ function board(on) { if (boardHeld !== on) { boardHeld = on; boardEl.classList.t
 const span = (text, color, cls) => { const e = document.createElement('span'); e.textContent = text; if (color) e.style.color = color; if (cls) e.className = cls; return e; };
 function feedRow(f) {
   const row = document.createElement('div');
-  if (f.kn != null && f.killer !== f.victim) row.append(span(f.kn, f.kc, 'nm'), span(' ✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
+  if (f.kn != null && f.killer !== f.victim) row.append(span(f.kn, f.kc, 'nm'), f.long ? span(' ⚔ ', null, 'x long') : span(' ✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
   else row.append(span(f.move === 'spikes' ? '▲ ' : f.move === 'leave' ? '✕ ' : '✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
   if (f.move === 'spikes' || f.move === 'leave') row.append(span(f.move === 'spikes' ? ' (spikes)' : ' (left)', null, 'how'));
   return row;
@@ -981,9 +1072,10 @@ function drawGib(g, cx) {
     ctx.lineCap = 'round';
     ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.3; line(ctx, -7, 0, -4, 0);
     ctx.lineWidth = .8; line(ctx, -4, -1.4, -4, 1.4);
-    ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(5); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1; line(ctx, -4, 0, 8, 0);
-    ctx.shadowBlur = 0; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .4; line(ctx, -4, 0, 8, 0);
-    ctx.strokeStyle = BLOOD[0]; ctx.lineWidth = .8; line(ctx, 4, 0, 8, 0);   // blood on the tip
+    const tip = g.long ? -4 + 12 * LONG_REACH : 8;          // a long sword's piece is drawn long
+    ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(g.long ? 7 : 5); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1; line(ctx, -4, 0, tip, 0);
+    ctx.shadowBlur = 0; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .4; line(ctx, -4, 0, tip, 0);
+    ctx.strokeStyle = BLOOD[0]; ctx.lineWidth = .8; line(ctx, tip - 4, 0, tip, 0);   // blood on the tip
   } else {
     ctx.translate(-g.ox, -g.oy);
     ctx.beginPath();

@@ -25,7 +25,7 @@ source separately. Port its code rather than reinventing it.
 | Identity | Nickname plus colour. No accounts. Both are remembered in `localStorage`. |
 | Match | Endless drop-in, drop-out play. A player's score lives only while they are connected (a reconnect grace period applies, §6.4). |
 | Input | Keyboard, gamepad (Gamepad API) and NinjaRunner-style touch controls. Phones are forced to landscape the way NinjaRunner does it. |
-| Theme | NinjaRunner's dark cyberpunk night city: parallax neon skylines, rain, neon rim light. Blood is **red** (not NinjaRunner's multi-colour neon blood). |
+| Theme | NinjaRunner's dark cyberpunk night city: parallax neon skylines, rain, neon rim light, and multi-colour neon blood by default (a debug-panel option switches to realistic red gore, §7). |
 | SFX | Same synthesised WebAudio style as NinjaRunner (slash, jump, bonk and so on). Port its `sfx`. |
 | Music | **New.** Original, fast-paced and combat-driven (see §8). It is not NinjaRunner's ambient score. |
 | Character | **Kanbei** the ninja. The art is ported from NinjaRunner's character (its `drawPip`, `drawTails`, `drawSword`), but in this game's code, docs and UI the character is always called Kanbei (`drawKanbei` and so on), never by the NinjaRunner name. Each player's headband, tails and rim glow are tinted with their chosen colour. |
@@ -68,9 +68,11 @@ ARCHITECTURE.md    the code as implemented
 - **26 × 18 tiles** (416 × 288 units). That is a little more than one screen wide and 1.5
   screens tall. The camera follows the local player and is clamped to the level bounds.
 - The arena is closed: solid walls on the left and right, a floor, and no bottomless pits.
-- Use NinjaRunner tile types: `#` ground, `B` block, `=` one-way plank, `^` spikes.
-  Provide 3–4 tiers of platforms and planks so there is real vertical play. Two short spike
-  strips sit in risky spots, never directly under a spawn point.
+- Use NinjaRunner tile types: `#` ground, `B` block and `=` one-way plank.
+  Provide 3–4 tiers of platforms and planks so there is real vertical play.
+- **No spike traps.** The arena map contains no spikes: the only way to die is another player.
+  The sim may keep its support for the `^` tile (tests can use a level of their own), but the
+  shipped arena has none.
 - Place **≥10 spawn points**. The server picks one at random, weighted toward points farthest
   from living players and never within 64 units of one.
 
@@ -95,13 +97,13 @@ ARCHITECTURE.md    the code as implemented
 | Knockback | 3.5 horizontal, -3 vertical (scaled ×1.4 on the killing blow) |
 | Hit-stun | 10 ticks (no attacking; movement input damped) |
 | Per-swing hit | each swing hits a given target at most once |
-| Spikes | instant kill |
+| Ninja star (§5.2) | 20 damage |
 | Spawn invulnerability | 90 ticks, flashing (NinjaRunner `iframes` look); attacking ends it early |
 | Respawn delay | 2 s, random spawn (§3) |
 
 - Slash timing, cooldown and the chop/sweep combo match NinjaRunner exactly
   (`ATK_LEN`, `atkCd` 16, `combo` 40).
-- **Scoring:** the killer gets +1. For a spike death or other self-kill, the last player to
+- **Scoring:** the killer gets +1. For a death with no direct killer (for example leaving), the last player to
   hit the victim within 5 s gets the point. If no one did, nobody scores, but the death is
   still counted.
 - **Lag compensation:** when the server checks a slash, it rewinds the *other* players to
@@ -135,6 +137,37 @@ ARCHITECTURE.md    the code as implemented
 - **Prediction:** the client predicts its own longer reach only after the server confirms the
   pickup; the pickup itself is not predicted.
 
+### 5.2 Ninja stars
+
+- **Spawning:** ninja-star pickups appear fairly often: one every 5–10 s, with at most **4**
+  lying in the arena at once. They use the same item points and free-point rule as long swords
+  (a point holds one pickup of either kind). Seeded RNG, as for everything in the sim.
+- **Picking up:** touching a pickup gives **3** stars. A player can carry at most 9; a player
+  already at 9 leaves the pickup where it is.
+- **Throwing:** **X** on the keyboard throws one star in the facing direction (X no longer
+  means run; run is Shift only). There is a throw button on touch and a gamepad button. Throw is
+  a new input bit, edge-triggered like slash, with a short cooldown (15 ticks). A player in
+  hit-stun can't throw. Throwing ends spawn invulnerability, like attacking.
+- **Flight:** a star flies fast (6 units per tick) in a straight horizontal line from hand
+  height. It stops at the first solid tile (planks don't stop it) or after 240 units. It hits
+  the first living, vulnerable player it touches other than the thrower: **20 damage**, a small
+  knockback and the usual hit-stun, and it is then spent. Stars are simulated on the server in
+  the shared sim. They are not lag-compensated.
+- **Kills and loss:** a star kill scores like any kill and is marked in the kill feed. Unthrown
+  stars are lost on death and on leaving.
+- **Protocol:** snapshots carry each player's star count, the star pickups and the stars in
+  flight. Events: `item` and `pickup` carry a kind, and there are `throw` and star `hit` events.
+  The client predicts neither the pickup nor its own throw's hit; it may show its own throw
+  animation and sound at once.
+- **Look and feel:**
+  - The pickup is a spinning neon shuriken, clearly different from the long-sword blade.
+  - A flying star spins and leaves a short trail.
+  - **When you grab stars, text appears above your character reminding you of the key**
+    ("X to throw", or the button's symbol on touch), for a few seconds.
+  - **The status bar shows how many stars you have** (a star symbol and the count), next to
+    HP and score.
+  - Throw, hit and pickup have their own SFX. Star hits and kills produce gore like sword hits.
+
 ## 6. Networking
 
 ### 6.1 Protocol
@@ -161,8 +194,12 @@ ARCHITECTURE.md    the code as implemented
 
 ### 6.4 Connection life cycle
 - On `welcome` the client receives a resume token. If the connection drops, the client
-  reconnects with exponential backoff. If it reconnects within **15 s** with that token, it gets
+  reconnects with exponential backoff. If it reconnects within **5 s** with that token, it gets
   its slot and score back. After that, the slot is released.
+- **Heartbeat:** every client, playing, queued or watching from the lobby, must keep pinging
+  (the client pings twice a second). A connection the server has heard nothing from for
+  **5 s** is closed. A player on it is treated like any dropped player: gone from the game once
+  the 5 s above run out without a resume.
 - A clock offset is estimated from `ping`/`pong`, and RTT is shown in the debug panel.
 - **Idle kick:** a player with no input for 120 s goes back to the lobby.
 - **Leaving:** Escape (or the ✕ button on touch) opens a menu asking the player to confirm.
@@ -175,9 +212,15 @@ ARCHITECTURE.md    the code as implemented
 Port NinjaRunner's blood system: `blood` particles, `L.decals`, `L.pools` that grow into
 puddles, blood-stained spikes (`L.bloody`) and screen shake.
 
-**All blood is red.** Do not port NinjaRunner's multi-colour neon palette (`BLOOD = NEON_LIST`).
-Use a small palette of reds: bright for fresh spurts and fountains, darker crimson for pools
-and old decals. Choose the blend mode so stacked blood still reads as red on the dark city.
+**Two blood styles**, chosen in the debug panel and remembered in `localStorage`:
+- **Neon (the default):** NinjaRunner's multi-colour neon blood (`BLOOD = NEON_LIST`) with its
+  glowing 'lighter' blend.
+- **Real gore:** a small palette of reds, bright for fresh spurts and fountains and darker
+  crimson for pools and old decals, blended so stacked blood still reads as red.
+
+The style is purely a per-client look. It must not change the simulation: the same `kill.seed`
+gives the same particles, decals and pools in both styles, and switching style repaints the
+blood already on the arena.
 
 - **On hit:** a short blood spurt from the impact point in the direction of the blow.
 - **On kill:**
@@ -217,9 +260,13 @@ reverb) but **fast and aggressive**:
   validated on the server too), a palette of 8 neon colour swatches, a live list of players
   with their scores, and the queue position if the arena is full. There is a Fight button.
 - **In-game HUD:**
-  - Your HP and score.
+  - Your HP, your score and your ninja-star count (§5.2).
+  - **Scores for everyone along the top:** a strip across the top of the screen with every
+    player in the arena, each as a colour dot, name and score, ordered by score, with your own
+    entry highlighted. It is always visible, on desktop and phones, and must fit 12 players
+    (shrink or truncate names as needed) without covering the HP readout or the kill feed.
   - A kill feed (`A ✂ B`, last 5 kills, fading out).
-  - A scoreboard while Tab is held (always visible as a small top-right top-3 on phones).
+  - A detailed scoreboard (kills and deaths) while Tab is held.
   - A respawn countdown while dead.
 - Name tags float above players. Duplicate names get a `#2` suffix.
 - **D** toggles the debug panel: tunables, hitboxes, RTT and FPS, snapshot jitter, and a
@@ -287,7 +334,7 @@ Write it for a stranger hosting their own copy:
   - Start the server, open 3 pages, and join with different names.
   - Script two players to meet and slash until one dies.
   - Assert the kill event, the score increment and the respawn on every page.
-  - Assert a drop and reconnect within 15 s keeps the score.
+  - Assert a drop and reconnect within 5 s keeps the score.
   - Run with `NET_SIM=120,2` and assert that prediction error stays under 3 units RMS while
     walking.
 - `test/abuse.js`: oversize messages, a bad origin, an input flood and connections over
@@ -388,6 +435,9 @@ tests passing and a commit.
 4. **M4: Review.** A full code review pass. Fix confirmed issues.
 5. **M5: Long swords.** The pickup in §5.1: sim, level item points, protocol, client art and
    SFX, unit tests, and a multiclient assertion that a pickup extends reach and is lost on death.
+6. **M6: Later changes**, one commit each: leaving with Escape (§6.4), no spike traps (§3), the
+   5 s heartbeat (§6.4), scores for everyone along the top (§9), neon blood by default with a
+   real-gore option (§7), and ninja stars (§5.2).
 
 **Repo conventions:**
 - `ARCHITECTURE.md` describes the code as it actually is and is updated in the same commit as

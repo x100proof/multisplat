@@ -286,6 +286,11 @@ reverb) but **fast and aggressive**:
     the top-left bar and also requests landscape, as that button did. It is hidden where the
     browser has no fullscreen support. The score strip and kill feed must not overlap it.
   - A respawn countdown while dead.
+- **How to play (H):** H opens a screen that explains the goal, the controls for the current
+  device (keyboard and gamepad, or touch), fighting, long swords and ninja stars. H, Escape,
+  Enter or its Close button shuts it. On touch a ? button opens it, and the lobby has a "How
+  to play" link. The fight carries on behind it.
+- **Star count above the head:** any player holding ninja stars has "★n" above their head.
 - Name tags float above players. Duplicate names get a `#2` suffix.
 - **D** toggles the debug panel: tunables, hitboxes, RTT and FPS, snapshot jitter, and a
   prediction-error graph.

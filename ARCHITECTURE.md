@@ -944,3 +944,7 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   but `leave`) queues a drop in `state.drops`; `stepItems` lays it on the first ground or plank
   below as a `long` pickup and emits `item` with `drop: true`. `it.safe` (30 ticks) stops the
   killing swing from breaking it.
+- **How to play** (`#howto`, `helpScreen` in `game.js`): H, the touch ? button or the lobby link opens
+  it; H, Escape, Enter, Close or a click outside shuts it; inputs are zeroed while it is open.
+- **Star count above the head** (`drawStarCount`): "★n" above any player with stars; the throw
+  reminder sits above it.

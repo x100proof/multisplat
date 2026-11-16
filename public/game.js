@@ -389,6 +389,8 @@ function heldBits() {
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') { if (e.code === 'Enter') fight(); return; }
   if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleFullscreen(); return; }
+  if (e.code === 'KeyH' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !leaveOpen) { helpScreen(!helpOpen); return; }
+  if (helpOpen) { if (e.code === 'Escape' || e.code === 'Enter') helpScreen(false); if (e.code === 'Tab') e.preventDefault(); return; }
   if (lobbyOpen && e.code === 'Enter') { fight(); return; }
   if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen && !(escLeavesFullscreen() && !leaveOpen)) leaveMenu(!leaveOpen); return; }
   if (leaveOpen) { if (e.code === 'Tab') e.preventDefault(); return; }   // the menu owns the keyboard (Enter presses the focused button)
@@ -449,6 +451,7 @@ addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preve
 const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
 tapBtn('tMute', () => { setMuted(!muted); document.getElementById('tMute').classList.toggle('off', muted); });
 tapBtn('tLeave', () => leaveMenu(true));
+tapBtn('tHelp', () => helpScreen(true));
 // On phones that allow it (Android), joining the fight goes full screen and locks landscape.
 let triedLandscape = false;
 // ---------- full screen (SPEC §9): a button top right on desktop and touch, in game and lobby ----------
@@ -654,7 +657,7 @@ function playFx(p) {
 // Online: sample input, predict our player and queue the input for the server (sent per frame).
 function updateOnline() {
   ME = net.id ?? -1;
-  let k = lobbyOpen || leaveOpen ? 0 : heldBits() | touchBits() | latch;
+  let k = lobbyOpen || leaveOpen || helpOpen ? 0 : heldBits() | touchBits() | latch;
   latch = 0;
   if (forced[ME] !== undefined) k = forced[ME];
   if (autopilot && net.me) { try { k = autopilot(net.me, state.players) | 0; } catch (e) { dbg('error', 'autopilot: ' + e.message); } }
@@ -893,13 +896,22 @@ function drawThrowFlick(p, px, py) {
 let throwHintUntil = 0;
 const THROW_HINT_MS = 4000;
 function throwHintText() { return (TOUCH_UI ? THROW_SYMBOL : 'X') + ' to throw'; }
+// How many ninja stars a player holds, above their head (over the name tag online).
+function drawStarCount(p, px, py) {
+  ctx.save();
+  ctx.font = '800 5px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center';
+  const tx = px + p.w / 2, ty = py - (ONLINE ? 14.5 : 9), label = '★' + p.stars;
+  ctx.lineWidth = 1.4; ctx.strokeStyle = 'rgba(5,3,10,.9)'; ctx.strokeText(label, tx, ty);
+  ctx.fillStyle = '#ff9be0'; ctx.fillText(label, tx, ty);
+  ctx.restore();
+}
 function drawThrowHint(p, px, py) {
   const left = throwHintUntil - performance.now();
   if (left <= 0) return;
   const a = Math.min(1, left / 600, (THROW_HINT_MS - left) / 150 + .2);
   ctx.save(); ctx.globalAlpha = Math.max(0, a);
   ctx.font = '800 5.5px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center';
-  const tx = px + p.w / 2, ty = py - (ONLINE ? 16 : 10) + Math.sin(S.tick * .15) * .6, label = throwHintText();
+  const tx = px + p.w / 2, ty = py - (ONLINE ? 21 : 15.5) + Math.sin(S.tick * .15) * .6, label = throwHintText();
   ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(5,3,10,.9)'; ctx.strokeText(label, tx, ty);
   ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(4); ctx.fillStyle = '#ffd1ec'; ctx.fillText(label, tx, ty);
   ctx.restore();
@@ -1072,6 +1084,7 @@ function render() {
     drawThrowFlick(p, px, py);
     drawHpBar(p, px, py, col);
     if (ONLINE) drawNameTag(p, px, py, col);
+    if (p.stars > 0) drawStarCount(p, px, py);
     if (p.id === ME) drawThrowHint(p, px, py);
   }
 
@@ -1628,6 +1641,22 @@ function renderLobby() {
   document.getElementById('lQueueBox').classList.toggle('hidden', !queue.length);
 }
 
+// ---------- how to play: H (or ? on touch, or the lobby link) opens it; H, Escape, Enter or Close shuts it ----------
+let helpOpen = false;
+const helpEl = document.getElementById('howto');
+function helpScreen(open) {
+  if (open === helpOpen) return;
+  helpOpen = open;
+  helpEl.classList.toggle('hidden', !open);
+  for (const k in keys) keys[k] = false;
+  latch = 0; fingers.clear(); syncTouch(); board(false);
+  if (open) helpEl.querySelector('.box').scrollTop = 0;
+  dbg('life', open ? 'help opened' : 'help closed');
+}
+document.getElementById('hwClose').addEventListener('click', () => helpScreen(false));
+helpEl.addEventListener('click', e => { if (e.target === helpEl) helpScreen(false); });
+document.getElementById('lHelp').addEventListener('click', e => { e.preventDefault(); helpScreen(true); });
+
 // ---------- leaving: Escape (or ✕ on touch) asks first; the game carries on behind the menu ----------
 let leaveOpen = false;
 const leaveEl = document.getElementById('leave');
@@ -1724,7 +1753,7 @@ requestAnimationFrame(frame);
 // Scripted checks: state, sim and helpers. input[id] = bitmask overrides that player's keys.
 window.__mp = {
   get state() { return state; }, sim: Sim, cfg: CFG, level: L, get localId() { return ME; }, dummyId: DUMMY,
-  online: ONLINE, net, get lobbyOpen() { return lobbyOpen; }, get leaveOpen() { return leaveOpen; }, fight,
+  online: ONLINE, net, get helpOpen() { return helpOpen; }, get lobbyOpen() { return lobbyOpen; }, get leaveOpen() { return leaveOpen; }, fight,
   debug: { entries: dbgEntries, send: sendReport },
   get autopilot() { return autopilot; }, set autopilot(f) { autopilot = f; },
   events: eventLog, input: forced, get fps() { return fps; },

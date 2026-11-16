@@ -408,7 +408,7 @@ async function chatTest() {
     assert.deepEqual(b, [{ id: A.id, text: want }], `${p.name}: bubble state for the speaker`);
   }
   assert.equal(await B.page.evaluate(() => document.querySelectorAll('#chatlist b').length), 1, 'the markup in the text did not become elements');
-  assert.equal(await B.page.evaluate(() => document.querySelectorAll('#chatlist *').length), 1);
+  assert.equal(await B.page.evaluate(() => document.querySelectorAll('#chatlist *').length), 2, 'one row and one name element, nothing else');
   // no text in the debug log
   for (const p of [A, B, V]) {
     const dump = await p.page.evaluate(() => JSON.stringify(__mp.debug.entries()));

@@ -603,8 +603,8 @@ function drawCars(cx) {
   }
 }
 
-// Pip, drawn for player P. The headband, belt, tails and rim glow take the player's colour col.
-function drawPip(P, x, y, face, opt, col) {
+// Kanbei, drawn for player P. The headband, belt, tails and rim glow take the player's colour col.
+function drawKanbei(P, x, y, face, opt, col) {
   const air = !P.onGround && !opt.impaled, run = Math.abs(P.vx) > .2 && P.onGround && !opt.impaled, ph = P.walk * .35;
   ctx.save();
   ctx.translate(x + 5, y + 13);
@@ -651,7 +651,7 @@ function drawPip(P, x, y, face, opt, col) {
 }
 
 // Headband tails: two tapered ribbons streaming behind the head. Longer and flatter when
-// running, drooping when still, lifting when falling. Drawn in Pip's local space.
+// running, drooping when still, lifting when falling. Drawn in Kanbei's local space.
 function drawTails(face, vx, vy, col) {
   const speed = Math.min(1, Math.abs(vx) / 2.4), len = 6 + speed * 5, lift = Math.max(-1.5, Math.min(1.5, vy * .3));
   ctx.save(); ctx.lineCap = 'round'; ctx.shadowColor = col; ctx.shadowBlur = blur(3);
@@ -773,7 +773,7 @@ function render() {
   // the dead: flipped over and falling (impaled ones stay on the spikes), fading out
   for (const c of corpses) {
     ctx.globalAlpha = Math.min(1, c.t / 20);
-    drawPip({ onGround: false, vx: 0, vy: 0, walk: 0 }, c.x - cx, c.y, c.face, c.impaled ? { impaled: true } : { flip: true }, colorOf(c.id));
+    drawKanbei({ onGround: false, vx: 0, vy: 0, walk: 0 }, c.x - cx, c.y, c.face, c.impaled ? { impaled: true } : { flip: true }, colorOf(c.id));
     ctx.globalAlpha = 1;
     if (c.impaled) {                     // redraw the bloody spikes on top so the points go through
       const ty = Math.floor((c.y + 13) / T);
@@ -793,7 +793,7 @@ function render() {
     const px = p.x - cx, py = p.y, col = colorOf(p.id);
     if (!(p.iframes > 0 && (p.iframes >> 2) % 2)) {
       if (p.stun > 0 && (p.stun >> 1) % 2) ctx.filter = 'brightness(2.2)';   // hit flash
-      drawPip(p, px, py, p.face, {}, col);
+      drawKanbei(p, px, py, p.face, {}, col);
       ctx.filter = 'none';
       if (p.atk > 0) drawSword(p, px, py);
     }
@@ -967,8 +967,8 @@ function updateGoreLayer() {
   }
   G.newDecals.length = 0; G.newPools.clear();
 }
-// One body piece (clipped Pip), hood or sword, turned by the piece's unit vector (c, s).
-const DEAD_PIP = { onGround: true, vx: 0, vy: 0, walk: 0 };
+// One body piece (clipped Kanbei), hood or sword, turned by the piece's unit vector (c, s).
+const DEAD_KANBEI = { onGround: true, vx: 0, vy: 0, walk: 0 };
 const BODY = new Path2D(); BODY.ellipse(0, -6.8, 5.4, 6.2, 0, 0, TAU);
 function drawGib(g, cx) {
   const x = g.x - cx;
@@ -993,7 +993,7 @@ function drawGib(g, cx) {
     });
     ctx.clip();
     noGlow = true;
-    drawPip(DEAD_PIP, -5, -13, g.face, { impaled: true }, g.meta || COLORS[0]);
+    drawKanbei(DEAD_KANBEI, -5, -13, g.face, { impaled: true }, g.meta || COLORS[0]);
     noGlow = false;
     // the raw cut face: dark crimson edge with a bright wet line
     const fx = g.cut[0] + g.ox, fy = g.cut[1] + g.oy, dx = -g.cut[3] * 8, dy = g.cut[2] * 8;

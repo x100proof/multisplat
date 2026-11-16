@@ -36,7 +36,7 @@ from `/shared/*.js`.
 
 ## shared/constants.js
 
-- `TICK_HZ = 60`, `VW = 320`, `VH = 192`, `T = 16`, `PW = 10`, `PH = 13` (Pip's body).
+- `TICK_HZ = 60`, `VW = 320`, `VH = 192`, `T = 16`, `PW = 10`, `PH = 13` (Kanbei's body).
 - `KEY` is the input bitmask: `LEFT 1, RIGHT 2, JUMP 4, RUN 8, SLASH 16`. Bits are level-triggered
   (set while held). The sim detects jump and slash presses as 0→1 edges against the previous tick.
 - `FX`: cosmetic per-tick flags the sim writes to `player.fx` (`JUMP 1, SLASH 2, BONK 4, LAND 8`).
@@ -379,7 +379,7 @@ never runs it.
 | `fingerprint(G, key)`, `settled(G, key)`, `killKey(e)` | key = `tick:victim`. The fingerprint is `count:hash`, where the hash is a commutative sum over every landing (decal or pool, position and colour) plus each piece's position at age 180 ticks |
 | `fadeOf(G, t)` | 1 → 0 over the last 90 s of the 4 min life |
 
-**Pieces** (Pip's local space, clip polygons with a centroid, a cut face with an outward normal and
+**Pieces** (Kanbei's local space, clip polygons with a centroid, a cut face with an outward normal and
 a collision radius):
 - `chop`: a vertical split, slanted by the seed. Left and right halves `L`/`R`, the hood cap `H`
   (everything above the headband) and the sword `S`;
@@ -458,10 +458,10 @@ editable physics.
   - the night city (`paintSky`, `cityLayer`, `buildCity`, `RAIN`, `CARS`, `drawCars`, `STARS`),
   - `resize` (device resolution, dpr capped at 2.5, phones held upright rotated to landscape),
   - `blitTile` and the background/tile/rain parts of `render`,
-  - `drawPip`, `drawTails`, `drawSword` and the `iframes` flashing,
+  - `drawPip` (here `drawKanbei`), `drawTails`, `drawSword` and the `iframes` flashing,
   - the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`),
   - the debug panel (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
-- **Per-player colour.** `drawPip(P, x, y, face, opt, col)` tints the headband, belt, knot, tails
+- **Per-player colour.** `drawKanbei(P, x, y, face, opt, col)` tints the headband, belt, knot, tails
   and rim glow. Online, `colorOf(id)` is the player's chosen colour. Offline, the local player is
   pink and the dummy orange.
 - **Input.**
@@ -498,7 +498,7 @@ editable physics.
     visible part with one `drawImage`. New blood is painted in as it lands (`G.newDecals`,
     `G.newPools`). The layer is rebuilt from scratch (batched by colour and 10 fade steps) when a cap
     or expiry removed blood (at most once a second) or every 3 s while anything is fading.
-  - Pieces (`drawGib`) are Pip clipped to the piece's polygon, turned by `(c, s)`, with a dark
+  - Pieces (`drawGib`) are Kanbei clipped to the piece's polygon, turned by `(c, s)`, with a dark
     crimson cut face and a wet highlight, drawn without shadow blur (dozens of blurred shadows were
     too slow). The sword is drawn on its own.
   - Flying drops use the `'lighter'` blend, batched per colour. Stained spikes use `TILE.spikeBloody`.

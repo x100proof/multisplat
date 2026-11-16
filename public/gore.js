@@ -51,7 +51,7 @@ export function sinp(x) {
 function landHash(x, y, c) { return mix(mix(mix(2166136261, Math.round(x * 4)), Math.round(y * 4)), c); }
 
 // ---------- the pieces a body is cut into ----------
-// Coordinates are Pip's local space (game.js drawPip): x across (unmirrored), y up from the feet,
+// Coordinates are Kanbei's local space (game.js drawKanbei): x across (unmirrored), y up from the feet,
 // so y < 0. The body ellipse spans x -5.4..5.4, y -13..-0.6. Each piece is a clip polygon,
 // its centre of mass (cx, cy), the cut face (point fx, fy and outward normal nx, ny) that its
 // fountain gushes from, and a collision radius. `sl` slants the cut line, picked from the seed.

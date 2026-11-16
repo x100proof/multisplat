@@ -12,7 +12,7 @@ export const KEY_MASK = 31;
 // Cosmetic per-tick flags the sim sets on a player (player.fx) so a client can play sounds.
 export const FX = Object.freeze({ JUMP: 1, SLASH: 2, BONK: 4, LAND: 8 });
 
-// Player body (NinjaRunner Pip) and sword timing.
+// Player body (Kanbei, from NinjaRunner) and sword timing.
 export const PW = 10, PH = 13;
 export const ATK_LEN = 12;     // ticks a swing lasts
 export const ATK_CD = 16;      // ticks between swings

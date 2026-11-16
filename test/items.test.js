@@ -231,3 +231,16 @@ test('lost on death (sword, spikes, leave); standard reach after respawn; kill f
   S.removePlayer(w, 1); S.addPlayer(w, 1);
   assert.equal(S.getPlayer(w, 1).long, false);
 });
+
+test('slashing a lying long sword breaks it: it is destroyed, nobody gets it; stars are not broken', () => {
+  const w = world(2);
+  place(w, 1, 100, FLOOR_Y, 1); place(w, 2, 300, FLOOR_Y, 1);
+  w.items.push({ id: 1, x: 100 + 10 + 12, y: 272, kind: 'long' }, { id: 2, x: 300 + 10 + 12, y: 272, kind: 'star' });
+  w.itemSeq = 2;
+  const ev = run(w, 14, i => ({ 1: i === 0 ? KEY.SLASH : 0, 2: i === 0 ? KEY.SLASH : 0 }));
+  const br = ev.filter(e => e.type === 'break');
+  assert.equal(br.length, 1); assert.equal(br[0].item, 1); assert.equal(br[0].id, 1);
+  assert.deepEqual(w.items.map(it => it.id), [2], 'the star pickup survives a slash');
+  assert.equal(S.getPlayer(w, 1).long, false, 'the breaker does not get the sword');
+  assert.ok(!ev.some(e => e.type === 'pickup'));
+});

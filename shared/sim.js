@@ -322,6 +322,17 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
     if (dead) kill(state, v, a.id, a.atkType, cfg, events);
     else v.stun = cfg.hitStun;
   }
+  // 4b. a live sword swing breaks any long-sword pickup lying in its box (it is destroyed, not taken)
+  if (state.items && state.items.length) for (const a of P) {
+    if (!swordLive(a)) continue;
+    const sb = swordBoxOf(a);
+    for (let i = 0; i < state.items.length; i++) {
+      const it = state.items[i], b = itemBox(it);
+      if (itemKind(it) !== 'long' || !(sb.x < b.x + b.w && sb.x + sb.w > b.x && sb.y < b.y + b.h && sb.y + sb.h > b.y)) continue;
+      state.items.splice(i--, 1);
+      events.push({ type: 'break', tick: state.tick, id: a.id, item: it.id, x: it.x, y: it.y });
+    }
+  }
   // 5. ninja stars in flight: move, stop at solid tiles or the range, hit the first player
   stepStars(state, cfg, L, events);
   // 6. pickups: taken on body contact, in id order; then the spawn countdowns

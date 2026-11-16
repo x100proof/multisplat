@@ -1,11 +1,14 @@
-// multisplat client (M1: offline). Renders the shared simulation with NinjaRunner's art, theme
-// and sound: one local Pip plus a dummy player to collide with and cut down.
+// multisplat client. Renders the shared simulation with NinjaRunner's art, theme and sound, online
+// (the default) or as the offline sandbox (?offline) with a dummy player. Gore lives in gore.js and
+// the music in music.js; this file draws them.
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
 import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS, cleanName } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { createNet } from './net.js';
+import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
+import { createMusic, analyze as analyzeLoop } from './music.js';
 import { dbg, setTickSource, setReportSource, sendReport, installErrorHandlers, entries as dbgEntries } from './debug.js';
 const { swordBoxOf } = Sim;
 
@@ -18,7 +21,7 @@ let SCALE = 1;   // device pixels per world unit
 
 // ---------- tunables (edited live by the debug panel, D) ----------
 // Sim tunables come from shared/constants.js; the rest are client-only view and dummy switches.
-const CLIENT_DEFAULTS = { gameSpeed: 1, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
+const CLIENT_DEFAULTS = { gameSpeed: 1, gore: true, musicVol: .5, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
 const ALL_DEFAULTS = { ...DEFAULTS, ...CLIENT_DEFAULTS };
 const CFG = { ...ALL_DEFAULTS };
 const CFG_KEY = 'multisplat-cfg';
@@ -33,6 +36,9 @@ function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.h
 function rng(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
 const NEON = { pink: '#ff2a6d', cyan: '#05d9e8', yellow: '#f9f871', purple: '#b026ff', green: '#39ff14', magenta: '#ff6ec7' };
 const NEON_LIST = Object.values(NEON);
+// Blood is red (not NinjaRunner's neon): arterial to dark crimson. gore.js stores indices into this.
+const BLOOD = ['#ff1f1f', '#e8100c', '#ff2a22', '#c40a0a', '#9c0410', '#6e0008'];
+const POOL = ['#b30a0a', '#a0060b', '#b00c08', '#8e0508', '#760309', '#5a0006'];   // pools: darker, as blood that has gathered
 function rrect(g, x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
   g.beginPath(); g.moveTo(x + r, y);
@@ -41,7 +47,8 @@ function rrect(g, x, y, w, h, r) {
 }
 function oval(g, x, y, rx, ry) { g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, TAU); g.fill(); }
 function line(g, x1, y1, x2, y2) { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); }
-const blur = b => b * SCALE;   // shadowBlur is in device pixels, so scale it with the view
+let noGlow = false;            // set while drawing body pieces: dozens of blurred shadows are too slow
+const blur = b => (noGlow ? 0 : b * SCALE);   // shadowBlur is in device pixels, so scale it with the view
 function shade(hex, k) {
   const n = parseInt(hex.slice(1), 16), f = v => Math.min(255, Math.round(v * k));
   return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
@@ -103,7 +110,7 @@ function buildTiles() {
     drawSpikes(g);
     g.lineCap = 'round';
     for (let i = 0; i < 4; i++) {
-      const tx = i * 4 + 2, c1 = NEON_LIST[(i * 2) % 6], c2 = NEON_LIST[(i * 2 + 3) % 6];
+      const tx = i * 4 + 2, c1 = BLOOD[(i * 2) % 6], c2 = BLOOD[(i * 2 + 3) % 6];
       g.shadowBlur = blur(2.5);
       g.shadowColor = g.fillStyle = g.strokeStyle = c1;
       oval(g, tx, 9.5, .9, 1.4);
@@ -240,7 +247,7 @@ addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setT
 addEventListener('orientationchange', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 250); });
 resize();
 
-// ---------- audio: NinjaRunner's synthesised SFX (no music in M1) ----------
+// ---------- audio: NinjaRunner's synthesised SFX, and the music (music.js) ----------
 let AC = null, muted = false;
 // Touch devices get a bigger audio buffer ('playback' latency), as in NinjaRunner.
 // ?full forces the desktop version, ?lite the phone version, ?latency= overrides the buffer.
@@ -257,7 +264,15 @@ function initAudio() {
     }
   }
   if (AC && AC.state === 'suspended') AC.resume();
+  if (AC && !music && !QS.has('nomusic')) {
+    music = createMusic({ ac: AC, out: audioOut(), lite: LITE_AUDIO, log: (m, d) => dbg('audio', m, d) });
+    music.target = CFG.musicVol; music.muted = muted;
+    music.start();   // renders in the background; plays when ready
+  }
 }
+let music = null;
+function setMuted(m) { muted = m; if (music) { music.muted = m; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted'); }
+document.addEventListener('visibilitychange', () => { if (AC) { if (document.hidden) AC.suspend(); else AC.resume(); } });
 // Everything plays through one master gain.
 let MASTER = null;
 function audioOut() {
@@ -336,11 +351,65 @@ addEventListener('keydown', e => {
   initAudio();
   if (!keys[e.code] && KEYMAP[e.code]) latch |= KEYMAP[e.code];
   keys[e.code] = true;
-  if (e.code === 'KeyM' && !e.repeat) muted = !muted;
+  if (e.code === 'KeyM' && !e.repeat) setMuted(!muted);
+  if (e.code === 'Tab') { e.preventDefault(); board(true); }
 });
-addEventListener('keyup', e => { keys[e.code] = false; });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Tab') board(false); });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; board(false); fingers.clear(); syncTouch(); });
 addEventListener('pointerdown', () => initAudio());
+
+// ---------- touch (NinjaRunner): big round buttons, every finger tracked on its own ----------
+// A finger can slide from button to button (◀ to ▶, or ▶ onto ⤒ to jump mid-run). Run (») is an
+// on/off toggle, as in NinjaRunner, so one thumb is free for ◀ ▶ and the other for jump and slash.
+// The bits are OR-ed into the same per-tick mask as the keyboard; presses are latched like keys.
+const TOUCH_BTN = { tL: KEY.LEFT, tR: KEY.RIGHT, tJ: KEY.JUMP, tS: KEY.SLASH };
+const fingers = new Map();   // pointerId -> id of the button under that finger (or null)
+let touchRun = false, touchHeld = 0;
+const pad = document.getElementById('touch');
+const TOUCH_UI = matchMedia('(pointer: coarse)').matches || QS.has('touch');
+if (TOUCH_UI) document.body.classList.add('touchui');
+function btnAt(x, y) {
+  const b = document.elementFromPoint(x, y)?.closest?.('#touch button');
+  return b && TOUCH_BTN[b.id] ? b.id : null;
+}
+function fingerOn(pid, id) {
+  if (fingers.get(pid) === id) return;
+  fingers.set(pid, id);
+  if (id) latch |= TOUCH_BTN[id];
+  syncTouch();
+}
+function syncTouch() {
+  const held = new Set(fingers.values());
+  touchHeld = 0;
+  for (const [id, bit] of Object.entries(TOUCH_BTN)) {
+    if (held.has(id)) touchHeld |= bit;
+    document.getElementById(id).classList.toggle('on', held.has(id));
+  }
+}
+const touchBits = () => touchHeld | (touchRun ? KEY.RUN : 0);
+pad.addEventListener('pointerdown', e => {
+  noteDevice('touch'); initAudio();
+  if (e.target.id === 'tRun') { e.preventDefault(); touchRun = !touchRun; e.target.classList.toggle('on', touchRun); return; }
+  const id = btnAt(e.clientX, e.clientY); if (!id) return;
+  e.preventDefault(); fingerOn(e.pointerId, id);
+});
+pad.addEventListener('pointermove', e => { if (fingers.has(e.pointerId)) fingerOn(e.pointerId, btnAt(e.clientX, e.clientY)); });
+for (const ev of ['pointerup', 'pointercancel']) pad.addEventListener(ev, e => { if (fingers.delete(e.pointerId)) syncTouch(); });
+addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
+// the small top bar on touch screens: sound and full screen
+const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
+tapBtn('tMute', () => { setMuted(!muted); document.getElementById('tMute').classList.toggle('off', muted); });
+tapBtn('tFull', () => { triedLandscape = false; goLandscape(true); });
+// On phones that allow it (Android), joining the fight goes full screen and locks landscape.
+let triedLandscape = false;
+function goLandscape(force) {
+  if (triedLandscape || (!force && !matchMedia('(pointer: coarse)').matches)) return;
+  triedLandscape = true;
+  const el = document.documentElement, req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!req || document.fullscreenElement) return;
+  Promise.resolve().then(() => req.call(el)).then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+  dbg('input', 'fullscreen + landscape requested');
+}
 
 // ---------- world ----------
 const S = { tick: 0, camX: 0, camY: 0, shake: 0 };   // view state (the sim state is `state`)
@@ -356,8 +425,17 @@ const colorOf = id => {
 const nameOf = id => { const m = metaOf(id); return m ? m.name : id === ME ? 'you' : 'dummy'; };
 const simCfg = () => (ONLINE ? DEFAULTS : CFG);
 let state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
+let goreMs = 0, renderMs = 0, feedDirty = true;
 const eventLog = [];          // recent sim events, for scripted checks
 let corpses = [], popups = [];
+// Gore (gore.js): simulated here on every client from the server's kill seeds, never on the server.
+const G = createGore(L);
+const goreLog = { at: {} };   // throttles the cap messages
+G.onCap = (what, n) => {
+  const now = performance.now();
+  if (now - (goreLog.at[what] || -1e9) > 10000) { goreLog.at[what] = now; dbg('perf', 'gore: ' + what + ' cap reached', { n, ...G.stats }); }
+};
+const feed = [];              // kill feed: {killer, victim, move, t}
 const forced = {};            // window.__mp.input: per-id bitmask overrides for scripted checks
 let autopilot = null;         // window.__mp.autopilot = (me, players) => bitmask, for scripted play
 
@@ -369,8 +447,27 @@ function onEvents(evs) {
       sfx.slice();
       popups.push({ x: e.x + 5, y: e.y - 4, t: 40, s: String(e.dmg) });
       if (near) S.shake = Math.max(S.shake, 4);
+      if (CFG.gore) {   // spurt along the blow: away from where we see the attacker
+        const a = Sim.getPlayer(state, e.attacker);
+        goreHit(G, e, a ? (a.x <= e.x ? 1 : -1) : 0);
+      }
     } else if (e.type === 'kill') {
       const v = Sim.getPlayer(state, e.victim);
+      feed.push({ killer: e.killer, victim: e.victim, move: e.move, t: performance.now(), kc: colorOf(e.killer), vc: colorOf(e.victim), kn: e.killer != null ? nameOf(e.killer) : null, vn: nameOf(e.victim) });
+      if (feed.length > 5) feed.shift();
+      feedDirty = true;
+      if (music) music.intensity();
+      const f = focus(), dx = f.x - e.x, dy = f.y - e.y;
+      if (dx * dx + dy * dy <= 120 * 120) S.shake = Math.max(S.shake, near ? 10 : 7);   // anyone within 120 units feels it
+      if (CFG.gore) {
+        const t0 = performance.now();
+        goreKill(G, e, { meta: colorOf(e.victim) });
+        dbg('perf', 'gore: kill', { kill: killKey(e), move: e.move, parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, ms: +(performance.now() - t0).toFixed(2) });
+        sfx.gush();
+        if (e.move === 'spikes') sfx.impale();
+        if (e.victim === ME) sfx.die();
+        continue;
+      }
       corpses.push({ id: e.victim, x: e.x, y: e.y, vx: e.vx * .5, vy: Math.min(e.vy, -2.5), face: e.face, t: 50, impaled: e.move === 'spikes', w: v ? v.w : 10 });
       if (e.move === 'spikes') {
         sfx.impale();
@@ -378,11 +475,10 @@ function onEvents(evs) {
         for (let tx = Math.floor(e.x / T); tx <= Math.floor((e.x + 9) / T); tx++) if (L.grid[ty]?.[tx] === '^') L.bloody.add(tx + ',' + ty);
       } else { sfx.gush(); }
       if (e.victim === ME) sfx.die();
-      if (near) S.shake = 8;
     } else if (e.type === 'spawn') {
       if (e.id === ME) { sfx.check(); snapCamera(); }
     }
-    // M3 hook: kill feed, gore (e.seed), music intensity go here.
+    // (kills: the feed, the music's intensity, shake within 120 units and the gore, seeded by e.seed)
   }
 }
 
@@ -418,6 +514,11 @@ function update() {
   S.tick++;
   if (S.shake > 0) S.shake--;
   if (ONLINE) updateOnline(); else updateOffline();
+  if (G.parts.length || G.gibs.length || G.decals.length || G.pools.size) {
+    const t0 = performance.now();
+    stepGore(G);
+    goreMs = goreMs * .95 + (performance.now() - t0) * .05;
+  }
   corpses = corpses.filter(c => { c.vy += .3; c.x += c.vx; c.y += c.vy; if (c.impaled) c.vx = c.vy = 0; return --c.t > 0; });
   popups = popups.filter(p => (p.y -= .5, --p.t > 0));
   followCamera();
@@ -434,7 +535,7 @@ function playFx(p) {
 // Online: sample input, predict our player and queue the input for the server (sent per frame).
 function updateOnline() {
   ME = net.id ?? -1;
-  let k = lobbyOpen ? 0 : heldBits() | latch;
+  let k = lobbyOpen ? 0 : heldBits() | touchBits() | latch;
   latch = 0;
   if (forced[ME] !== undefined) k = forced[ME];
   if (autopilot && net.me) { try { k = autopilot(net.me, state.players) | 0; } catch (e) { dbg('error', 'autopilot: ' + e.message); } }
@@ -445,7 +546,7 @@ function updateOnline() {
 
 function updateOffline() {
   const me = Sim.getPlayer(state, ME), d = Sim.getPlayer(state, DUMMY);
-  const inputs = { [ME]: heldBits() | latch, [DUMMY]: dummyKeys(d, me) };
+  const inputs = { [ME]: heldBits() | touchBits() | latch, [DUMMY]: dummyKeys(d, me) };
   latch = 0;
   for (const id in forced) inputs[id] = forced[id];
   if (CFG.invincible && me) me.iframes = Math.max(me.iframes, 2);
@@ -472,7 +573,7 @@ function followCamera() {
 
 function resetWorld() {
   state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
-  corpses = []; popups = []; L.bloody.clear();
+  corpses = []; popups = []; L.bloody.clear(); clearGore(G);
   onEvents(Sim.addPlayer(state, ME, { cfg: CFG }));
   onEvents(Sim.addPlayer(state, DUMMY, { cfg: CFG }));
   snapCamera();
@@ -643,7 +744,7 @@ function render() {
     if (c === '#') blitTile(ty > 0 && !isWall(L.grid[ty - 1][tx]) ? TILE.top : TILE.dirt, tx, ty, cx);
     else if (c === 'B') blitTile(TILE.block, tx, ty, cx);
     else if (c === '=') blitTile(TILE.plank, tx, ty, cx);
-    else if (c === '^') blitTile(L.bloody.has(tx + ',' + ty) ? TILE.spikeBloody : TILE.spike, tx, ty, cx);
+    else if (c === '^') blitTile(L.bloody.has(tx + ',' + ty) || G.bloody.has(tx + ',' + ty) ? TILE.spikeBloody : TILE.spike, tx, ty, cx);
   }
   world();
   // one continuous glowing neon edge along each run of walkable floor
@@ -660,6 +761,15 @@ function render() {
   }
   ctx.stroke(); ctx.restore();
 
+  // blood on the walls, floors and ceilings: one baked layer (see goreLayer), one draw per frame
+  if (G.decals.length || G.pools.size) {
+    updateGoreLayer();
+    const sx = Math.max(0, cx), sy = Math.max(0, CY), w = Math.min(VW, L.w * T - sx), h = Math.min(VH, L.h * T - sy);
+    ctx.globalAlpha = .96;
+    ctx.drawImage(GL.c, sx * GL.s, sy * GL.s, w * GL.s, h * GL.s, sx - cx, sy, w, h);
+    ctx.globalAlpha = 1;
+  }
+
   // the dead: flipped over and falling (impaled ones stay on the spikes), fading out
   for (const c of corpses) {
     ctx.globalAlpha = Math.min(1, c.t / 20);
@@ -674,6 +784,9 @@ function render() {
     }
   }
 
+  // the cut-up dead: body pieces, hoods and swords
+  for (const g of G.gibs) drawGib(g, cx);
+
   // players: the local one last, so it is drawn on top
   const order = state.players.filter(p => p.alive).sort((a, b) => (a.id === ME) - (b.id === ME));
   for (const p of order) {
@@ -686,6 +799,20 @@ function render() {
     }
     drawHpBar(p, px, py, col);
     if (ONLINE) drawNameTag(p, px, py, col);
+  }
+
+  // flying blood: additive blend so it glows (NinjaRunner), batched per colour
+  if (G.parts.length) {
+    ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = .8;
+    for (let c = 0; c < BLOOD.length; c++) {
+      ctx.fillStyle = BLOOD[c]; ctx.beginPath();
+      for (const b of G.parts) if (b.c === c) {
+        const x = b.x - cx; if (x < -2 || x > VW + 2 || b.y < CY - 2 || b.y > CY + VH + 2) continue;
+        const r = .7 * b.s; ctx.moveTo(x + r, b.y); ctx.arc(x, b.y, r, 0, TAU);
+      }
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
   }
 
   if (CFG.hitboxes) {
@@ -726,7 +853,157 @@ function render() {
     setText('hScore', `SCORE ${me.score}` + (d ? ` · DUMMY ${d.score}` : ''));
     setText('msg', me.alive ? '' : `SPLAT · respawn in ${(me.respawn / 60).toFixed(1)}`);
   }
+  hudCommon();
   if (S.tick > 600) document.getElementById('help').classList.add('gone');
+}
+
+// ---------- kill feed and scoreboard (both modes) ----------
+const FEED_HOLD = 5000, FEED_FADE = 1500;
+const feedEl = document.getElementById('feed'), boardEl = document.getElementById('board'), miniEl = document.getElementById('mini');
+let boardHeld = false, boardKey = '', miniKey = '';
+function board(on) { if (boardHeld !== on) { boardHeld = on; boardEl.classList.toggle('hidden', !on); boardKey = ''; } }
+const span = (text, color, cls) => { const e = document.createElement('span'); e.textContent = text; if (color) e.style.color = color; if (cls) e.className = cls; return e; };
+function feedRow(f) {
+  const row = document.createElement('div');
+  if (f.kn != null && f.killer !== f.victim) row.append(span(f.kn, f.kc, 'nm'), span(' ✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
+  else row.append(span(f.move === 'spikes' ? '▲ ' : f.move === 'leave' ? '✕ ' : '✂ ', null, 'x'), span(f.vn, f.vc, 'nm'));
+  if (f.move === 'spikes' || f.move === 'leave') row.append(span(f.move === 'spikes' ? ' (spikes)' : ' (left)', null, 'how'));
+  return row;
+}
+// The standings: online from the roster (scores kept fresh by score events), offline you and the dummy.
+function standings() {
+  if (ONLINE) return (net.lobby.players || []).map(p => ({ id: p.id, ...p, ...(net.meta.get(p.id) || {}) }));
+  return state.players.map(p => ({ id: p.id, name: nameOf(p.id), color: -1, col: colorOf(p.id), score: p.score, deaths: p.deaths }));
+}
+function boardRows(el, rows, withDeaths) {
+  el.textContent = '';
+  for (const p of rows) {
+    const r = document.createElement('div'); r.className = 'row' + (p.id === ME ? ' me' : '');
+    const dot = span('', null, 'dot'); dot.style.background = p.col || COLORS[p.color] || '#fff';
+    r.append(dot, span(p.name + (p.away ? ' (away)' : ''), null, 'nm'), span(String(p.score), null, 'sc'));
+    if (withDeaths) r.append(span(String(p.deaths ?? 0), null, 'dt'));
+    el.appendChild(r);
+  }
+}
+function hudCommon() {
+  const now = performance.now();
+  while (feed.length && now - feed[0].t > FEED_HOLD + FEED_FADE) { feed.shift(); feedDirty = true; }
+  if (feedDirty) { feedDirty = false; feedEl.textContent = ''; for (const f of feed) feedEl.appendChild(feedRow(f)); }
+  feed.forEach((f, i) => { const el = feedEl.children[i]; if (el) el.style.opacity = String(Math.max(0, Math.min(1, 1 - (now - f.t - FEED_HOLD) / FEED_FADE))); });
+  if (!boardHeld && !TOUCH_UI) return;
+  if (now - (hudCommon.at || 0) < 250) return;
+  hudCommon.at = now;
+  const rows = standings().sort((a, b) => b.score - a.score || (a.deaths ?? 0) - (b.deaths ?? 0) || a.id - b.id);
+  if (boardHeld) {
+    const k = JSON.stringify(rows.map(r => [r.id, r.name, r.score, r.deaths, r.away]));
+    if (k !== boardKey) {
+      boardKey = k;
+      const head = document.createElement('div'); head.className = 'row head';
+      head.append(span('', null, 'dot'), span('PLAYER', null, 'nm'), span('KILLS', null, 'sc'), span('DEATHS', null, 'dt'));
+      boardRows(boardEl, rows, true); boardEl.prepend(head);
+      if (ONLINE && net.lobby.queue && net.lobby.queue.length) boardEl.appendChild(span(`${net.lobby.queue.length} waiting in the queue`, null, 'q'));
+    }
+  }
+  if (TOUCH_UI && !lobbyOpen) {
+    const top = rows.slice(0, 3), k = JSON.stringify(top.map(r => [r.id, r.name, r.score]));
+    if (k !== miniKey) { miniKey = k; boardRows(miniEl, top, false); }
+  }
+}
+
+// ---------- gore drawing ----------
+// Decals and pools are painted into one offscreen canvas covering the whole arena, so a frame costs
+// one drawImage however much blood there is. New blood is painted in as it lands; the layer is
+// rebuilt from scratch only to fade old blood out or drop what a cap or its 4 min life removed.
+const GL = { c: null, g: null, s: 1, built: -1e9, scale: 0, rebuilds: 0, lastMs: 0 };
+function goreLayerScale() { return Math.min(SCALE, LITE_AUDIO ? 2 : 3); }
+function paintDecal(g, d) {
+  const r = .75 * d.s;
+  g.moveTo(d.x + r, d.y); g.arc(d.x, d.y, r, 0, TAU);
+  if (d.d) g.rect(d.x - r * .45, d.y, r * .9, d.d);             // a drip running down
+}
+function paintPool(g, p) { const h = Math.min(4, p.h); g.moveTo(p.x + 1.3, p.y - h / 2 + .3); g.ellipse(p.x, p.y - h / 2 + .3, 1.3, h / 2 + .3, 0, 0, TAU); }
+function rebuildGoreLayer() {
+  const t0 = performance.now(), s = goreLayerScale();
+  if (!GL.c || GL.scale !== s) {
+    GL.c = mk(Math.ceil(L.w * T * s), Math.ceil(L.h * T * s)); GL.g = GL.c.getContext('2d'); GL.scale = GL.s = s;
+  }
+  const g = GL.g;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, GL.c.width, GL.c.height); g.setTransform(s, 0, 0, s, 0, 0);
+  // batch by colour and fade step (10 steps)
+  const buckets = new Map();
+  const put = (k, item) => { let a = buckets.get(k); if (!a) buckets.set(k, a = []); a.push(item); };
+  for (const p of G.pools.values()) if (p.h >= .25) { const f = Math.ceil(fadeOf(G, p.t) * 10); if (f > 0) put('p' + p.c + ':' + f, p); }
+  for (const d of G.decals) { const f = Math.ceil(fadeOf(G, d.t) * 10); if (f > 0) put('d' + d.c + ':' + f, d); }
+  for (const [k, items] of buckets) {
+    const pool = k[0] === 'p', c = +k.slice(1, k.indexOf(':')), f = +k.slice(k.indexOf(':') + 1);
+    g.globalAlpha = f / 10; g.fillStyle = pool ? POOL[c] : BLOOD[c]; g.beginPath();
+    for (const it of items) pool ? paintPool(g, it) : paintDecal(g, it);
+    g.fill();
+  }
+  g.globalAlpha = 1;
+  G.newDecals.length = 0; G.newPools.clear(); G.dirty = false;
+  GL.built = performance.now(); GL.rebuilds++;
+  GL.lastMs = GL.built - t0;
+  if (GL.lastMs > 8 || GL.rebuilds % 50 === 1) dbg('perf', 'gore: decal layer rebuilt', { ms: +GL.lastMs.toFixed(1), decals: G.decals.length, pools: G.pools.size, n: GL.rebuilds });
+}
+function updateGoreLayer() {
+  const now = performance.now();
+  let need = !GL.c || GL.scale !== goreLayerScale() || (G.dirty && now - GL.built > 1000);
+  if (!need && now - GL.built > 3000) {            // anything old enough to be fading? redraw it fainter
+    const edge = G.t - (G.cfg.life - G.cfg.fade);
+    need = (G.decals.length && G.decals[0].t < edge);
+    if (!need) for (const p of G.pools.values()) if (p.t < edge) { need = true; break; }
+  }
+  if (need) { rebuildGoreLayer(); return; }
+  if (!G.newDecals.length && !G.newPools.size) return;
+  const g = GL.g;
+  for (let c = 0; c < BLOOD.length; c++) {          // new blood, painted in on top
+    g.fillStyle = POOL[c]; g.beginPath(); let any = false;
+    for (const p of G.newPools) if (p.c === c && p.h >= .25) { paintPool(g, p); any = true; }
+    if (any) g.fill();
+    g.fillStyle = BLOOD[c]; g.beginPath(); any = false;
+    for (const d of G.newDecals) if (d.c === c) { paintDecal(g, d); any = true; }
+    if (any) g.fill();
+  }
+  G.newDecals.length = 0; G.newPools.clear();
+}
+// One body piece (clipped Pip), hood or sword, turned by the piece's unit vector (c, s).
+const DEAD_PIP = { onGround: true, vx: 0, vy: 0, walk: 0 };
+const BODY = new Path2D(); BODY.ellipse(0, -6.8, 5.4, 6.2, 0, 0, TAU);
+function drawGib(g, cx) {
+  const x = g.x - cx;
+  if (x < -24 || x > VW + 24 || g.y < CY - 24 || g.y > CY + VH + 24) return;
+  const a = g.age > GORE.gibLife ? Math.max(0, 1 - (g.age - GORE.gibLife) / 60) : 1;
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.transform(g.c, g.s, -g.s, g.c, x, g.y);
+  if (g.id === 'S') {                                   // the sword: grip, guard and glowing blade
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#d4a84a'; ctx.lineWidth = 1.3; line(ctx, -7, 0, -4, 0);
+    ctx.lineWidth = .8; line(ctx, -4, -1.4, -4, 1.4);
+    ctx.shadowColor = NEON.cyan; ctx.shadowBlur = blur(5); ctx.strokeStyle = '#aef6ff'; ctx.lineWidth = 1.1; line(ctx, -4, 0, 8, 0);
+    ctx.shadowBlur = 0; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = .4; line(ctx, -4, 0, 8, 0);
+    ctx.strokeStyle = BLOOD[0]; ctx.lineWidth = .8; line(ctx, 4, 0, 8, 0);   // blood on the tip
+  } else {
+    ctx.translate(-g.ox, -g.oy);
+    ctx.beginPath();
+    g.poly.forEach(([px, py], i) => {
+      const X = px <= -5.5 ? -20 : px >= 5.5 ? 20 : px, Y = py <= -13.3 ? -22 : py >= .5 ? 3 : py;
+      i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+    });
+    ctx.clip();
+    noGlow = true;
+    drawPip(DEAD_PIP, -5, -13, g.face, { impaled: true }, g.meta || COLORS[0]);
+    noGlow = false;
+    // the raw cut face: dark crimson edge with a bright wet line
+    const fx = g.cut[0] + g.ox, fy = g.cut[1] + g.oy, dx = -g.cut[3] * 8, dy = g.cut[2] * 8;
+    ctx.clip(BODY);
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#5a0006'; ctx.lineWidth = 2.2; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+    ctx.strokeStyle = '#e8100c'; ctx.lineWidth = 1.1; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+    ctx.strokeStyle = '#ff6a5a'; ctx.lineWidth = .35; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+  }
+  ctx.restore();
 }
 
 // Online HUD: own HP and score, respawn countdown, queue position, connection state.
@@ -736,11 +1013,15 @@ function hudOnline() {
   setText('hHp', me ? `HP ${Math.max(0, me.hp)}` : '');
   document.getElementById('hHp').classList.toggle('low', !!me && me.alive && me.hp <= 34);
   setText('hScore', m && !lobbyOpen ? `SCORE ${m.score}` : '');
-  let msg = '';
+  let msg = '', sub = '';
   if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
-  else if (!lobbyOpen && net.mode === 'queue') msg = `ARENA FULL · QUEUE #${net.queuePos}`;
+  else if (!lobbyOpen && net.mode === 'queue') {
+    msg = `ARENA FULL · QUEUE #${net.queuePos}`;
+    sub = `you are #${net.queuePos} of ${(net.lobby.queue || []).length || net.queuePos} waiting · you join as soon as a slot frees`;
+  }
   else if (me && !me.alive) msg = `SPLAT · respawn in ${(Math.max(0, me.respawn) / 60).toFixed(1)}`;
   setText('msg', msg);
+  setText('msgSub', sub);
 }
 
 // Name tag above the HP bar. Names come from the server (allowlisted characters only).
@@ -814,12 +1095,12 @@ function jumpInfo() {
   const air = 2 * CFG.jumpVel / CFG.gravity;
   return `Jump height ≈ ${h.toFixed(1)} tiles · walk-jump ≈ ${(air * CFG.walkSpeed / T).toFixed(1)} tiles · run-jump ≈ ${(air * CFG.runSpeed / T).toFixed(1)} tiles`;
 }
-let fpsEl = null, netEl = null, errCv = null, reportEl = null;
+let fpsEl = null, netEl = null, errCv = null, reportEl = null, audioEl = null;
 function buildDebug() {
   panel.innerHTML = '';
   const h = document.createElement('h2'); h.innerHTML = '<span>Debug</span><span style="color:#bbb;font-weight:400">D to close</span>';
   panel.appendChild(h);
-  fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; panel.appendChild(fpsEl);
+  fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; fpsEl.style.whiteSpace = 'pre-line'; panel.appendChild(fpsEl);
   if (ONLINE) {
     netEl = document.createElement('div'); netEl.className = 'info stat'; netEl.style.whiteSpace = 'pre-line'; panel.appendChild(netEl);
     const gl = document.createElement('div'); gl.className = 'info'; gl.textContent = 'Prediction error (units, last 6 s; line = 2)'; panel.appendChild(gl);
@@ -844,12 +1125,24 @@ function buildDebug() {
     }
   }
   const g = document.createElement('h3'); g.textContent = 'Cheats & view'; panel.appendChild(g);
-  const toggles = [['hitboxes', 'Show hitboxes'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
-  for (const [key, name] of ONLINE ? toggles.slice(0, 1) : toggles) {
+  const toggles = [['hitboxes', 'Show hitboxes'], ['gore', 'Gore (blood, body pieces)'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
+  for (const [key, name] of ONLINE ? toggles.slice(0, 2) : toggles) {
     const lab = document.createElement('label'); lab.className = 'chk';
     const c = document.createElement('input'); c.type = 'checkbox'; c.checked = CFG[key];
-    c.addEventListener('change', () => { CFG[key] = c.checked; saveCfg(); });
+    c.addEventListener('change', () => { CFG[key] = c.checked; saveCfg(); if (key === 'gore') dbg('perf', 'gore: ' + (c.checked ? 'on' : 'off')); });
     lab.append(c, document.createTextNode(name)); panel.appendChild(lab);
+  }
+  // sound: available online too (it is not physics)
+  const sh = document.createElement('h3'); sh.textContent = 'Sound'; panel.appendChild(sh);
+  {
+    const lab = document.createElement('label');
+    const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(CFG.musicVol, .05);
+    const r = document.createElement('input'); Object.assign(r, { type: 'range', min: 0, max: 1, step: .05, value: CFG.musicVol });
+    const set = x => { CFG.musicVol = x; v.textContent = fmt(x, .05); if (music) { music.target = x; music.apply(); } saveCfg(); };
+    r.addEventListener('input', () => set(+r.value));
+    r.addEventListener('dblclick', () => { r.value = ALL_DEFAULTS.musicVol; set(ALL_DEFAULTS.musicVol); });
+    lab.append(document.createTextNode('Music volume'), v, r); panel.appendChild(lab);
+    audioEl = document.createElement('div'); audioEl.className = 'info'; panel.appendChild(audioEl);
   }
   const btns = document.createElement('div'); btns.className = 'btns';
   const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); btns.appendChild(b); return b; };
@@ -913,17 +1206,23 @@ function frame(t) {
     state = net.view(t);
     for (const f of state.fx) { const p = Sim.getPlayer(state, f.id); if (p && p.alive) playFx(f); }
   }
+  const r0 = performance.now();
   render();
+  const rms = performance.now() - r0;
+  renderMs = renderMs * .95 + rms * .05;
+  if (rms > 30 && (G.parts.length > 1500 || GL.lastMs > 15)) dbg('perf', 'gore: slow render', { ms: Math.round(rms), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, layerMs: +GL.lastMs.toFixed(1) });
   fpsN++;
   if (t - fpsT >= 500) {
     fps = fpsN * 1000 / (t - fpsT); fpsN = 0; fpsT = t;
     if (fpsEl && !panel.classList.contains('hidden')) {
       const me = Sim.getPlayer(state, ME);
-      fpsEl.textContent = `FPS ${fps.toFixed(0)} · tick ${state.tick}` + (me ? ` · x ${me.x.toFixed(1)} y ${me.y.toFixed(1)}` : '');
+      fpsEl.textContent = `FPS ${fps.toFixed(0)} · tick ${state.tick}` + (me ? ` · x ${me.x.toFixed(1)} y ${me.y.toFixed(1)}` : '') +
+        `\ngore: ${G.parts.length} drops · ${G.gibs.length} pieces · ${G.decals.length} decals · ${G.pools.size} pools · step ${goreMs.toFixed(2)} ms · render ${renderMs.toFixed(1)} ms`;
+      if (audioEl) audioEl.textContent = `music: ${music ? music.state : 'not started'}${music && music.rendered.ms ? ` (${music.rendered.ms} ms, ${music.rendered.sr} Hz, ${LITE_AUDIO ? 'lite' : 'full'})` : ''}${muted ? ' · muted (M)' : ''}${music && music.level ? ' · intensity' : ''}`;
       if (ONLINE) refreshNetDebug();
     }
   }
-  if (t - fpsLogT >= 5000) { fpsLogT = t; if (!document.hidden) dbg('perf', 'fps', { fps: Math.round(fps) }); }
+  if (t - fpsLogT >= 5000) { fpsLogT = t; if (!document.hidden) dbg('perf', 'fps', { fps: Math.round(fps), renderMs: +renderMs.toFixed(1), goreMs: +goreMs.toFixed(2), decals: G.decals.length }); }
   requestAnimationFrame(frame);
 }
 
@@ -968,9 +1267,11 @@ function fight() {
   err.textContent = '';
   lsSet(LS_NAME, name);
   initAudio();
+  goLandscape();
   net.join(name, pickedColor);
   lobbyOpen = false;
   lobbyEl.classList.add('hidden');
+  document.body.classList.remove('inlobby');
   document.activeElement && document.activeElement.blur && document.activeElement.blur();
   snapCamera();
 }
@@ -991,8 +1292,19 @@ function renderLobby() {
   if (!players.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'Nobody is fighting yet.'; list.appendChild(li); }
   let info = `${players.length}/${cap} fighting`;
   if (queue.length) info += ` · ${queue.length} waiting`;
-  if (players.length >= cap) info += ' · arena full: you will queue';
+  if (players.length >= cap && net.mode !== 'queue') info += ` · ARENA FULL: you will be #${queue.length + 1} in the queue`;
   document.getElementById('lInfo').textContent = info;
+  document.getElementById('lInfo').classList.toggle('full', players.length >= cap);
+  // the queue, numbered, with our own place marked
+  const ql = document.getElementById('lQueue');
+  ql.textContent = '';
+  queue.forEach((q, i) => {
+    const li = document.createElement('li'); if (q.id === net.id) li.className = 'me';
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = COLORS[q.color] || '#fff';
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = `#${i + 1} ${q.name}` + (q.id === net.id ? ' (you)' : '') + (q.away ? ' (away)' : '');
+    li.append(dot, nm); ql.appendChild(li);
+  });
+  document.getElementById('lQueueBox').classList.toggle('hidden', !queue.length);
 }
 
 function onNetStatus(s) {
@@ -1000,6 +1312,7 @@ function onNetStatus(s) {
     dbg('life', 'back to lobby', { reason: net.kickReason });
     lobbyOpen = true;
     lobbyEl.classList.remove('hidden');
+    document.body.classList.add('inlobby');
     document.getElementById('lErr').textContent = net.kickReason === 'idle' ? 'You were idle for 2 minutes.' : `Disconnected by the server (${net.kickReason || 'kick'}).`;
   }
   document.getElementById('lStatus').textContent = s === 'open' ? '' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…' : '';
@@ -1014,7 +1327,9 @@ setReportSource(() => {
     token: ONLINE ? net.token : null,
     env: { ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
       touch: matchMedia('(pointer: coarse)').matches, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
-      online: ONLINE, cfg: changed, page: location.pathname },
+      online: ONLINE, cfg: changed, page: location.pathname,
+      music: music ? { state: music.state, ...music.rendered, muted } : null,
+      gore: { on: CFG.gore, parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
     net: ONLINE ? { state: net.state, mode: net.mode, id: net.id, rttAvg: net.stats.rttAvg, rttMax: net.stats.rttMax,
       jitterMs: net.stats.jitter, predErrRms: net.predErrRms(), reconnects: net.stats.reconnects, snaps: net.stats.snaps,
       snapCorrections: net.stats.snapsSnapped, pending: net.pending(), queuePos: net.queuePos, fps: Math.round(fps) } : { fps: Math.round(fps) },
@@ -1026,6 +1341,7 @@ setReportSource(() => {
 if (ONLINE) {
   setupLobby();
   renderLobby();
+  document.body.classList.add('inlobby');
   document.getElementById('help').classList.add('gone');
   net.connect();
 } else {
@@ -1041,6 +1357,15 @@ window.__mp = {
   debug: { entries: dbgEntries, send: sendReport },
   get autopilot() { return autopilot; }, set autopilot(f) { autopilot = f; },
   events: eventLog, input: forced, get fps() { return fps; },
+  // gore: per-kill fingerprints (same on every client), counts, and the layer's state
+  gore: {
+    G, fingerprint: key => fingerprint(G, key), settled: key => settled(G, key), keys: () => [...G.kills.keys()],
+    get counts() { return { parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, bloody: G.bloody.size, ...G.stats, layerRebuilds: GL.rebuilds, layerMs: GL.lastMs }; },
+  },
+  get feed() { return [...feedEl.children].map(e => e.textContent); },
+  get perf() { return { renderMs, goreMs, fps }; },
+  get music() { return music; }, analyzeLoop, startAudio: initAudio,
+  inject: evs => onEvents(evs),   // feed made-up events through the normal path (offline perf checks)
   pause() { paused = true; }, resume() { paused = false; last = performance.now(); acc = 0; },
   step(n = 1) { for (let i = 0; i < n; i++) update(); },
   reset: resetWorld,

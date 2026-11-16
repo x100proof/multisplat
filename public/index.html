@@ -26,7 +26,51 @@
   #hHp.low { color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d, 2px 2px 0 #000; }
   #msg { position: absolute; left: 0; right: 0; top: 38%; text-align: center; pointer-events: none;
          font-weight: 800; font-size: clamp(16px, 4vw, 40px); color: #ff2a6d;
-         text-shadow: 0 0 12px #ff2a6d, 0 0 28px #b026ff, 3px 3px 0 #000; }
+         text-shadow: 0 0 12px #ff2a6d, 0 0 28px #b026ff, 3px 3px 0 #000; white-space: pre-line; }
+  #msgSub { position: absolute; left: 0; right: 0; top: calc(38% + clamp(22px, 5.5vw, 54px)); text-align: center; pointer-events: none;
+            font-weight: 700; font-size: clamp(11px, 2vw, 18px); color: #d1f7ff; text-shadow: 0 0 6px #05d9e8, 2px 2px 0 #000; }
+  /* kill feed (SPEC §9): top right under the score, last 5, fading out */
+  #feed { position: absolute; right: .8em; top: 2.4em; display: flex; flex-direction: column; align-items: flex-end; gap: .15em;
+          pointer-events: none; font-weight: 700; font-size: clamp(9px, 1.6vw, 15px); text-shadow: 0 0 4px #000, 1px 1px 0 #000; }
+  #feed > div { background: rgba(5,3,10,.55); padding: .1em .5em; border-radius: 4px; white-space: nowrap; }
+  #feed .x { color: #ff1f1f; } #feed .how { color: #999; font-weight: 400; }
+  /* scoreboard while Tab is held */
+  #board { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); min-width: min(24em, 80%); max-height: 70%; overflow-y: auto;
+           background: rgba(10,6,18,.86); border: 1px solid rgba(5,217,232,.5); border-radius: 8px; padding: .5em .8em;
+           font-size: clamp(10px, 1.8vw, 16px); pointer-events: none; box-shadow: 0 0 18px rgba(176,38,255,.4); }
+  #board.hidden { display: none; }
+  #board .row, #mini .row { display: flex; align-items: center; gap: .6em; padding: .1em 0; }
+  #board .head { color: #9ad8ff; font-size: .75em; letter-spacing: .08em; border-bottom: 1px solid rgba(255,255,255,.15); margin-bottom: .2em; }
+  #board .me, #mini .me { color: #fff; font-weight: 800; }
+  #board .dot, #mini .dot { width: .7em; height: .7em; border-radius: 50%; flex: none; }
+  #board .nm, #mini .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .sc, #board .dt { width: 4.5em; text-align: right; }
+  #board .sc, #mini .sc { color: #f9f871; font-weight: 700; } #board .dt { color: #ff6ec7; }
+  #board .q { display: block; color: #bbb; font-size: .8em; margin-top: .3em; }
+  /* phones: a small always-visible top 3, top right */
+  #mini { position: absolute; right: .6em; top: 2.2em; display: none; min-width: 8em; font-size: 11px; pointer-events: none;
+          background: rgba(5,3,10,.5); border-radius: 5px; padding: .2em .5em; text-shadow: 1px 1px 0 #000; }
+  body.touchui:not(.inlobby) #mini:not(:empty) { display: block; }
+  body.touchui #feed { top: auto; bottom: calc(clamp(64px, 21vmin, 100px) + 22px); right: .6em; }
+  /* touch controls (NinjaRunner): big round buttons in the bottom corners */
+  #touch { position: absolute; left: 0; right: 0; bottom: 0; display: none; justify-content: space-between; align-items: flex-end;
+           padding: 12px max(14px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+           pointer-events: none; z-index: 3; }
+  #touch .grp { display: flex; gap: clamp(8px, 2.5vmin, 16px); align-items: flex-end; }
+  #touch button { pointer-events: auto; width: clamp(54px, 17vmin, 84px); height: clamp(54px, 17vmin, 84px); border-radius: 50%;
+                  border: 3px solid rgba(209,247,255,.45); background: rgba(5,3,10,.28); padding: 0;
+                  color: #d1f7ff; font: 700 clamp(20px, 6vmin, 30px) system-ui, sans-serif; touch-action: none;
+                  text-shadow: 0 0 6px #05d9e8; box-shadow: 0 0 10px rgba(5,217,232,.25); }
+  #touch button.on { background: rgba(5,217,232,.35); border-color: #05d9e8; }
+  #touch #tJ { width: clamp(64px, 21vmin, 100px); height: clamp(64px, 21vmin, 100px); }
+  #touch #tRun.on { background: rgba(255,42,109,.4); border-color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d; }
+  #tbar { position: absolute; left: .5em; top: 2.3em; display: none; gap: 8px; z-index: 3; }
+  #tbar button { width: 38px; height: 38px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
+                 background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
+  #tbar button.off { opacity: .45; }
+  body.touchui #touch, body.touchui #tbar { display: flex; }
+  body.touchui.inlobby #touch, body.touchui.inlobby #tbar { display: none; }
+  body.touchui #help { display: none; }
   #help { position: absolute; left: 0; right: 0; bottom: .5em; text-align: center; pointer-events: none;
           font-size: clamp(9px, 1.6vw, 14px); color: rgba(209,247,255,.7); text-shadow: 1px 1px 0 #000; transition: opacity 1s; }
   #help.gone { opacity: 0; }
@@ -79,8 +123,17 @@
   #lPlayers .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #lPlayers .sc { color: #f9f871; font-weight: 700; }
   #lInfo, #lStatus { font-size: 12px; color: #bbb; margin-top: 6px; }
+  #lInfo.full { color: #ff6ec7; font-weight: 700; font-size: 13px; }
+  #lQueueBox.hidden { display: none; }
+  #lQueue { list-style: none; margin: 0; padding: 0; max-height: 18vh; overflow-y: auto; font-size: 13px; }
+  #lQueue li { display: flex; align-items: center; gap: 8px; padding: 1px 0; color: #ccc; }
+  #lQueue li.me { color: #f9f871; font-weight: 800; }
+  #lQueue .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
   #lFoot { display: flex; justify-content: space-between; margin-top: 12px; font-size: 11px; color: #888; }
-  #lFoot a { color: #9ad8ff; }
+  #lFoot a { color: #9ad8ff; padding: 6px 0; display: inline-block; }
+  #lFoot .touchhelp, body.touchui #lFoot .keyshelp { display: none; }
+  body.touchui #lFoot .touchhelp { display: inline; }
+  @media (max-height: 460px) { #lobby { align-items: flex-start; } #lobby .card { padding: 10px 14px; } #lobby h1 { font-size: 26px; margin-bottom: 4px; } }
 </style>
 </head>
 <body>
@@ -89,7 +142,16 @@
   <canvas id="c"></canvas>
   <div id="hud"><span id="hHp"></span><span id="hScore"></span></div>
   <div id="msg"></div>
-  <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · D debug · M mute</div>
+  <div id="msgSub"></div>
+  <div id="feed"></div>
+  <div id="mini"></div>
+  <div id="board" class="hidden"></div>
+  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tFull" aria-label="Full screen">⛶</button></div>
+  <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · Tab scores · D debug · M mute</div>
+</div>
+<div id="touch">
+  <div class="grp"><button id="tL" aria-label="Left">◀</button><button id="tR" aria-label="Right">▶</button></div>
+  <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
 <div id="lobby">
@@ -101,11 +163,12 @@
     <div id="lColors"></div>
     <button id="lFight">FIGHT</button>
     <div id="lErr"></div>
+    <div id="lInfo"></div>
     <label>In the arena</label>
     <ul id="lPlayers"></ul>
-    <div id="lInfo"></div>
+    <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
     <div id="lStatus"></div>
-    <div id="lFoot"><span>← → move · ↑ jump · Shift run · Space slash</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
+    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · Tab scores</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · » run on/off</span><span><a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
   </div>
 </div>
 <div id="dbg" class="hidden"></div>

@@ -128,8 +128,9 @@ ARCHITECTURE.md    the code as implemented
 - **Look and sound:** the pickup is a glowing, slowly bobbing blade in the neon style. As in
   NinjaRunner, Pip has no sword in hand between attacks: the sword is drawn only during a
   swing. A long sword keeps that rule, and its swing is drawn visibly longer (blade and arc
-  scaled to the real reach) with a brighter trail. So that opponents can read the threat
-  before the swing, a holder gets a small sword icon beside their name tag. Pickup has its
+  scaled to the real reach) with a brighter trail. Pip does carry a scabbard and
+  hilt over the shoulder (`drawPip`), so a holder's scabbard is drawn longer and glowing.
+  That lets opponents read the threat before the swing. Pickup has its
   own SFX, and the kill feed marks long-sword kills.
 - **Prediction:** the client predicts its own longer reach only after the server confirms the
   pickup; the pickup itself is not predicted.

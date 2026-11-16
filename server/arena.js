@@ -17,7 +17,8 @@ const PING_RATE = 10;                               // non-input messages per se
 const FLOOD_KICK_DROPS = 90;                        // dropped messages within FLOOD_WINDOW_MS → kick
 const FLOOD_WINDOW_MS = 3000;
 
-// Close codes sent with a kick (the client treats 4000-4999 as "don't resume").
+// Close codes sent with a kick (the client treats 4000-4999 as "don't resume", except
+// NET.timeoutClose, the heartbeat timeout, which is not a kick: the client reconnects and resumes).
 export const KICK = Object.freeze({
   idle: 4001, malformed: 4002, unknown: 4003, flood: 4004, protocol: 4005, 'bad hello': 4006,
   replaced: 4007, shutdown: 4008,
@@ -27,9 +28,11 @@ const r2 = v => Math.round(v * 100) / 100;
 
 export class Arena {
   constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
-    maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, maxPerIp = Infinity, seed } = {}) {
+    maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, heartbeatMs = NET.heartbeatMs,
+    maxPerIp = Infinity, seed } = {}) {
     this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
+    this.heartbeatMs = heartbeatMs;   // 0 or Infinity: no heartbeat (never used by the server itself)
     this.state = Sim.createWorld({ seed: seed ?? (randomBytes(4).readUInt32BE() % 2147483646) + 1 });
     this.hist = Sim.createHistory();
     this.conns = new Set();
@@ -47,7 +50,7 @@ export class Arena {
   connect(transport) {
     const conn = { ...transport, id: this.nextConn++, rec: null, rtt: 0, connectedAt: this.now(),
       bucket: NET.inputRate, pingBucket: PING_RATE, bucketAt: this.now(), drops: [], dropCount: 0,
-      inCount: 0, inRate: 0, rateAt: this.now(), closed: false };
+      inCount: 0, inRate: 0, rateAt: this.now(), heardAt: this.now(), closed: false };
     this.conns.add(conn);
     this.send(conn, { t: 'welcome', v: PROTOCOL, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS });
     this.send(conn, this.lobbyMsg());
@@ -72,6 +75,18 @@ export class Arena {
     try { conn.close(KICK[reason] || 4000, reason); } catch { /* already closed */ }
   }
 
+  // Heartbeat (SPEC §6.4): nothing heard from this connection for heartbeatMs. It is closed with
+  // NET.timeoutClose, which is not a kick: its player follows the normal dropped-player path (the
+  // record is kept for graceMs for a resume, then released).
+  timeout(conn) {
+    if (conn.closed) return;
+    const silentMs = Math.round(this.now() - conn.heardAt);
+    this.log(`timeout conn=${conn.id} ip=${conn.ip} silent=${silentMs}ms`);
+    this.event('timeout', conn.id, { player: conn.rec ? conn.rec.id : null, silentMs });
+    this.disconnect(conn);
+    try { conn.close(NET.timeoutClose, 'timeout'); } catch { /* already closed */ }
+  }
+
   // The socket closed (or was kicked). A player keeps its slot for graceMs.
   disconnect(conn) {
     if (conn.closed) return;
@@ -89,6 +104,7 @@ export class Arena {
   // ---------- messages ----------
   onMessage(conn, data) {
     if (conn.closed) return;
+    conn.heardAt = this.now();          // any message counts for the heartbeat
     let m;
     try { m = JSON.parse(typeof data === 'string' ? data : data.toString('utf8')); } catch { return this.kick(conn, 'malformed'); }
     if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string') return this.kick(conn, 'malformed');
@@ -158,6 +174,12 @@ export class Arena {
       return;
     }
     if (m.token) this.event('resume-refused', conn.id, {});
+    // An automatic reconnect asks to resume only: with the token gone (the grace period ran out),
+    // it is told so and stays a lobby viewer instead of silently joining as a new player.
+    if (m.token && m.resume === true) {
+      this.send(conn, { t: 'welcome', v: PROTOCOL, tick: this.state.tick, cap: this.maxPlayers, resumed: false, expired: true });
+      return;
+    }
 
     // Records outlive their sockets for graceMs, so without this one address could churn
     // connect + hello + close and hold every slot and queue place. Past maxPerIp records, the
@@ -305,6 +327,9 @@ export class Arena {
     const t0 = this.now();
     this.lastTickAt = t0;
     const now = t0;
+    // heartbeat: close connections that have gone silent (playing, queued or lobby viewers)
+    if (this.heartbeatMs > 0 && this.heartbeatMs < Infinity)
+      for (const c of [...this.conns]) if (now - c.heardAt >= this.heartbeatMs) this.timeout(c);
     // grace expiry and idle kicks
     for (const rec of [...this.recs.values()]) {
       if (!rec.conn && rec.discAt != null && now - rec.discAt >= this.graceMs) this.release(rec, 'timeout');

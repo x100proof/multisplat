@@ -9,20 +9,36 @@ import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as Sim from '../shared/sim.js';
-import { KEY, TICK_MS, DEFAULTS } from '../shared/constants.js';
+import { KEY, TICK_MS, DEFAULTS, NET } from '../shared/constants.js';
 
+// The heartbeat (SPEC §6.4) stays on in every test: like the real client, each fake connection
+// pings every NET.pingMs of fake time while the clock advances (its pongs are kept out of `msgs`),
+// unless the test silences it (`c.silent = true`) or connects it with `conn({silent: true})`.
+// `setup({pings: false})` stops the automatic pings for every connection.
+const HB_PING_ID = 2 ** 30;
 function setup(opts = {}) {
+  const { pings = true, ...arenaOpts } = opts;
   let t = 1000;
-  const clock = { now: () => t, advance: ms => { t += ms; } };
+  const fakes = [];
+  const heartbeat = () => {
+    if (!pings) return;
+    for (const c of fakes) if (!c.silent && !c.conn.closed && t - c.pingAt >= NET.pingMs) {
+      c.pingAt = t; arena.onMessage(c.conn, JSON.stringify({ t: 'ping', id: HB_PING_ID }));
+    }
+  };
+  // advance in steps no longer than a ping interval, pinging as the real client would
+  const clock = { now: () => t, advance: ms => { while (ms > 0) { const d = Math.min(ms, NET.pingMs); t += d; ms -= d; heartbeat(); } } };
   const events = createEventRing(2000);
-  const arena = new Arena({ now: clock.now, seed: 7, event: events.push, ...opts });
-  const conn = () => {
-    const c = { msgs: [], closed: null };
-    c.conn = arena.connect({ ip: 'test', send: s => c.msgs.push(JSON.parse(s)), close: (code, reason) => { c.closed = { code, reason }; } });
+  const arena = new Arena({ now: clock.now, seed: 7, event: events.push, ...arenaOpts });
+  const conn = ({ silent = false } = {}) => {
+    const c = { msgs: [], closed: null, silent, pingAt: t };
+    c.conn = arena.connect({ ip: 'test', send: s => { const m = JSON.parse(s); if (!(m.t === 'pong' && m.id === HB_PING_ID)) c.msgs.push(m); },
+      close: (code, reason) => { c.closed = { code, reason }; } });
     c.say = m => arena.onMessage(c.conn, typeof m === 'string' ? m : JSON.stringify(m));
     c.last = t => [...c.msgs].reverse().find(m => m.t === t);
     c.all = t => c.msgs.filter(m => m.t === t);
     c.events = () => c.msgs.filter(m => m.t === 'event').flatMap(m => m.ev);
+    fakes.push(c);
     return c;
   };
   const tick = (n = 1) => { for (let i = 0; i < n; i++) { clock.advance(TICK_MS); arena.tick(); } };
@@ -171,20 +187,21 @@ test('12 slots, then a FIFO queue with automatic promotion', () => {
   assert.ok(c.last('snapshot').me, 'promoted player gets its own state');
 });
 
-test('resume within the grace period keeps the slot and score; after it the token is refused', () => {
-  const { conn, tick, arena, clock } = setup({ graceMs: 15000 });
+test('resume within the 5 s grace period keeps the slot and score; after it the token is refused', () => {
+  const { conn, tick, arena, clock } = setup();
+  assert.equal(arena.graceMs, 5000);
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 2 });
   const { token, id } = a.last('welcome');
   tick(5);
   Sim.getPlayer(arena.state, id).score = 3;
   arena.disconnect(a.conn);
-  clock.advance(10000); tick(1);
+  clock.advance(4000); tick(1);
   const a2 = conn(); a2.say({ t: 'hello', name: 'A', color: 2, token });
   const w = a2.last('welcome');
   assert.equal(w.resumed, true); assert.equal(w.id, id);
   assert.equal(w.players.find(p => p.id === id).score, 3);
   arena.disconnect(a2.conn);
-  clock.advance(15001); tick(1);
+  clock.advance(6000); tick(1);
   const a3 = conn(); a3.say({ t: 'hello', name: 'A', color: 2, token });
   assert.equal(a3.last('welcome').resumed, false);
   assert.notEqual(a3.last('welcome').id, id);
@@ -252,6 +269,98 @@ test('leave frees the slot at once, keeps the connection as a viewer, and promot
   assert.equal(w.resumed, false); assert.equal(w.id, 3); assert.equal(w.state, 'queue');
   a.say({ t: 'leave' });
   assert.equal(arena.queue.length, 0, 'leaving the queue gives up the place');
+});
+
+test('heartbeat: a silent lobby viewer is closed after 5 s with the timeout code, not a kick', () => {
+  const { conn, tick, arena, clock, events } = setup();
+  assert.equal(arena.heartbeatMs, 5000);
+  const v = conn({ silent: true }), w = conn();          // w pings: kept
+  clock.advance(4900); tick(1);
+  assert.equal(v.closed, null, 'still open before 5 s');
+  clock.advance(200); tick(1);
+  assert.deepEqual(v.closed, { code: NET.timeoutClose, reason: 'timeout' });
+  assert.ok(NET.timeoutClose >= 4000 && NET.timeoutClose < 5000 && !Object.values(KICK).includes(NET.timeoutClose), 'a distinct code');
+  assert.equal(v.last('kick'), undefined, 'no kick message');
+  assert.ok(!arena.conns.has(v.conn));
+  assert.equal(w.closed, null);
+  const ev = events.list(50);
+  assert.ok(ev.some(e => e.type === 'timeout' && e.conn === v.conn.id && e.player === null && e.silentMs >= 5000), 'timeout in the event ring');
+});
+
+test('heartbeat: any message counts; a silent queued spectator is closed too', () => {
+  const { conn, tick, arena, clock } = setup({ maxPlayers: 1 });
+  const a = conn(), q = conn({ silent: true });
+  a.say({ t: 'hello', name: 'A', color: 0 }); q.say({ t: 'hello', name: 'Q', color: 1 });
+  assert.equal(q.last('welcome').state, 'queue');
+  clock.advance(3000); tick(1);
+  q.say({ t: 'input', seq: 1, keys: 0 });                // an input is a sign of life as well
+  clock.advance(3000); tick(1);
+  assert.equal(q.closed, null);
+  clock.advance(2100); tick(1);
+  assert.equal(q.closed.code, NET.timeoutClose);
+  assert.equal(arena.recs.get(q.last('welcome').id).conn, null, 'queue record kept for a resume');
+});
+
+test('heartbeat: a silent player is dropped, kept for the 5 s grace, then released', () => {
+  const { conn, tick, arena, clock, events } = setup();
+  const a = conn(), b = conn();
+  a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  const id = a.last('welcome').id;
+  tick(10);
+  a.silent = true;                                       // the tab stops pinging (and sending inputs)
+  clock.advance(5000); tick(1);
+  assert.equal(a.closed.code, NET.timeoutClose);
+  const rec = arena.recs.get(id);
+  assert.ok(rec && rec.conn === null && rec.state === 'play', 'record kept, away');
+  assert.ok(Sim.getPlayer(arena.state, id), 'still in the world during the grace period');
+  const ev = events.list(50);
+  assert.ok(ev.some(e => e.type === 'timeout' && e.player === id));
+  assert.ok(ev.some(e => e.type === 'drop' && e.player === id), 'the normal drop path');
+  tick(30);                                              // ~0.5 s
+  assert.equal(b.last('lobby').players.find(p => p.id === id).away, true);
+  clock.advance(4200); tick(1);                          // ~4.7 s after the drop
+  assert.ok(arena.recs.has(id), 'not released before the grace period ends');
+  clock.advance(400); tick(1);
+  assert.ok(!arena.recs.has(id), 'released');
+  assert.equal(Sim.getPlayer(arena.state, id), null);
+  assert.ok(b.events().some(e => e.type === 'leave' && e.id === id && e.reason === 'timeout'));
+  assert.equal(b.closed, null, 'the pinging player is untouched');
+});
+
+test('heartbeat: a pinging player with no input is kept (until the 120 s idle kick)', () => {
+  const { conn, tick, arena, clock } = setup();
+  const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  const id = a.last('welcome').id;
+  for (let i = 0; i < 60; i++) { clock.advance(1000); tick(1); }
+  assert.equal(a.closed, null);
+  assert.equal(arena.recs.get(id).conn, a.conn);
+  assert.equal(arena.activeCount(), 1);
+});
+
+test('heartbeat: a timed-out player resumes inside 5 s; at 6 s an automatic resume is refused', () => {
+  const { conn, tick, arena, clock } = setup();
+  const a = conn({ silent: true }); a.say({ t: 'hello', name: 'A', color: 2 });
+  const { token, id } = a.last('welcome');
+  tick(5);
+  Sim.getPlayer(arena.state, id).score = 2;
+  clock.advance(5000); tick(1);
+  assert.equal(a.closed.code, NET.timeoutClose);
+  clock.advance(4000); tick(1);
+  const a2 = conn({ silent: true }); a2.say({ t: 'hello', name: 'A', color: 2, token, resume: true });
+  assert.equal(a2.last('welcome').resumed, true); assert.equal(a2.last('welcome').id, id);
+  assert.equal(a2.last('welcome').players.find(p => p.id === id).score, 2, 'score kept');
+  clock.advance(5000); tick(1);                          // silent again: timed out again
+  assert.equal(a2.closed.code, NET.timeoutClose);
+  clock.advance(6000); tick(1);
+  assert.ok(!arena.recs.has(id), 'released after the grace period');
+  const a3 = conn(); a3.say({ t: 'hello', name: 'A', color: 2, token, resume: true });
+  const w = a3.last('welcome');
+  assert.equal(w.resumed, false); assert.equal(w.expired, true); assert.equal(w.id, undefined, 'not joined');
+  assert.equal(a3.closed, null, 'stays a lobby viewer');
+  assert.equal(arena.activeCount(), 0);
+  // a manual join with the dead token (no resume flag) joins afresh
+  a3.say({ t: 'hello', name: 'A', color: 2, token });
+  assert.equal(a3.last('welcome').resumed, false); assert.notEqual(a3.last('welcome').id, id);
 });
 
 test('idle for 120 s goes back to the lobby', () => {

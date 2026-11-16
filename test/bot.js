@@ -65,7 +65,10 @@ export function bot(me, players) {
     if (cfg.mode === 'spar') {
       const tgt = players.find(p => p.id === cfg.target && p.alive);
       if (!tgt || Math.abs(tgt.y - me.y) > 3) return 0;
-      const tcx = tgt.x + tgt.w / 2, side2 = Math.sign(cx - tcx) || -1, d = Math.abs(cx - tcx);
+      const tcx = tgt.x + tgt.w / 2, d = Math.abs(cx - tcx);
+      let side2 = Math.sign(cx - tcx) || -1;
+      // no room on this side (the target is by a wall): spar from the other side, jumping over it
+      if (tcx + side2 * cfg.dist < 22 || tcx + side2 * cfg.dist > L.w * T - 22) side2 = -side2;
       tx = tcx + side2 * cfg.dist; tol = 2.5;
       if (Math.abs(cx - tx) <= tol) {
         const toward = dirKey(tcx - cx);

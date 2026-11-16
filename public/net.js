@@ -35,6 +35,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   };
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
+  let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
   // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
   // and the server (which restarts seq at the hello) would take those numbers and then ignore the
   // restarted ones as stale, freezing the player.
@@ -64,40 +65,87 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       status('open');
       dbg('net', attempts ? 'reconnected' : 'connect', { attempts });
       if (want) hello();
+      // Heartbeat (SPEC §6.4): ping twice a second from the moment the socket opens, whatever the
+      // mode (lobby viewer, queue or play). The server closes a connection silent for 5 s.
+      heardAt = performance.now();
       clearInterval(pingTimer);
-      let n = 0;
-      const ping = () => { send({ t: 'ping', id: ++pingId, ct: performance.now() }); if (++n === 3) { clearInterval(pingTimer); pingTimer = setInterval(ping, 2000); } };
-      ping(); pingTimer = setInterval(ping, 500);
+      ping(); pingTimer = setInterval(ping, NET.pingMs);
     };
-    sock.onmessage = e => { if (sock === ws) onMessage(e.data); };
-    sock.onclose = e => {
-      if (sock !== ws) return;
-      clearInterval(pingTimer);
-      dbg('net', 'close', { code: e.code });
-      ws = null;
-      net.me = null; snaps.length = 0; arrOff = null;
-      if (kicked || (e.code >= 4000 && e.code < 5000)) {
-        // a kick ends the session: back to the lobby as a viewer, no resume
-        net.token = null; want = null; net.id = null; net.mode = 'viewer';
-        status('kicked');
-        retryTimer = setTimeout(net.connect, 1000);
-        return;
-      }
-      if (want) dropped = true;
-      status('reconnecting');
-      const delay = Math.min(8000, 500 * 2 ** attempts) * (.75 + Math.random() * .5);
-      attempts++;
-      net.stats.reconnects++;
-      dbg('net', 'reconnect attempt', { attempt: attempts, inMs: Math.round(delay) });
-      retryTimer = setTimeout(net.connect, delay);
-    };
+    sock.onmessage = e => { if (sock === ws && !frozen) { heardAt = performance.now(); onMessage(e.data); } };
+    sock.onclose = e => { if (sock !== ws) return; if (frozen) frozen.close = e.code; else closed(e.code); };
   };
 
-  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  function ping() { send({ t: 'ping', id: ++pingId, ct: performance.now() }); }
+
+  // The socket is gone. A kick (4000-4999, except the heartbeat timeout) ends the session; anything
+  // else, the heartbeat timeout included, is a network drop: reconnect with backoff and resume.
+  function closed(code) {
+    clearInterval(pingTimer);
+    dbg('net', 'close', { code });
+    ws = null;
+    net.me = null; snaps.length = 0; arrOff = null;
+    if (code === NET.timeoutClose) dbg('net', 'server closed a silent connection (heartbeat)');
+    if (kicked || (code >= 4000 && code < 5000 && code !== NET.timeoutClose)) {
+      // a kick ends the session: back to the lobby as a viewer, no resume
+      net.token = null; want = null; net.id = null; net.mode = 'viewer';
+      status('kicked');
+      retryTimer = setTimeout(net.connect, 1000);
+      return;
+    }
+    if (want) dropped = true;
+    status('reconnecting');
+    const delay = Math.min(8000, 500 * 2 ** attempts) * (.75 + Math.random() * .5);
+    attempts++;
+    net.stats.reconnects++;
+    dbg('net', 'reconnect attempt', { attempt: attempts, inMs: Math.round(delay) });
+    retryTimer = setTimeout(net.connect, delay);
+  }
+
+  // Watchdog: the server sends snapshots or lobby updates and answers every ping, so a socket that
+  // has been quiet for longer than the server's heartbeat is dead even if no close arrived (a
+  // background tab whose timers were frozen, a dead NAT mapping). Drop it and reconnect.
+  function watchdog() {
+    if (frozen || !ws || ws.readyState !== 1) return;
+    const quiet = performance.now() - heardAt;
+    if (quiet <= NET.heartbeatMs + 1000) return;
+    dbg('net', 'server silent, dropping the socket', { ms: Math.round(quiet) });
+    const sock = ws;
+    sock.onclose = null;
+    try { sock.close(); } catch { /* ignore */ }
+    closed(1006);
+  }
+  setInterval(watchdog, 1000);
+  // A background tab's timers are throttled (Chrome: about once a second, and after minutes hidden
+  // once a minute; phones may freeze the page). Coming back: check the socket at once, ping, and
+  // retry a pending reconnect now instead of waiting out the backoff.
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    watchdog();
+    if (ws && ws.readyState === 1) ping();
+    else if (net.state === 'reconnecting') { attempts = 0; net.connect(); }
+  });
+
+  function send(obj) { if (!frozen && ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  // Test hook: behave like a page whose timers and event handlers are frozen for `ms` (a
+  // backgrounded or suspended tab): nothing is sent, incoming messages are lost, and a close that
+  // arrives meanwhile is handled only when the page wakes up.
+  let frozen = null;
+  net.freeze = function freeze(ms) {
+    dbg('net', 'test: frozen', { ms });
+    frozen = { close: null };
+    setTimeout(() => {
+      const f = frozen; frozen = null;
+      dbg('net', 'test: thawed', { closed: f.close });
+      if (f.close != null) closed(f.close); else watchdog();
+    }, ms);
+  };
 
   function hello() {
     sentToken = net.token;
-    send({ t: 'hello', name: want.name, color: want.color, ...(net.token ? { token: net.token } : {}) });
+    // after a drop, ask to resume only: if the grace period is over the server says `expired`
+    // and we go back to the lobby rather than silently joining as someone new
+    send({ t: 'hello', name: want.name, color: want.color, ...(net.token ? { token: net.token, ...(dropped ? { resume: true } : {}) } : {}) });
   }
 
   net.join = function join(name, color) {
@@ -135,6 +183,16 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
 
   function onWelcome(m) {
     if (m.cap) net.cap = m.cap;
+    if (m.expired) {                                    // our resume came too late: the slot is gone
+      dbg('net', 'resume refused: grace period over');
+      sendReport('auto', 'resume expired');
+      net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
+      dropped = false; attempts = 0; live = false; seq = 0; pending = []; unsent = [];
+      net.kickReason = 'expired';
+      status('expired');
+      status('open');
+      return;
+    }
     if (m.id == null) { net.serverTick = m.tick; return; }   // connection welcome (before hello)
     const wasDrop = dropped;
     dropped = false; attempts = 0;

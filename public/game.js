@@ -4,7 +4,7 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { createNet } from './net.js';
 import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
@@ -1439,6 +1439,11 @@ function onNetStatus(s) {
     dbg('life', 'back to lobby', { reason: net.kickReason });
     leaveMenu(false);
     backToLobby(net.kickReason === 'idle' ? 'You were idle for 2 minutes.' : `Disconnected by the server (${net.kickReason || 'kick'}).`);
+  }
+  if (s === 'expired') {   // reconnected after the 5 s resume window (a long network drop or a background tab)
+    dbg('life', 'back to lobby', { reason: 'expired' });
+    leaveMenu(false);
+    backToLobby(`Connection lost for over ${NET.graceMs / 1000} s: your slot and score were released. Press Fight to play again.`);
   }
   document.getElementById('lStatus').textContent = s === 'open' ? '' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…' : '';
 }

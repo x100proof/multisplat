@@ -50,7 +50,10 @@ export const NET = Object.freeze({
   interpMs: 100,           // remote players are drawn this far behind the newest snapshot
   extrapMs: 100,           // at most this much extrapolation when snapshots stall
   maxPlayers: 12,          // active fighters; later joiners queue as spectators
-  graceMs: 15000,          // a dropped player keeps its slot and score this long (resume token)
+  graceMs: 5000,           // a dropped player keeps its slot and score this long (resume token)
+  heartbeatMs: 5000,       // the server closes a connection it has heard nothing from for this long
+  timeoutClose: 4100,      // the close code for that: the client treats it as a network drop (resume), not a kick
+  pingMs: 500,             // the client pings twice a second, from socket open, in every mode
   idleMs: 120000,          // no input for this long sends a player back to the lobby
   inputRate: 90,           // input messages per second per connection
   smoothUnits: 2,          // corrections below this are smoothed over smoothFrames, larger ones snap

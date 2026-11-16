@@ -7,7 +7,8 @@ Status: **M6** (in progress). This covers:
 - the remote-debugging pipeline (M2),
 - client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3),
 - long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX,
-- M6 changes: leaving with Escape, no spike traps in the arena (§3).
+- M6 changes: leaving with Escape, no spike traps in the arena (§3), the 5 s heartbeat and resume
+  window (§6.4).
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -53,7 +54,9 @@ from `/shared/*.js`.
   - `historyMs 200`, `rewindCapMs 150`,
   - `snapshotHz 30`, `maxInputBatch 3`,
   - `interpMs 100`, `extrapMs 100`,
-  - `maxPlayers 12`, `graceMs 15000`, `idleMs 120000`, `inputRate 90`,
+  - `maxPlayers 12`, `graceMs 5000`, `idleMs 120000`, `inputRate 90`,
+  - `heartbeatMs 5000` (a connection silent this long is closed), `timeoutClose 4100` (its close
+    code, which the client treats as a network drop), `pingMs 500` (the client's ping period),
   - `smoothUnits 2`, `smoothFrames 6`.
 
   Next to it are `HISTORY_TICKS` (12) and `TICK_MS` (16.67).
@@ -199,7 +202,8 @@ The protocol is JSON text frames, each with a `t` field. Server limits:
 Client → server:
 
 ```js
-{ t: 'hello', name, color /* 0-7 */, token? /* resume */ }
+{ t: 'hello', name, color /* 0-7 */, token? /* resume */, resume? /* true: resume only (an automatic
+  reconnect); a dead token gets the `expired` welcome below instead of a fresh join */ }
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
@@ -209,6 +213,8 @@ Server → client:
 
 ```js
 { t: 'welcome', v: 1, tick, cap, colors }                     // on connect, before hello
+{ t: 'welcome', v: 1, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
+                                                               // no record; the socket stays a viewer
 { t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
   tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
@@ -222,6 +228,7 @@ Server → client:
 { t: 'pong', id, ct, tick, tf /* 0..1 into the current tick */ }
 { t: 'kick', reason }                  // then close with 4001 idle, 4002 malformed, 4003 unknown,
                                        // 4004 flood, 4005 protocol, 4006 bad hello, 4007 replaced, 4008 shutdown
+// The heartbeat timeout is not a kick: no `kick` message, close code 4100 (`NET.timeoutClose`).
 roster = { id, name, color, score, deaths, away /* disconnected, inside the grace period */ }
 ```
 
@@ -258,12 +265,12 @@ the hitter gets the point.
 - **`NET_SIM=delayMs,jitterPct`** delays every message in both directions, including the RTT
   pings, by `delayMs ± jitterPct %`, keeping order. So `120,2` gives an RTT of about 240 ms.
 - `startServer(cfg)` returns `{http, wss, arena, debug, admin, events, port, adminPort, close()}`.
-- Logs (stdout): listen, connect, join/promote/queue, resume, drop, leave, kick, refuse, report
+- Logs (stdout): listen, connect, join/promote/queue, resume, drop, timeout, leave, kick, refuse, report
   and errors. Never message bodies.
 
 ## server/arena.js
 
-`new Arena({cfg, level, now, log, event, maxPlayers, graceMs, idleMs, maxPerIp, seed})`. It has no sockets: tests
+`new Arena({cfg, level, now, log, event, maxPlayers, graceMs, idleMs, heartbeatMs, maxPerIp, seed})`. It has no sockets: tests
 drive it with fake connections and call `tick()` themselves, and `start()` runs the real loop.
 
 - **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
@@ -276,12 +283,20 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
 - **Slots and queue.** Up to `maxPlayers` records play. The rest wait in a FIFO queue and receive
   snapshots and events as spectators. When a slot frees, the first *connected* queued record is
   promoted (`join` event, then its `spawn`).
+- **Heartbeat (SPEC §6.4).** Every message a connection sends (any type, even one the rate limit
+  then drops) sets `conn.heardAt`. Each tick, before grace expiry, a connection (playing, queued or a
+  lobby viewer) silent for `heartbeatMs` (5 s; `0`/`Infinity` turns it off, which only a caller could
+  ask for) goes through `timeout(conn)`: a `timeout` log line and ring event (`player`, `silentMs`),
+  `disconnect` (so a player takes the normal drop path below) and `close(4100, 'timeout')`.
 - **Resume.** When a socket closes, the record keeps its slot (or queue place) for `graceMs`
-  (15 s), and the sim player stays in the world, idle. A `hello` with its token within that time
+  (5 s), and the sim player stays in the world, idle. A `hello` with its token within that time
   rebinds the record (`resumed: true`, same id, score kept). An open socket holding the same token
   is kicked with `replaced`. A queued record that resumes is promoted at once if a slot is free
   (it was skipped while away). After the grace period the record is released (`leave`) and the token
-  stops working. A kick always releases at once.
+  stops working. A kick always releases at once. A `hello` with a dead token and `resume: true` (what
+  the client sends when it reconnects by itself) gets the `expired` welcome and does not join; without
+  the flag (Fight pressed in the lobby) it joins afresh as before. A player silenced by the heartbeat is
+  closed 5 s after its last message and released 5 s after that, unless it resumes in between.
 - **Idle kick.** A playing record with no non-zero input for `idleMs` (120 s) is kicked with
   `idle`, and the client goes back to the lobby.
 - **Leave.** A `leave` message releases the record at once (`leave` event, reason `left`, token
@@ -320,7 +335,7 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
 
 - `createEventRing(2000)`: `push(type, conn, data)` adds `{n, ts, type, conn, …data}`. The arena
   and server push `connect`, `close`, `join`, `promote`, `queue`, `resume`, `resume-refused`,
-  `drop`, `leave`, `kick` (with `reason`), `ratelimit`, `overrun`, `refused` (upgrade refusals,
+  `drop`, `timeout` (heartbeat, with `player` and `silentMs`), `leave`, `kick` (with `reason`), `ratelimit`, `overrun`, `refused` (upgrade refusals,
   with `why`), `report` and `report-rejected`.
 - `validateReport(body)` returns `{report, token}`, with the token removed from the report. Rules:
   - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId`,
@@ -375,12 +390,28 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
   - `connect()` opens `ws(s)://<page host>/ws`. The page loads as a viewer, so the lobby is live.
   - `join(name, color)` sends `hello`, with the token if there is one.
   - On an unexpected close it reconnects with backoff (0.5 s doubling to 8 s, ±25 %), and the next
-    `hello` carries the token.
-  - A kick (close code 4000–4999) clears the token and goes back to the lobby as a viewer.
+    `hello` carries the token and `resume: true`. An `expired` welcome (the 5 s window is over)
+    clears the session and reports status `expired`: `game.js` reopens the lobby with "Connection lost
+    for over 5 s: your slot and score were released. Press Fight to play again."
+  - A kick (close code 4000–4999, except the heartbeat's 4100) clears the token and goes back to the
+    lobby as a viewer. 4100 is handled as a network drop (reconnect and resume).
+  - **Heartbeat.** A ping goes out on socket open and then every `NET.pingMs` (0.5 s), in every mode
+    (lobby viewer, queue, play). A 1 s watchdog drops a socket that has heard nothing from the server
+    for over 6 s (the server sends snapshots or lobby updates and answers every ping), even if no
+    close arrived. When the tab becomes visible again it runs the watchdog, pings, and retries a
+    pending reconnect at once instead of waiting out the backoff.
+  - **Background tabs.** Browsers throttle a hidden tab's timers (Chrome: about once a second, and
+    after about 5 minutes hidden only once a minute; phones may freeze the page outright), and
+    `requestAnimationFrame` stops, so a hidden player sends no inputs (the server repeats the last
+    keys for 8 ticks, then 0: Kanbei stands still and can be hit). As long as pings still get out at
+    least every 5 s the player stays in the game (until the 120 s idle kick). Once they stop, the
+    server closes the socket after 5 s; if the tab comes back within the next 5 s it reconnects and
+    resumes with its score, otherwise it lands in the lobby with the message above.
+  - `freeze(ms)` (test hook) simulates a frozen page: nothing is sent, incoming messages are lost and a
+    close is only handled after `ms`.
   - `drop()` closes the socket the way a network failure would (for tests).
 - **Clock sync.**
-  - A ping goes out every 0.5 s for the first three, then every 2 s. RTT avg/max are over 30
-    samples.
+  - Pings (every 0.5 s, see above) also drive the clock. RTT avg/max are over 30 samples.
   - `offset` estimates the server tick from `pong.tick + tf + RTT/2`.
   - A second clock, the *arrival clock*, follows the early envelope of `snapshot.tick − now`.
     Late snapshots count as jitter (`stats.jitter`, an EMA in ms).
@@ -684,7 +715,13 @@ editable physics.
   - per-tick input consumption, batches and stale seqs,
   - input repeat then zero,
   - slots, queue and promotion,
-  - resume inside and after the grace period, and `replaced`,
+  - resume inside (4 s) and after (6 s) the 5 s grace period, and `replaced`,
+  - the heartbeat: a silent viewer closed with 4100 and no kick message, any message counting and a
+    silent queued spectator closed, a silent player dropped (record kept, away) then released 5 s
+    later with `leave`/`timeout`, a pinging idle player kept for 60 s, a timed-out player resuming at
+    4 s and refused (`expired`, no join) at 6 s, and a manual join with the dead token joining afresh.
+    The harness keeps the heartbeat on: each fake connection pings every 0.5 s of fake time as the
+    clock advances (in steps of at most 0.5 s), unless the test makes it `silent`,
   - idle kick, input flood,
   - lag-compensated hits through rewound history, and with a long sword (hit only by a holder),
   - long swords: `item`/`pickup` relayed to players and viewers, `it` and the flag bit in snapshots,
@@ -735,6 +772,10 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
     `Hold ⚔ Opp`; the respawned opponent then comes down in `fight` mode and kills the standing holder
     with its sword (`kill.held`, killer and move checked), and after the respawn every page has it back
     to the standard sword; `tools/debug.js state` lists the pickups,
+  - heartbeat, on a fourth server: two players and a lobby viewer stay connected through 7 s of
+    quiet; a 3 s `freeze` changes nothing; a 7 s freeze is timed out (ring event, the other player
+    sees `away`) and resumes with the same id; a 12 s freeze ends with the player released and the
+    page back in the lobby with the "Connection lost" message,
   - asserts no page errors.
 - `npm run test:all` runs everything.
 - `hygiene.js` (also run through `hygiene.test.js`) scans `git ls-files` plus untracked,

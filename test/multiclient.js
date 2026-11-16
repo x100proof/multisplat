@@ -115,12 +115,12 @@ async function fightTest() {
   assert.ok(fps[0].fp && +fps[0].fp.split(':')[0] > 100, 'plenty of blood landed');
   for (const f of fps) assert.equal(f.fp, fps[0].fp, 'same gore on every page');
 
-  // --- drop and reconnect within 15 s keeps the score
+  // --- drop and reconnect within 5 s keeps the score
   const score = await killer.page.evaluate(id => __mp.net.meta.get(id).score, killer.id);
   const tDrop = Date.now();
   await killer.page.evaluate(() => __mp.net.drop());
   await waitFor(() => killer.page.evaluate(() => __mp.net.state !== 'open'), { what: 'drop' });
-  await waitFor(() => killer.page.evaluate(() => __mp.net.state === 'open' && __mp.net.mode === 'play' && !!__mp.net.me), { timeout: 15000, what: 'resume' });
+  await waitFor(() => killer.page.evaluate(() => __mp.net.state === 'open' && __mp.net.mode === 'play' && !!__mp.net.me), { timeout: 5000, what: 'resume' });
   const after = await killer.page.evaluate(() => ({ id: __mp.net.id, score: __mp.net.meta.get(__mp.net.id).score,
     resumed: __mp.debug.entries().some(e => e.msg === 'resume accepted') }));
   log(`reconnected in ${((Date.now() - tDrop) / 1000).toFixed(1)} s`);
@@ -234,7 +234,10 @@ async function longSwordTest() {
   await stopBot(O.page);
   await installBot(H.page, { mode: 'spar', target: O.id, dist: 31 });
   const hit = await waitFor(() => H.page.evaluate(([a, v]) => __mp.events.find(e => e.type === 'hit' && e.attacker === a && e.victim === v), [H.id, O.id]),
-    { timeout: 30000, every: 100, what: 'a long-reach hit' });
+    { timeout: 30000, every: 100, what: 'a long-reach hit' }).catch(async e => {
+    for (const p of [H, O]) log('stuck:', p.name, JSON.stringify(await p.page.evaluate(() => { const m = __mp.net.me; return { x: m.x, y: m.y, face: m.face, vx: m.vx, on: m.onGround, st: window.__botState, cfg: window.__botCfg, ev: __mp.events.slice(-8).map(e => e.type + ':' + (e.attacker || e.id || '') + '>' + (e.victim || '')) }; })));
+    throw e;
+  });
   const dist = await H.page.evaluate(() => window.__botState.lastSlashDist);
   log(`long-reach hit: slashed from ${dist.toFixed(1)} units (standard reach ends at 26), ${hit.move} for ${hit.dmg}`);
   assert.ok(dist > 27, `the hit came from beyond standard reach (${dist})`);
@@ -308,6 +311,62 @@ async function leaveTest() {
   await srv.stop();
 }
 
+// Heartbeat (SPEC §6.4): pinging pages (a lobby viewer and an idle player) stay connected; a page
+// frozen for a while (like a background tab whose timers stop: `net.freeze`) is closed by the
+// server after 5 s with the timeout code, then reconnects and resumes if it wakes within the grace
+// period, and otherwise lands in the lobby with a message.
+async function heartbeatTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPlayer(srv, 'Afk', 3), B = await openPlayer(srv, 'Bee', 4);
+  const vctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const V = await vctx.newPage();
+  V.on('pageerror', e => errors.push(`viewer: ${e.message}`));
+  await V.goto(srv.url);
+  await V.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const ringEvents = async () => (await (await fetch(`http://127.0.0.1:${srv.adminPort}/events?n=500`)).json());
+  const timeouts = async () => (await ringEvents()).filter(e => e.type === 'timeout');
+  const net = p => p.evaluate(() => ({ state: __mp.net.state, mode: __mp.net.mode, id: __mp.net.id, reconnects: __mp.net.stats.reconnects,
+    lobby: __mp.lobbyOpen, err: document.getElementById('lErr').textContent, msgs: __mp.debug.entries().filter(e => e.cat === 'net').map(e => e.msg) }));
+  // 7 s of quiet play: nobody is timed out (the viewer and the idle player keep pinging)
+  await sleep(7000);
+  assert.deepEqual(await timeouts(), [], 'no timeouts while every page pings');
+  for (const p of [A.page, B.page, V]) assert.equal((await net(p)).reconnects, 0);
+  // frozen 3 s: under the heartbeat, nothing happens
+  await A.page.evaluate(() => __mp.net.freeze(3000));
+  await sleep(3800);
+  let a = await net(A.page);
+  assert.equal(a.reconnects, 0); assert.equal(a.mode, 'play');
+  assert.deepEqual(await timeouts(), []);
+  // frozen 7 s: the server closes it at 5 s (the record is kept, away); on waking the page treats the
+  // close as a network drop and resumes with the same id
+  await A.page.evaluate(() => __mp.net.freeze(7000));
+  await waitFor(async () => (await timeouts()).some(e => e.player === A.id), { timeout: 7000, what: 'heartbeat timeout' });
+  await waitFor(() => B.page.evaluate(id => (__mp.net.meta.get(id) || {}).away === true, A.id), { timeout: 3000, what: 'Afk away for Bee' });
+  await waitFor(async () => { const v = await net(A.page); return v.state === 'open' && v.mode === 'play' && v.reconnects === 1; },
+    { timeout: 6000, what: 'resume after the timeout' });
+  a = await net(A.page);
+  assert.equal(a.id, A.id, 'same id after the heartbeat resume');
+  assert.ok(a.msgs.includes('server closed a silent connection (heartbeat)') && a.msgs.includes('resume accepted'), a.msgs.join(', '));
+  assert.ok(!a.lobby);
+  log('heartbeat: idle pages kept, a 3 s freeze survives, a 7 s freeze is timed out and resumes');
+  // frozen 12 s: timed out at 5 s, released at 10 s; on waking the resume is refused and the page
+  // goes back to the lobby with a message
+  await A.page.evaluate(() => __mp.net.freeze(12000));
+  await waitFor(() => B.page.evaluate(id => __mp.events.some(e => e.type === 'leave' && e.id === id && e.reason === 'timeout'), A.id),
+    { timeout: 12000, what: 'Afk released' });
+  await waitFor(async () => { const v = await net(A.page); return v.lobby && v.mode === 'viewer' && v.state === 'open'; }, { timeout: 8000, what: 'back to the lobby' });
+  a = await net(A.page);
+  assert.match(a.err, /Connection lost/);
+  assert.ok(a.msgs.includes('resume refused: grace period over'));
+  assert.ok((await ringEvents()).some(e => e.type === 'resume-refused'));
+  log(`heartbeat: a 12 s freeze ends in the lobby: "${a.err}"`);
+  const v = await net(V);
+  assert.equal(v.reconnects, 0, 'the lobby viewer was never timed out');
+  for (const c of [A.page.context(), B.page.context(), vctx]) await c.close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -315,6 +374,7 @@ async function main() {
     await predictionTest();
     await longSwordTest();
     await leaveTest();
+    await heartbeatTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

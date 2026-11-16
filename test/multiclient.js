@@ -1,0 +1,173 @@
+// Headless multi-client test (SPEC §12): three browsers in one arena, a scripted fight to the death,
+// kill/score/respawn seen on every page, a drop and resume that keeps the score, a manual debug
+// report read back through tools/debug.js, and prediction error under NET_SIM=120,2.
+//
+//   node test/multiclient.js            (Chromium from $PLAYWRIGHT_CHROMIUM or playwright's cache)
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { startServer, launchChromium, waitFor, sleep, tempDir, removeDir, ROOT } from './lib.js';
+import { installBot, stopBot } from './bot.js';
+
+const log = (...a) => console.log('multiclient:', ...a);
+const errors = [];
+let browser, servers = [], dirs = [];
+
+async function openPlayer(srv, name, color) {
+  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
+  page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
+  await page.goto(srv.url);
+  await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  await page.fill('#lName', name);
+  await page.click(`#lColors .sw:nth-child(${color + 1})`);
+  await page.click('#lFight');
+  await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
+  const id = await page.evaluate(() => __mp.net.id);
+  return { page, name, id };
+}
+
+const pageState = (p, ids) => p.page.evaluate(ids => ({
+  kills: __mp.events.filter(e => e.type === 'kill'),
+  spawns: __mp.events.filter(e => e.type === 'spawn'),
+  meta: ids.map(id => __mp.net.meta.get(id) || null),
+  alive: ids.map(id => { const q = __mp.state.players.find(p => p.id === id); return !!(q && q.alive); }),
+}), ids);
+
+async function fightTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  log(`server on port ${srv.port}, admin on ${srv.adminPort}`);
+  const A = await openPlayer(srv, 'Ash', 0), B = await openPlayer(srv, 'Bea', 1), C = await openPlayer(srv, 'Cy', 2);
+  const all = [A, B, C], ids = all.map(p => p.id);
+  assert.equal(new Set(ids).size, 3);
+  // every page sees all three names
+  for (const p of all) await waitFor(() => p.page.evaluate(ids => ids.every(id => __mp.net.meta.get(id)), ids), { what: 'names on ' + p.name });
+  log(`joined: ${all.map(p => `${p.name}=${p.id}`).join(' ')}`);
+
+  // --- fight: A and B meet on the floor and slash until one dies; C parks out of the way
+  await installBot(A.page, { mode: 'fight', target: B.id });
+  await installBot(B.page, { mode: 'fight', target: A.id });
+  await installBot(C.page, { mode: 'park' });
+  const t0 = Date.now();
+  // A trace of every bot's own view, printed if the fight never ends (to see where they got stuck).
+  const trace = [];
+  let traceAt = 0;
+  const botView = p => p.page.evaluate(() => {
+    const m = __mp.net.me, r = v => Math.round(v);
+    return m ? `${m.id}:${m.alive ? 'alive' : 'dead'} x${r(m.x)} y${r(m.y)} hp${m.hp} gnd${+m.onGround} face${m.face} stand${m.standOn} keys${window.__botState ? window.__botState.k : '-'}` : 'no me';
+  });
+  const kill = await waitFor(async () => {
+    const s = await pageState(A, ids);
+    if (Date.now() - traceAt > 2000) {
+      traceAt = Date.now();
+      trace.push(`${((traceAt - t0) / 1000).toFixed(0)}s ` + (await Promise.all(all.map(botView))).join(' | ') +
+        ` | kills ${JSON.stringify(s.kills.map(k => [k.killer, k.victim, k.move]))}`);
+    }
+    return s.kills.find(k => (k.killer === A.id && k.victim === B.id) || (k.killer === B.id && k.victim === A.id));
+  }, { timeout: 120000, every: 250, what: 'a kill between the two fighters' }).catch(e => {
+    log('fight trace (own view of each bot, every 2 s):\n  ' + trace.slice(-15).join('\n  '));
+    throw e;
+  });
+  log(`kill after ${((Date.now() - t0) / 1000).toFixed(1)} s: ${kill.killer} killed ${kill.victim} (${kill.move}), seed ${kill.seed}`);
+  for (const p of all) await stopBot(p.page);
+  const killer = all.find(p => p.id === kill.killer), victim = all.find(p => p.id === kill.victim);
+  const ki = ids.indexOf(killer.id), vi = ids.indexOf(victim.id);
+
+  // kill event, score increment and respawn on every page
+  await sleep(2600);   // respawn delay is 2 s, plus the 100 ms interpolation delay
+  for (const p of all) {
+    const s = await waitFor(async () => {
+      const s = await pageState(p, ids);
+      const sp = s.spawns.find(e => e.id === victim.id && e.tick > kill.tick);
+      return sp && s.alive[vi] ? s : null;
+    }, { timeout: 5000, what: `respawn of ${victim.name} on ${p.name}` });
+    const k = s.kills.find(e => e.tick === kill.tick && e.victim === kill.victim);
+    assert.ok(k, `${p.name} saw the kill`);
+    assert.equal(k.killer, kill.killer); assert.equal(k.seed, kill.seed, 'same gore seed everywhere');
+    assert.ok(s.meta[ki].score >= 1, `${p.name} sees the killer's score`);
+    assert.ok(s.meta[vi].deaths >= 1, `${p.name} sees the victim's death`);
+  }
+  log('kill, score and respawn seen on all 3 pages');
+
+  // --- drop and reconnect within 15 s keeps the score
+  const score = await killer.page.evaluate(id => __mp.net.meta.get(id).score, killer.id);
+  const tDrop = Date.now();
+  await killer.page.evaluate(() => __mp.net.drop());
+  await waitFor(() => killer.page.evaluate(() => __mp.net.state !== 'open'), { what: 'drop' });
+  await waitFor(() => killer.page.evaluate(() => __mp.net.state === 'open' && __mp.net.mode === 'play' && !!__mp.net.me), { timeout: 15000, what: 'resume' });
+  const after = await killer.page.evaluate(() => ({ id: __mp.net.id, score: __mp.net.meta.get(__mp.net.id).score,
+    resumed: __mp.debug.entries().some(e => e.msg === 'resume accepted') }));
+  log(`reconnected in ${((Date.now() - tDrop) / 1000).toFixed(1)} s`);
+  assert.equal(after.id, killer.id, 'same player id after resume');
+  assert.equal(after.score, score, 'score kept after resume');
+  assert.ok(after.resumed, 'resume accepted');
+  for (const p of all) {
+    const m = await p.page.evaluate(id => __mp.net.meta.get(id), killer.id);
+    assert.equal(m.score, score); assert.ok(!m.gone);
+  }
+  log(`drop + resume kept score ${score}`);
+
+  // --- manual debug report: stored with the server's view, readable through tools/debug.js
+  const id = await A.page.evaluate(() => __mp.debug.send('manual', 'multiclient test'));
+  assert.match(id || '', /^[a-z0-9]{8}$/, 'report id');
+  const out = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), 'report', id],
+    { env: { ...process.env, DEBUG_PORT: String(srv.adminPort) } }, (e, so, se) => (e ? rej(new Error(se || e.message)) : res(so))));
+  assert.match(out.split('\n')[0], /UNTRUSTED INPUT/);
+  const rec = JSON.parse(out.slice(out.indexOf('\n') + 1));
+  assert.equal(rec.meta.id, id);
+  assert.equal(rec.meta.server.player.id, A.id);
+  assert.equal(rec.meta.server.player.name, 'Ash');
+  assert.ok(rec.meta.server.conn && Number.isFinite(rec.meta.server.conn.rttMs));
+  assert.equal(rec.report.kind, 'manual');
+  assert.ok(rec.report.entries.length > 5 && rec.report.entries.some(e => e.cat === 'net'));
+  const token = await A.page.evaluate(() => __mp.net.token);
+  const stored = readdirSync(dir).map(f => readFileSync(join(dir, f), 'utf8')).join('');
+  assert.ok(!stored.includes(token), 'resume token never stored');
+  const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
+    (e, so) => (e ? rej(e) : res(so))));
+  assert.match(st, /players \(3\)/);
+  log(`debug report ${id} stored with the server view; tools/debug.js state ok`);
+  log('tick time: ' + st.split('\n')[0]);
+
+  for (const p of all) await p.page.context().close();
+  await srv.stop();
+}
+
+async function predictionTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir, NET_SIM: '120,2' }); servers.push(srv);
+  const P = await openPlayer(srv, 'Walker', 4);
+  const Q = await openPlayer(srv, 'Other', 5);       // a second player, so there is a remote to interpolate
+  await installBot(P.page, { mode: 'pace' });
+  await installBot(Q.page, { mode: 'pace' });
+  await sleep(2500);
+  await P.page.evaluate(() => __mp.net.resetPredErr());
+  await sleep(8000);
+  const r = await P.page.evaluate(() => ({ rms: __mp.net.predErrRms(), n: __mp.net.stats.predErrN, max: Math.max(0, ...__mp.net.stats.predErr),
+    rtt: __mp.net.stats.rttAvg, snaps: __mp.net.stats.snapsSnapped, jitter: __mp.net.stats.jitter }));
+  log(`NET_SIM=120,2: prediction error RMS ${r.rms.toFixed(3)} units over ${r.n} snapshots (max ${r.max.toFixed(2)}, snaps ${r.snaps}), RTT ${r.rtt.toFixed(0)} ms, jitter ${r.jitter.toFixed(1)} ms`);
+  assert.ok(r.n > 150, 'enough samples');
+  assert.ok(r.rtt > 200, 'NET_SIM delay is in effect');
+  assert.ok(r.rms < 3, `prediction error RMS ${r.rms} < 3`);
+  await P.page.context().close(); await Q.page.context().close();
+  await srv.stop();
+}
+
+async function main() {
+  browser = await launchChromium();
+  try {
+    await fightTest();
+    await predictionTest();
+    assert.deepEqual(errors, [], 'no page errors');
+    log('PASS');
+  } finally {
+    await browser.close().catch(() => {});
+    for (const s of servers) await s.stop();
+    for (const d of dirs) removeDir(d);
+  }
+}
+
+main().catch(e => { console.error('multiclient: FAIL:', e.message); if (errors.length) console.error(errors.slice(0, 10)); process.exitCode = 1; });

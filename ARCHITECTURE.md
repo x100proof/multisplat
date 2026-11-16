@@ -1,17 +1,31 @@
 # multisplat: architecture (as implemented)
 
-Status: **M1**. This covers the shared simulation, the arena, an offline client with a dummy
-opponent, and a static file server. Netcode, gore and music come in later milestones (see `SPEC.md` §14).
+Status: **M2**. This covers:
+- the shared simulation and the arena (M1),
+- the authoritative WebSocket server, with lobby, queue, resume and lag compensation,
+- the online client, with prediction and interpolation,
+- the remote-debugging pipeline.
+
+Gore, music, the kill feed, the scoreboard and touch controls are M3 (see `SPEC.md` §14).
 
 ```
-shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours
+shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
 shared/level.js       the 26x18 arena, tile queries, spawn points, spawn picker
 shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, respawn)
-public/index.html     markup + CSS (HUD, respawn message, debug panel)
-public/game.js        offline client: rendering, input, SFX, camera, dummy AI, debug panel
-server/server.js      M1: static http server for public/ and /shared/
-test/*.test.js        node:test unit tests (sim, level, server, hygiene)
-test/hygiene.js       repo hygiene scan, runnable alone
+server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
+server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
+server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
+public/index.html     markup + CSS (lobby, HUD, respawn message, debug panel)
+public/game.js        client: rendering, input, SFX, camera, lobby, HUD, debug panel; offline sandbox
+public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
+public/debug.js       client log ring (dbg), debug report builder and sender
+tools/debug.js        CLI for the admin listener
+test/*.test.js        node:test unit tests (sim, level, server, arena, hygiene)
+test/multiclient.js   headless Chromium: 3 players, fight, resume, debug report, NET_SIM prediction
+test/abuse.js         server limits against a real server process
+test/smoke.js         connect to a deployed /ws and expect `welcome`
+test/lib.js, bot.js   test helpers (spare ports, server process, Chromium lookup) and the scripted player
+deploy/               systemd unit + nginx site templates (placeholders only)
 ```
 
 No bundler. `shared/` holds plain ES modules. The server can `import` them and the browser loads them
@@ -28,8 +42,18 @@ from `/shared/*.js`.
   combat values (`maxHp 100`, `chopDmg 34`, `sweepDmg 25`, `knockX 3.5`, `knockY -3`, `killKnockMul 1.4`,
   `hitStun 10`, `stunMoveMul .25`, `spawnIframes 90`, `respawnTicks 120`, `creditTicks 300`,
   `spawnMinDist 64`).
-- `NET` (`historyMs 200`, `rewindCapMs 150`, …) and `HISTORY_TICKS` (12) are there for M2.
-- `COLORS` holds the 8 lobby colours. The first six are NinjaRunner's NEON set.
+- `NET` holds the netcode values:
+  - `historyMs 200`, `rewindCapMs 150`,
+  - `snapshotHz 30`, `maxInputBatch 3`,
+  - `interpMs 100`, `extrapMs 100`,
+  - `maxPlayers 12`, `graceMs 15000`, `idleMs 120000`, `inputRate 90`,
+  - `smoothUnits 2`, `smoothFrames 6`.
+
+  Next to it are `HISTORY_TICKS` (12) and `TICK_MS` (16.67).
+- `COLORS` holds the 8 lobby colours. The first six are NinjaRunner's NEON set. Players pick one
+  by index (0–7).
+- `NAME_RE` / `cleanName(s)` trims, collapses double spaces and checks for 1–16 characters from
+  `[A-Za-z0-9 _-]`. It returns the clean name or `null`. The lobby and the server both use it.
 
 ## shared/level.js
 
@@ -130,43 +154,278 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
 - A client may edit `cfg` (the debug panel does). An online client should use `DEFAULTS` so its
   prediction matches the server.
 
+## Protocol (SPEC §6.1)
+
+The protocol is JSON text frames, each with a `t` field. Server limits:
+- 1 KB per message (`maxPayload`, close 1009).
+- 90 `input` messages/s and 10 other messages/s per connection (token buckets). Excess messages
+  are dropped, and 90 drops within 3 s is a kick.
+- Malformed JSON or an unknown `t` is a kick.
+
+Client → server:
+
+```js
+{ t: 'hello', name, color /* 0-7 */, token? /* resume */ }
+{ t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
+{ t: 'ping', id, ct /* client clock, echoed */ }
+```
+
+Server → client:
+
+```js
+{ t: 'welcome', v: 1, tick, cap, colors }                     // on connect, before hello
+{ t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
+  tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
+{ t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
+  player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx], …] }
+     // 30 Hz; positions rounded to 0.01; flags = alive 1 | onGround 2 | sweep 4;
+     // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
+{ t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
+{ t: 'lobby', players: [roster], queue: [...], cap }   // on connect and on roster/score change (≤ 2/s)
+{ t: 'pong', id, ct, tick, tf /* 0..1 into the current tick */ }
+{ t: 'kick', reason }                  // then close with 4001 idle, 4002 malformed, 4003 unknown,
+                                       // 4004 flood, 4005 protocol, 4006 bad hello, 4007 replaced, 4008 shutdown
+roster = { id, name, color, score, deaths, away /* disconnected, inside the grace period */ }
+```
+
+Events are the sim's `spawn`, `hit` and `kill` (shapes above). `kill.seed` lets every client
+render identical gore. There are also:
+
+```js
+{ type: 'join',  tick, id, name, color }
+{ type: 'leave', tick, id, reason: 'timeout'|'kick' }
+{ type: 'score', tick, id, score, deaths }   // after every kill, for the killer and the victim
+```
+
+If a player leaves within `creditTicks` of being hit, it is first killed with `move: 'leave'`, so
+the hitter gets the point.
+
+## server/server.js
+
+- `loadConfig(vars)` reads `HOST`, `PORT`, `ALLOWED_ORIGINS`, `TRUST_PROXY`, `MAX_PER_IP`,
+  `MAX_CONN`, `DEBUG_DIR`, `DEBUG_PORT` and `NET_SIM` (SPEC §10). It throws on `NET_SIM` with
+  `NODE_ENV=production`, and the entry point then exits 2.
+- `handler` / `resolvePath` are the M1 static server for `public/` and `/shared/`: GET/HEAD only,
+  traversal-safe. `POST /debug/report` goes to `server/debug.js`.
+- **Upgrades** are accepted only on `/ws`. Refusals:
+  - an `Origin` not in `ALLOWED_ORIGINS` gets 403,
+  - over `MAX_CONN` gets 503,
+  - over `MAX_PER_IP` gets 429.
+
+  `clientIpOf` uses `X-Real-IP` only when `TRUST_PROXY` is set. Binary frames are a kick.
+- Each socket becomes an arena connection `{ip, send, close}`. A client with over 256 KB buffered
+  is terminated on the next send. Protocol-level pings every 2 s measure the server-side RTT
+  (`conn.rtt`, smoothed), and a socket with no pong for 30 s is dropped.
+- **`NET_SIM=delayMs,jitterPct`** delays every message in both directions, including the RTT
+  pings, by `delayMs ± jitterPct %`, keeping order. So `120,2` gives an RTT of about 240 ms.
+- `startServer(cfg)` returns `{http, wss, arena, debug, admin, events, port, adminPort, close()}`.
+- Logs (stdout): listen, connect, join/promote/queue, resume, drop, leave, kick, refuse, report
+  and errors. Never message bodies.
+
+## server/arena.js
+
+`new Arena({cfg, now, log, event, maxPlayers, graceMs, idleMs, seed})`. It has no sockets: tests
+drive it with fake connections and call `tick()` themselves, and `start()` runs the real loop.
+
+- **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
+  inputs, lastSeq, lastKeys, lastActive, discAt}`. Ids count up from 1 and are never reused.
+  Names are de-duplicated case-insensitively with `#2`, `#3`, and so on. The token is 16 random
+  bytes in hex.
+- **Slots and queue.** Up to `maxPlayers` records play. The rest wait in a FIFO queue and receive
+  snapshots and events as spectators. When a slot frees, the first *connected* queued record is
+  promoted (`join` event, then its `spawn`).
+- **Resume.** When a socket closes, the record keeps its slot (or queue place) for `graceMs`
+  (15 s), and the sim player stays in the world, idle. A `hello` with its token within that time
+  rebinds the record (`resumed: true`, same id, score kept). An open socket holding the same token
+  is kicked with `replaced`. After the grace period the record is released (`leave`) and the token
+  stops working. A kick always releases at once.
+- **Idle kick.** A playing record with no non-zero input for `idleMs` (120 s) is kicked with
+  `idle`, and the client goes back to the lobby.
+- **Inputs.** They are queued per record, at most 12, with older ones dropped. Each tick takes
+  one input per playing record. If none is queued, the last keys repeat for up to 8 ticks, then 0.
+  A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Inputs with `seq` ≤ the
+  highest seen are ignored.
+- **Tick.** Each tick runs, in order:
+  1. grace expiry and idle kicks,
+  2. input selection,
+  3. `Sim.step(state, inputs, {rewind})` and `recordHistory`,
+  4. events, with `score` events added,
+  5. a snapshot every 2nd tick,
+  6. the coalesced `lobby` broadcast,
+  7. tick-time statistics. A tick over 16.7 ms is an `overrun` event.
+- **Lag compensation.** `rewind(attacker)` returns `positionsAt(hist, tick − d)`, with
+  `d = min(150 ms, interpMs 100 + attacker RTT/2)` in ticks. It uses the server-measured RTT.
+- **Loop.** A `setTimeout` scheduler on a fixed 16.67 ms grid. It catches up at most 5 ticks at
+  once and resets the grid if it falls more than 100 ms behind.
+- **Debug views.** `adminState()` returns players, queue, tick time and connections.
+  `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
+  a token.
+
+## server/debug.js
+
+- `createEventRing(2000)`: `push(type, conn, data)` adds `{n, ts, type, conn, …data}`. The arena
+  and server push `connect`, `close`, `join`, `promote`, `queue`, `resume`, `resume-refused`,
+  `drop`, `leave`, `kick` (with `reason`), `ratelimit`, `overrun`, `refused` (upgrade refusals,
+  with `why`), `report` and `report-rejected`.
+- `validateReport(body)` returns `{report, token}`, with the token removed from the report. Rules:
+  - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId`,
+  - `entries` ≤ 300,
+  - strings are cut to 300 characters, line breaks become spaces, and other control characters
+    are removed,
+  - depth ≤ 5 and ≤ 60 keys per object, plain JSON only.
+- `createDebug({dir, allowedOrigins, clientIp, arena, events})` gives:
+  - `handleReport`, which checks in this order:
+    - `POST` only (405),
+    - the Origin (403),
+    - `application/json` (400),
+    - a `Content-Length` or streamed body over 16 KiB (413),
+    - 6 per minute per IP and 120 per minute in total (429),
+    - validation (400).
+
+    If the report carries a token, it is looked up with `arena.viewByToken` and then dropped.
+    The stored line is `{meta: {id, received, ip, server}, report}`. `meta` sits outside the
+    client's object, and a client `meta` key is a 400. `server.recentEvents` holds that player's
+    last 30 ring events. The id is 8 random `[a-z0-9]` characters.
+
+    Lines are appended to `DEBUG_DIR/reports-YYYY-MM-DD.jsonl` (UTC, mode 600). At start and then
+    every 10 min, the directory is pruned to 14 days and 50 MB, oldest first, never touching
+    today's file. If a write fails, or today's file alone is over 50 MB, the answer is 503.
+  - `adminHandler` / `listenAdmin(port)`: GET-only JSON on `127.0.0.1` (hard-coded). Routes:
+    `/state`, `/events?n=`, `/reports?n=` (summaries, newest first) and `/reports/<id>`.
+
+## tools/debug.js
+
+`node tools/debug.js [--port N] state | events [n] | reports [n] | report <id> | tail`. The port is
+`--port` or `DEBUG_PORT`. It prints `# UNTRUSTED INPUT: …` above report listings and bodies.
+`tail` polls every 2 s.
+
+## public/net.js
+
+`createNet({onLobby, onStatus})` returns `net`:
+
+- **State.**
+  - `id`, `token`, `queuePos`, `lobby`.
+  - `state`: `connecting`, `open`, `reconnecting` or `kicked`.
+  - `mode`: `viewer`, `play` or `queue`.
+  - `meta`: id → `{name, color, score, deaths, away}`, fed by `welcome`, `lobby`, `join` and
+    `score`.
+  - `me`: the predicted local sim player.
+  - `stats`: `rtt`, `rttAvg`, `rttMax`, `offset`, `jitter`, `reconnects`, `snaps`, the `predErr`
+    ring, `snapsSnapped` and more.
+- **Connection.**
+  - `connect()` opens `ws(s)://<page host>/ws`. The page loads as a viewer, so the lobby is live.
+  - `join(name, color)` sends `hello`, with the token if there is one.
+  - On an unexpected close it reconnects with backoff (0.5 s doubling to 8 s, ±25 %), and the next
+    `hello` carries the token.
+  - A kick (close code 4000–4999) clears the token and goes back to the lobby as a viewer.
+  - `drop()` closes the socket the way a network failure would (for tests).
+- **Clock sync.**
+  - A ping goes out every 0.5 s for the first three, then every 2 s. RTT avg/max are over 30
+    samples.
+  - `offset` estimates the server tick from `pong.tick + tf + RTT/2`.
+  - A second clock, the *arrival clock*, follows the early envelope of `snapshot.tick − now`.
+    Late snapshots count as jitter (`stats.jitter`, an EMA in ms).
+- **Prediction (§6.2).**
+  - `localTick(keys)` runs each 60 Hz client tick. It numbers the input (`seq`) and keeps it in
+    `pending`. It runs `Sim.predictStep` on `me` against the other players' newest snapshot
+    positions, which stay fixed. Then it queues the input for `flush()`, which sends at most 3
+    per message.
+  - On a snapshot with `me`, inputs ≤ `seq` are dropped, `me` is reset to the server's object, and
+    the remaining inputs are replayed.
+  - The distance between the old and new prediction is the prediction error (`predErrRms()`,
+    `resetPredErr()`). Under 2 units, the drawn position eases from the old one over 6 frames.
+    Otherwise it snaps and logs to `sync`.
+  - Physics always use `DEFAULTS`.
+- **Interpolation (§6.3).** `view(now)` gives `{tick, players, fx}`.
+  - Remote players are drawn at `renderTick = arrival clock − 6 ticks` (100 ms), interpolated
+    between the two snapshots around it. Discrete fields switch at the midpoint. There is no
+    blending across teleports (respawns) or deaths.
+  - Past the newest snapshot it extrapolates with velocity for at most 6 ticks, then logs
+    `sync: extrapolation ran out`.
+  - `fx` lists the remote FX bits from snapshots the timeline has just passed.
+  - Our own player is the predicted `me` plus the smoothing offset.
+- **Events.** `dueEvents()` returns events in order once the render timeline reaches their tick.
+  Events about us (we hit, are hit or spawn) and events without a position (`join`, `leave`,
+  `score`) are released at once.
+
+## public/debug.js
+
+- `dbg(cat, msg, data)` appends `{ts, tick, cat, msg, data}` to a 300-entry ring. The categories
+  are `net`, `sync`, `perf`, `audio`, `input`, `life` and `error`.
+- `dbgv` logs only with `?debug=1`. Verbose mode records every snapshot and correction and also
+  echoes them to `console.debug`.
+- The game registers `setTickSource` and `setReportSource` (env, net stats, player state, token).
+- `buildReport` drops the oldest entries to stay ≤ 16000 bytes.
+- `sendReport(kind, reason)` POSTs the report and resolves to the report id. `auto` reports are
+  limited to one per 60 s and five per page.
+- `installErrorHandlers` logs `error`/`unhandledrejection` (and sends an auto report) and tab
+  visibility.
+
+Automatic reports are sent on an uncaught error, a kick, a refused resume, and after a reconnect
+that followed a drop.
+
 ## public/game.js
 
-- **Ported from NinjaRunner:** the drawing helpers (`mk`, `rng`, `NEON`, `rrect`, `oval`, `line`,
-  `shade`), the vector tiles (`tileCanvas`, `drawSpikes`, `buildTiles`), the night city
-  (`paintSky`, `cityLayer`, `buildCity`, `RAIN`, `CARS`, `drawCars`, `STARS`), `resize` (device
-  resolution, dpr capped at 2.5, phones held upright are rotated to landscape), `blitTile`, the
-  background/tile/rain parts of `render`, `drawPip`, `drawTails`, `drawSword`, the `iframes` flashing,
-  the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`) and the debug panel
-  (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
+The default page is **online**. `?offline` runs the M1 sandbox: a local sim, the dummy (id 2) and
+editable physics.
+
+- **Ported from NinjaRunner:**
+  - the drawing helpers (`mk`, `rng`, `NEON`, `rrect`, `oval`, `line`, `shade`),
+  - the vector tiles (`tileCanvas`, `drawSpikes`, `buildTiles`),
+  - the night city (`paintSky`, `cityLayer`, `buildCity`, `RAIN`, `CARS`, `drawCars`, `STARS`),
+  - `resize` (device resolution, dpr capped at 2.5, phones held upright rotated to landscape),
+  - `blitTile` and the background/tile/rain parts of `render`,
+  - `drawPip`, `drawTails`, `drawSword` and the `iframes` flashing,
+  - the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`),
+  - the debug panel (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
 - **Per-player colour.** `drawPip(P, x, y, face, opt, col)` tints the headband, belt, knot, tails
-  and rim glow. The local player is pink and the dummy is orange.
-- **Input.** Keyboard: arrows to move, Up or Z to jump, Shift or X to run, Space to slash, D for the
-  debug panel, M to mute. Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash,
-  bumpers or triggers to run. The client builds one bitmask per tick. A press that starts and ends
-  between ticks is latched for one tick.
-- **Loop.** A fixed 60 Hz accumulator runs `update()`, which steps the sim and turns its events into
-  SFX, damage popups, screen shake and corpses. `render()` runs every frame. The camera eases toward
-  the local player and is clamped to the arena (NinjaRunner `followY`).
-- **Dummy (id 2).** It wanders and turns back before spikes. The debug panel has a "Dummy slashes"
-  switch that makes it attack when the player is close.
-- **Visuals.** HP bars float over every player. Corpses are drawn client-side from `kill` events:
-  they flip and fall, or stay impaled on spikes that are now bloody. Players flash white during
-  hit-stun. The HUD shows HP, score and a respawn countdown.
-- **Debug panel (D).** It has sliders for jump, movement, combat and game speed, switches for
-  hitboxes (bodies, sword box, spawn points), the dummy and invincibility, and shows FPS, tick and
-  position. Changed values are saved in `localStorage` under `multisplat-cfg`.
-- **`window.__mp`** exposes `state`, `sim`, `cfg`, `level`, `localId`, `dummyId`, `events` (the last
-  200 sim events) and `input` (`{id: bitmask}` overrides). It also has `pause()`, `resume()`,
-  `step(n)`, `reset()` and `fps`.
+  and rim glow. Online, `colorOf(id)` is the player's chosen colour. Offline, the local player is
+  pink and the dummy orange.
+- **Input.**
+  - Keyboard: arrows to move, Up or Z to jump, Shift or X to run, Space to slash, D for the debug
+    panel, M to mute.
+  - Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash, bumpers or triggers
+    to run.
 
-## server/server.js (M1)
+  The client builds one bitmask per tick. A press that starts and ends between ticks is latched
+  for one tick. Device changes are logged (`input`), keystrokes never.
+- **Loop.** A fixed 60 Hz accumulator runs `update()`.
+  - Online, `updateOnline()` samples keys (or `__mp.input[id]` / `__mp.autopilot`), calls
+    `net.localTick`, plays our own FX and feeds `net.dueEvents()` to `onEvents`.
+  - Each frame then calls `net.flush()`, sets `state = net.view()`, plays remote FX and renders.
+    `render()` draws the same `state.players` shape online and offline.
+  - Offline, `updateOffline()` steps the sim with the dummy, as in M1.
+- **`onEvents`** turns `hit`, `kill` and `spawn` into SFX, damage popups, shake and corpses.
+  **M3 hook:** the kill feed, gore (seeded by `kill.seed`) and the music's intensity belong here.
+  The event shapes are in the Protocol section.
+- **Lobby (§9).** An overlay over the live arena. It has:
+  - the logo,
+  - a name field (`cleanName`) and 8 swatches,
+  - the live player list with scores, the slot count and the queue length,
+  - **Fight**,
+  - a "Report a problem" link that shows the report id.
 
-A static GET/HEAD server: `/shared/*` maps to `shared/` and everything else to `public/`. It
-resolves paths after decoding, refuses NUL bytes and backslashes, and returns 404 for anything that
-would escape the base directory. It sets MIME types and `nosniff`. Other methods get 405.
-Configuration: `HOST` (default `127.0.0.1`) and `PORT` (default `3008`). It exports `handler` and
-`resolvePath` for tests.
+  The name and colour are saved in `localStorage` (`multisplat-name`, `multisplat-color`).
+  After a kick the lobby comes back and shows the reason.
+- **HUD.** `hudOnline` shows HP and score, a respawn countdown while dead, `ARENA FULL · QUEUE #n`
+  while queued, and `RECONNECTING…`. Name tags (`drawNameTag`, `(away)` during a grace period) and
+  HP bars float over every player. **M3 hook:** the kill feed and Tab scoreboard go in
+  `hudOnline`. `net.meta` has every player's score.
+- **Debug panel (D).** Online it adds:
+  - RTT (current/avg/max) and snapshot jitter,
+  - prediction-error RMS, the snap count and reconnects,
+  - a 6 s prediction-error graph, with a red line at 2 units,
+  - **Send debug report**, which shows the id.
+
+  The physics and combat sliders are disabled online, because the server's values rule.
+  Hitboxes work in both modes. Offline it is M1's panel, with the dummy switches and Restart.
+- **`window.__mp`** exposes:
+  - `state` (the drawn state), `sim`, `cfg`, `level`, `localId`, `online`, `net`, `lobbyOpen`,
+    `fight()`,
+  - `debug` (`entries()`, `send(kind, reason)`),
+  - `autopilot`: a function `(me, players) → keys` called each tick,
+  - `events` (the last 200 events processed), `input`, `fps`,
+  - offline only: `pause()`, `resume()`, `step(n)` and `reset()`.
 
 ## Tests
 
@@ -185,6 +444,52 @@ Configuration: `HOST` (default `127.0.0.1`) and `PORT` (default `3008`). It expo
 - `level.test.js`: size and tile codes, closed border, 3–4 tiers, two short spike strips, ≥10
   spawns with footing and no spikes below or beside them, and `pickSpawn` distance and weighting.
 - `server.test.js`: traversal, MIME types, HEAD, 404, 405.
+- `arena.test.js` (no sockets, fake clock):
+  - welcome/hello/join/spawn/snapshot,
+  - name validation and `#2`,
+  - kicks for malformed, unknown, protocol and bad hello,
+  - per-tick input consumption, batches and stale seqs,
+  - input repeat then zero,
+  - slots, queue and promotion,
+  - resume inside and after the grace period, and `replaced`,
+  - idle kick, input flood,
+  - lag-compensated hits through rewound history,
+  - leave credit and `score` events,
+  - `viewByToken` / admin state without tokens,
+  - `loadConfig` (defaults, `NET_SIM` refused in production),
+  - report validation,
+  - the admin listener's loopback bind and read-only routes.
+
+Slower tests, run on their own (each starts its own server on a spare port, never 3008/3009):
+
+- `npm run test:abuse` (`test/abuse.js`) runs against a real server process with `TRUST_PROXY`,
+  so each case can use its own `X-Real-IP`. It checks:
+  - a message over 1 KB (1009),
+  - a bad or missing Origin and a wrong path,
+  - an input flood (kick 4004) against a steady 60/s (fine),
+  - `MAX_PER_IP`,
+  - malformed, unknown, binary and bad hello,
+  - client-set ids and scores ignored,
+  - reports: stored with server metadata, 413, 403, forged metadata keys 400, wrong type/method,
+    flood 429, token view and the token never stored,
+  - the event ring contents, no bodies in the logs,
+  - `NET_SIM` refused in production,
+  - `test/smoke.js` against the server.
+- `npm run test:multi` (`test/multiclient.js`) uses headless Chromium through playwright-core.
+  Chromium comes from `PLAYWRIGHT_CHROMIUM`, playwright's own lookup, or the newest build in its
+  cache. The test:
+  - joins 3 players (Ash, Bea, Cy),
+  - drives Ash and Bea with `test/bot.js` (down to the floor, meet on the left half, slash) until
+    one kills the other; Cy parks on the right,
+  - asserts the kill (same seed), the score and the respawn on all pages,
+  - drops the killer's socket and asserts the resume keeps id and score on every page,
+  - sends a manual debug report and reads it back with `tools/debug.js report <id>`: the
+    untrusted-input line, the server's view of that player, and no token in the files,
+  - runs `tools/debug.js state`,
+  - on a second server with `NET_SIM=120,2`, has two players pace for 8 s and asserts a
+    prediction-error RMS under 3 units,
+  - asserts no page errors.
+- `npm run test:all` runs everything.
 - `hygiene.js` (also run through `hygiene.test.js`) scans `git ls-files` plus untracked,
   non-ignored files. It fails on:
   - IPv4 addresses other than loopback and the any-address,

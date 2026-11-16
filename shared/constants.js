@@ -35,10 +35,27 @@ export const DEFAULTS = Object.freeze({
   spawnMinDist: 64,
 });
 
-// Netcode values the server will use (M2). Lag-compensation history and rewind cap.
+// Netcode values shared by the server and the client (SPEC §6).
 export const NET = Object.freeze({
   historyMs: 200, rewindCapMs: 150, snapshotHz: 30, maxInputBatch: 3,
+  interpMs: 100,           // remote players are drawn this far behind the newest snapshot
+  extrapMs: 100,           // at most this much extrapolation when snapshots stall
+  maxPlayers: 12,          // active fighters; later joiners queue as spectators
+  graceMs: 15000,          // a dropped player keeps its slot and score this long (resume token)
+  idleMs: 120000,          // no input for this long sends a player back to the lobby
+  inputRate: 90,           // input messages per second per connection
+  smoothUnits: 2,          // corrections below this are smoothed over smoothFrames, larger ones snap
+  smoothFrames: 6,
 });
+export const TICK_MS = 1000 / TICK_HZ;
+
+// Lobby names (SPEC §9): 1-16 characters from this allowlist, trimmed. Checked on both sides.
+export const NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
+export function cleanName(s) {
+  if (typeof s !== 'string') return null;
+  const n = s.trim().replace(/ {2,}/g, ' ');
+  return NAME_RE.test(n) ? n : null;
+}
 export const HISTORY_TICKS = Math.ceil(NET.historyMs * TICK_HZ / 1000);
 
 // The 8 lobby colours (SPEC §9). The first six are NinjaRunner's NEON palette.

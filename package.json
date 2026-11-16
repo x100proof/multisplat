@@ -10,9 +10,17 @@
   },
   "scripts": {
     "start": "node server/server.js",
-    "test": "node --test test/*.test.js && node test/hygiene.js"
+    "test": "node --test test/*.test.js && node test/hygiene.js",
+    "test:multi": "node test/multiclient.js",
+    "test:abuse": "node test/abuse.js",
+    "test:all": "npm test && npm run test:abuse && npm run test:multi",
+    "smoke": "node test/smoke.js",
+    "debug": "node tools/debug.js"
   },
   "devDependencies": {
     "playwright-core": "^1.65.1"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
   }
 }

@@ -260,3 +260,20 @@ test('ai: deterministic: the same seed gives the same fight, and the sim stays d
   for (const m of masks) Sim.step(w, m);
   assert.equal(Sim.serialize(w), Sim.serialize(arena.state));
 });
+
+test('bots: a freed name passes between humans and bots', () => {
+  const { arena, conn, sent } = setup();
+  const h = conn();
+  h.say({ t: 'hello', name: 'AI 1', color: 0 });
+  conn('v').say({ t: 'bots', d: 1 });
+  const bot = arena.bots[0];
+  assert.equal(bot.name, 'AI 1#2');
+  h.say({ t: 'leave' });                       // the human goes: the bot becomes "AI 1"
+  assert.equal(bot.name, 'AI 1');
+  assert.ok(sent.some(e => e.type === 'rename' && e.id === bot.id && e.name === 'AI 1'));
+  const h2 = conn(); h2.say({ t: 'hello', name: 'ai 1', color: 0 });
+  assert.equal(h2.last('welcome').name, 'ai 1#2');
+  conn('v').say({ t: 'bots', d: -1 });          // the bot goes: the human becomes "ai 1"
+  assert.equal(arena.recs.get(h2.last('welcome').id).name, 'ai 1');
+  assert.ok(sent.some(e => e.type === 'rename' && e.id === h2.last('welcome').id && e.name === 'ai 1'));
+});

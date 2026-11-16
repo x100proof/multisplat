@@ -261,6 +261,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.id === net.id) { net.mode = 'play'; net.queuePos = 0; dbg('life', 'promoted', { id: e.id }); }
       } else if (e.type === 'leave') {
         const mm = net.meta.get(e.id); if (mm) mm.gone = true;
+      } else if (e.type === 'rename') {   // a freed name passed to its "#2" holder (SPEC §9)
+        const mm = net.meta.get(e.id); if (mm) mm.name = e.name;
+        for (const p of [...net.lobby.players, ...net.lobby.queue]) if (p.id === e.id) p.name = e.name;
+        if (e.id === net.id) dbg('life', 'renamed', { id: e.id });
+        onLobby(net.lobby);
       } else if (e.type === 'score') {
         const mm = net.meta.get(e.id); if (mm) { mm.score = e.score; mm.deaths = e.deaths; }
       }

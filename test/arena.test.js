@@ -748,3 +748,75 @@ test('the event ring records that a chat happened and its length, never the text
   assert.equal(rows[0].len, secret.length);
   assert.ok(!JSON.stringify(events.all()).includes('swordfish'));
 });
+
+test('a freed name passes to its #2 holder: everyone is told, the lobby and welcome follow', () => {
+  const { conn, tick, arena, events } = setup();
+  const logs = []; arena.log = s => logs.push(s);
+  const a = conn(), b = conn(), v = conn();
+  a.say({ t: 'hello', name: 'Sean', color: 0 });
+  b.say({ t: 'hello', name: 'sean', color: 1 });
+  const bid = b.last('welcome').id;
+  assert.equal(b.last('welcome').name, 'sean#2');
+  a.say({ t: 'leave' });
+  for (const c of [a, b, v]) assert.ok(c.events().some(e => e.type === 'rename' && e.id === bid && e.name === 'sean'), 'rename broadcast');
+  assert.equal(arena.recs.get(bid).name, 'sean');
+  assert.ok(logs.some(s => s === `rename id=${bid} from=sean#2 to=sean`));
+  assert.ok(events.all().some(e => e.type === 'rename' && e.player === bid));
+  assert.equal(arena.adminState().players.find(p => p.id === bid).name, 'sean');
+  tick(40);
+  assert.equal(v.last('lobby').players.find(p => p.id === bid).name, 'sean');
+  // the next one to ask for Sean gets #2 again
+  const c = conn(); c.say({ t: 'hello', name: 'Sean', color: 2 });
+  assert.equal(c.last('welcome').name, 'Sean#2');
+});
+
+test('a drop inside the grace period keeps the name; its expiry passes it on; a resume keeps the new name', () => {
+  const { conn, tick, arena, clock } = setup();
+  const a = conn(), b = conn();
+  a.say({ t: 'hello', name: 'Sean', color: 0 });
+  b.say({ t: 'hello', name: 'Sean', color: 1 });
+  const { id: bid, token } = b.last('welcome');
+  arena.disconnect(a.conn);
+  arena.disconnect(b.conn);                 // the #2 holder is away too: it is still renamed
+  clock.advance(2000); tick(1);
+  assert.ok(!b.events().some(e => e.type === 'rename'));
+  assert.equal(arena.recs.get(bid).name, 'Sean#2');
+  const b2 = conn(); b2.say({ t: 'hello', name: 'Sean', color: 1, token });   // resume before a expires
+  assert.equal(b2.last('welcome').name, 'Sean#2');
+  clock.advance(3500); tick(1);             // a's grace runs out
+  assert.ok(b2.events().some(e => e.type === 'rename' && e.id === bid && e.name === 'Sean'));
+  arena.disconnect(b2.conn);
+  clock.advance(1000); tick(1);
+  const b3 = conn(); b3.say({ t: 'hello', name: 'Sean', color: 1, token });   // resume after the rename
+  const w = b3.last('welcome');
+  assert.equal(w.resumed, true); assert.equal(w.id, bid); assert.equal(w.name, 'Sean');
+  assert.equal(w.players.find(p => p.id === bid).name, 'Sean');
+});
+
+test('three holders: only the lowest suffix is renamed; a freed #2 is not passed on', () => {
+  const { conn, arena } = setup();
+  const [a, b, c, d] = [conn(), conn(), conn(), conn()];
+  for (const [i, x] of [a, b, c, d].entries()) x.say({ t: 'hello', name: 'Sean', color: i });
+  const ids = [a, b, c, d].map(x => x.last('welcome').id);
+  const names = () => ids.map(id => arena.recs.get(id)?.name);
+  assert.deepEqual(names(), ['Sean', 'Sean#2', 'Sean#3', 'Sean#4']);
+  c.say({ t: 'leave' });                    // Sean#3 goes: nobody moves
+  assert.deepEqual(names(), ['Sean', 'Sean#2', undefined, 'Sean#4']);
+  b.say({ t: 'leave' });                    // Sean#2 goes: still nobody moves
+  assert.deepEqual(names(), ['Sean', undefined, undefined, 'Sean#4']);
+  a.say({ t: 'leave' });                    // Sean goes: the lowest remaining suffix takes it
+  assert.deepEqual(names(), [undefined, undefined, undefined, 'Sean']);
+});
+
+test('a queued holder is renamed too, and keeps the name when promoted', () => {
+  const { conn, arena } = setup({ maxPlayers: 1 });
+  const a = conn(), b = conn();
+  a.say({ t: 'hello', name: 'Sean', color: 0 });
+  b.say({ t: 'hello', name: 'Sean', color: 1 });
+  assert.equal(b.last('welcome').state, 'queue');
+  a.say({ t: 'leave' });
+  const ev = b.events();
+  const ri = ev.findIndex(e => e.type === 'rename'), ji = ev.findIndex(e => e.type === 'join' && e.id === b.last('welcome').id);
+  assert.ok(ri >= 0 && ji > ri);
+  assert.equal(ev[ji].name, 'Sean');
+});

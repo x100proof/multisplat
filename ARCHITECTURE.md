@@ -282,6 +282,8 @@ render identical gore. There are also:
 { type: 'join',  tick, id, name, color, bot? }
 { type: 'leave', tick, id, reason: 'timeout'|'kick' }
 { type: 'score', tick, id, score, deaths }   // after every kill, for the killer and the victim
+{ type: 'rename', tick, id, name }           // a freed name passed to its lowest "#n" holder (SPEC §9); no
+                                             // position, so released at once; net.meta and net.lobby take it
 { type: 'chat',  id, text }                  // a chat line, to every connection (viewers too); no position, so it is released at once
 ```
 
@@ -320,7 +322,11 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
 
 - **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
   ip, inputs, lastSeq, lastKeys, lastActive, discAt}`. Ids count up from 1 and are never reused.
-  Names are de-duplicated case-insensitively with `#2`, `#3`, and so on. The token is 16 random
+  Names are de-duplicated case-insensitively with `#2`, `#3`, and so on (`uniqueName`). When
+  `release` frees a name, `reclaimName` gives the bare name to the record (playing, queued or away,
+  human or bot) holding its lowest-numbered `#n` variant, logs `rename id= from= to=`, records a
+  `rename` event in the ring and broadcasts `{type:'rename'}`; nobody else is renumbered. A drop
+  inside the grace period is not a release, so it renames nobody. The token is 16 random
   bytes in hex. One address may hold at most `maxPerIp` records (the server passes `MAX_PER_IP`;
   the class default is unlimited): a new `hello` past that releases the address's oldest
   *disconnected* record (`leave` with reason `replaced`), so churning connect + hello + close

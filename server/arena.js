@@ -332,6 +332,25 @@ export class Arena {
     for (let i = 2; ; i++) if (!taken.has(`${name}#${i}`.toLowerCase())) return `${name}#${i}`;
   }
 
+  // `gone` was released, freeing its name (SPEC §9): the holder of the lowest-numbered variant of
+  // it ("Sean#2" when "Sean" goes; same case-insensitive comparison as uniqueName) takes the bare
+  // name. Nobody else is renumbered, and a freed "Sean#2" is not passed on. `#` is outside the name
+  // allowlist, so only uniqueName ever puts one in a name. Returns the `rename` event, or null.
+  reclaimName(gone) {
+    const freed = gone.name.toLowerCase();
+    let best = null, bestN = Infinity;
+    for (const r of this.recs.values()) {
+      const m = /^(.*)#(\d+)$/.exec(r.name);
+      if (m && m[1].toLowerCase() === freed && +m[2] < bestN) { best = r; bestN = +m[2]; }
+    }
+    if (!best) return null;
+    const from = best.name;
+    best.name = from.slice(0, from.lastIndexOf('#'));
+    this.log(`rename id=${best.id} from=${from} to=${best.name}`);
+    this.event('rename', best.conn ? best.conn.id : null, { player: best.id, from, to: best.name });
+    return { type: 'rename', tick: this.state.tick, id: best.id, name: best.name };
+  }
+
   // Forget input sequencing: a new session (resume) restarts its seq from 1.
   resetInputs(rec) {
     rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.minQ = Infinity; rec.qTicks = 0;
@@ -370,6 +389,8 @@ export class Arena {
     this.log(`leave id=${rec.id} reason=${reason}`);
     this.event('leave', rec.conn ? rec.conn.id : by ? by.id : null, { player: rec.id, reason });
     rec.state = 'gone';
+    const rn = this.reclaimName(rec);
+    if (rn) evs.push(rn);
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
     this.lobbyDirty = true;

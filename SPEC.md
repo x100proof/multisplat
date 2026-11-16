@@ -191,7 +191,7 @@ ARCHITECTURE.md    the code as implemented
   processed input `seq` for this client, and for every player: id, x, y, vx, vy, face, hp,
   atk state, alive and iframes. Positions are rounded to 0.01.
 - **Events:** sent reliably, in order: `hit`, `kill` (with killer, victim, killing move, and a
-  `seed` so every client renders identical gore), `spawn`, `join`, `leave` and `score`.
+  `seed` so every client renders identical gore), `spawn`, `join`, `leave`, `score` and `rename` (§9).
 
 ### 6.2 Client prediction and reconciliation
 - The local player is simulated immediately from local inputs using `shared/sim.js`.
@@ -311,7 +311,14 @@ reverb) but **fast and aggressive**:
   Enter or its Close button shuts it. On touch a ? button opens it, and the lobby has a "How
   to play" link. The fight carries on behind it.
 - **Star count above the head:** any player holding ninja stars has "★n" above their head.
-- Name tags float above players. Duplicate names get a `#2` suffix.
+- Name tags float above players. Duplicate names get a `#2` suffix (`#3`, … ; compared
+  case-insensitively). When a name is freed, because its holder is gone for good (left, kicked,
+  removed, or the 5 s resume grace ran out; not while merely disconnected inside the grace), the
+  holder of its lowest-numbered variant takes the bare name ("Sean#2" becomes "Sean"); nobody else
+  is renumbered, and a freed "Sean#2" is not passed on to "Sean#3". This applies to bots and humans
+  alike. The server sends a `rename` event so every scoreboard, name tag, lobby list and HUD shows
+  the new name; kill-feed and chat lines already shown keep the old one. The resume token is
+  unchanged.
 - **D** toggles the debug panel: tunables, hitboxes, RTT and FPS, snapshot jitter, and a
   prediction-error graph.
 
@@ -519,7 +526,7 @@ Server-side bots that fight like players, added and removed from the lobby.
   the 12 human swatches. The server refuses that colour (or any index outside the 12) in a
   human `hello` (`bad hello`). The "no two fighters share a colour" rule (§9) is for humans; all
   bots share theirs. Names are "AI 1", "AI 2", … (lowest free number, then the usual `#2`
-  de-duplication). Bots are in the roster (`bot: true`), score strip, scoreboard, kill feed and
+  de-duplication, and a freed name passes on as in §9). Bots are in the roster (`bot: true`), score strip, scoreboard, kill feed and
   so on exactly like players.
 - **Behaviour:** each tick the server computes a bot's key mask and feeds it into the same input
   path as a human's, so bots obey every rule of the sim and have no other powers. A bot sees the

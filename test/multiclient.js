@@ -861,6 +861,22 @@ async function botTest() {
   await srv.stop();
 }
 
+// Names (SPEC §9): two "Sean"s; when the first leaves, the second becomes "Sean" for itself and others.
+async function renameTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPlayer(srv, 'Sean', 1), B = await openPlayer(srv, 'Sean', 4), C = await openPlayer(srv, 'Other', 7);
+  const nameIn = (p, id) => p.page.evaluate(id => (__mp.net.meta.get(id) || {}).name, id);
+  assert.equal(await nameIn(C, B.id), 'Sean#2');
+  await A.page.keyboard.press('Escape');
+  await A.page.click('#lvYes');
+  await waitFor(async () => await nameIn(B, B.id) === 'Sean' && await nameIn(C, B.id) === 'Sean', { what: 'Sean#2 renamed to Sean everywhere' });
+  await waitFor(async () => (await A.page.evaluate(id => (__mp.net.lobby.players.find(p => p.id === id) || {}).name, B.id)) === 'Sean', { what: 'the lobby list shows the new name' });
+  log('names: a freed name passes to its #2 holder for everyone');
+  for (const p of [A, B, C]) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -868,6 +884,7 @@ async function main() {
     await predictionTest();
     await longSwordTest();
     await leaveTest();
+    await renameTest();
     await chatTest();
     await starTest();
     await heartbeatTest();

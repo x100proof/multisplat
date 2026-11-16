@@ -10,13 +10,15 @@ Status: **M6** (in progress). This covers:
 - M6 changes: leaving with Escape, no spike traps in the arena (§3), the 5 s heartbeat and resume
   window (§6.4), scores for everyone along the top (§9), neon blood by default with a real-gore
   option (§7), ninja stars (§5.2).
+- rooms (SPEC §17): up to 10 rooms of 8 slots, each with an admin; see server/room.js and "Rooms" below.
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
 shared/level.js       the 26x18 arena (no spikes), tile queries, spawn points, item points (long swords and ninja stars), spawn picker
 shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, ninja stars, respawn, pickups)
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
-server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
+server/arena.js       connections and protocol, rate limits, heartbeat, resume tokens, idle kick, the rooms and the one tick loop
+server/room.js        one room: its world, slots/queue, names, colours, bots, admin, sim step with lag comp, snapshots
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
 server/logs.js        streamed client logs: per word id, the last hour in memory, with caps (SPEC §13.5)
 shared/logid.js       word ids (`amber-otter`: 100 adjectives x 100 nouns) and the LOG streaming limits
@@ -27,7 +29,7 @@ public/music.js       the combat score as data, its offline pre-render into two 
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
 public/debug.js       client log ring (dbg), debug report builder and sender, log streaming queue
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, gore, music, logs, hygiene)
+test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, rooms, bots, spectate, gore, music, logs, hygiene)
 test/multiclient.js   headless Chromium: 3 players, fight, kill feed, score strip, gore fingerprint and blood styles, resume, debug report, NET_SIM prediction, long sword, leave, ninja stars, heartbeat
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
@@ -64,7 +66,7 @@ from `/shared/*.js`.
   - `historyMs 200`, `rewindCapMs 150`,
   - `snapshotHz 30`, `maxInputBatch 3`,
   - `interpMs 100`, `extrapMs 100`,
-  - `maxPlayers 12`, `graceMs 5000`, `idleMs 120000`, `inputRate 90`,
+  - `maxPlayers 8` (per room, bots included; SPEC §17), `graceMs 5000`, `idleMs 120000`, `inputRate 90`,
   - `heartbeatMs 5000` (a connection silent this long is closed), `timeoutClose 4100` (its close
     code, which the client treats as a network drop), `pingMs 500` (the client's ping period),
   - `smoothUnits 2`, `smoothFrames 6`.
@@ -74,6 +76,10 @@ from `/shared/*.js`.
   by index (0–11). No two fighters share one: `Arena.freeColor` runs when a record enters the arena.
 - `NAME_RE` / `cleanName(s)` trims, collapses double spaces and checks for 1–16 characters from
   `[A-Za-z0-9 _-]`. It returns the clean name or `null`. The lobby and the server both use it.
+- Rooms (SPEC §17): `ROOM` (`max 10`, `perIp 2`, `nameMax 20`, the create bucket `createBurst 2` /
+  `createRefillMs 15000`, the rename/transfer bucket `editBurst 4` / `editRefillMs 2000`),
+  `ROOM_NAME_RE` / `cleanRoomName(s)` (the name rule plus `'`, 1–20 characters) and
+  `defaultRoomName(name)` ("Ann's room", the name's `#n` dropped and cut to fit).
 
 ## shared/level.js
 
@@ -250,13 +256,19 @@ The protocol is JSON text frames, each with a `t` field. Server limits:
 Client → server:
 
 ```js
-{ t: 'hello', name, color /* 0-11 */, token? /* resume */, resume? /* true: resume only (an automatic
+{ t: 'hello', name, color /* 0-11 */, room /* SPEC §17: the room id to join; not needed with a live token */,
+  token? /* resume */, resume? /* true: resume only (an automatic
   reconnect); a dead token gets the `expired` welcome below instead of a fresh join */ }
+{ t: 'create', name, color, room /* the new room's name, '' = "<name>'s room" */ }   // create and join as admin
+{ t: 'view', room /* id, or 0 = none */ }  // the room a lobby visitor looks at (roster, snapshots, events)
+{ t: 'rename', name }                   // admin: rename the room (cleanRoomName)
+{ t: 'admin', id }                      // admin: hand the role to human player `id` of the same room
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
 { t: 'chat', text }                     // SPEC §9: a chat line (rules below); a non-string text is a `malformed` kick
-{ t: 'bots', d: 1|-1 } | { t: 'bots', n } // SPEC §15: one AI player more/fewer, or n in all (0..botMax); else a `malformed` kick
+{ t: 'bots', d: 1|-1 } | { t: 'bots', n } // SPEC §15: one AI player more/fewer, or n in all (0..7); else a `malformed` kick;
+                                        // only from the room's admin (else `refused`)
 { t: 'log', e: [{ ts, tick, cat, msg, data? }…], lost? } // SPEC §13.5: streamed debug entries (≤ 20 kept, own bucket
                                         // 6 + 1/s); a non-array e is a `malformed` kick
 // hello may also carry w: the browser's word id (SPEC §13.5); an invalid one is ignored.
@@ -266,11 +278,12 @@ Client → server:
 Server → client:
 
 ```js
-{ t: 'welcome', v: 1, tick, cap, colors, w /* word id, SPEC §13.5 */ } // on connect, before hello
-{ t: 'welcome', v: 1, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
+{ t: 'welcome', v: 2, tick, cap, colors, w /* word id, SPEC §13.5 */ } // on connect, before hello
+{ t: 'welcome', v: 2, tick, cap, resumed: false, expired: true } // a `resume: true` hello came too late:
                                                                // no record; the socket stays a viewer
-{ t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
-  tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
+{ t: 'welcome', v: 2, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
+  tick, queuePos, room, rname, admin /* the admin's player id */,
+  players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello or create
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
   player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars], …],
   it: [[id, x, y, kind, n?], …], st: [[id, x, y, vx, owner], …] }
@@ -280,8 +293,12 @@ Server → client:
      // kind 1 = ninja stars (with its amount n; absent from an older server = 3), 0 = long sword; st = the ninja stars in flight; stars = the count carried
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
-{ t: 'lobby', players: [roster], queue: [...], cap, bots, botMax }   // on connect and on roster/score change (≤ 2/s);
-                                       // at once to the sender of a `bots` request
+{ t: 'lobby', rooms: [{id, name, admin /* name */, n, cap, bots, q, watch}], maxRooms,
+  room /* the room played in or selected, or null */, rname, admin /* player id */,
+  players: [roster], queue: [...], cap, bots, botMax }   // that room's detail (empty without one); on connect and on
+                                       // any change (≤ 2/s); at once after hello, create, view, leave and a `bots` request
+{ t: 'refused', what, why }            // SPEC §17: a request turned down without a kick
+{ t: 'closed', room, name, why }       // the room this connection looked at closed (why: 'left' | 'empty')
 { t: 'pong', id, ct, tick, tf /* 0..1 into the current tick */ }
 { t: 'kick', reason }                  // then close with 4001 idle, 4002 malformed, 4003 unknown,
                                        // 4004 flood, 4005 protocol, 4006 bad hello, 4007 replaced, 4008 shutdown
@@ -298,7 +315,9 @@ render identical gore. There are also:
 { type: 'score', tick, id, score, deaths }   // after every kill, for the killer and the victim
 { type: 'rename', tick, id, name }           // a freed name passed to its lowest "#n" holder (SPEC §9); no
                                              // position, so released at once; net.meta and net.lobby take it
-{ type: 'chat',  id, text }                  // a chat line, to every connection (viewers too); no position, so it is released at once
+{ type: 'chat',  id, text }                  // a chat line, to the room's connections (viewers too); no position, so it is released at once
+{ type: 'admin', tick, id, from, why }       // SPEC §17: the admin role moved ('transfer' or 'auto' at the old admin's release)
+{ type: 'room',  tick, id, name }            // SPEC §17: the room was renamed
 ```
 
 If a player leaves within `creditTicks` of being hit, it is first killed with `move: 'leave'`, so
@@ -331,12 +350,47 @@ the hitter gets the point.
 
 ## server/arena.js
 
-`new Arena({cfg, level, now, log, event, maxPlayers, graceMs, idleMs, heartbeatMs, maxPerIp, seed})`. It has no sockets: tests
+`new Arena({cfg, level, now, log, event, maxPlayers, graceMs, idleMs, heartbeatMs, maxPerIp, seed, maxRooms, roomsPerIp})`. It has no sockets: tests
 drive it with fake connections and call `tick()` themselves, and `start()` runs the real loop.
 
-- **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
-  ip, inputs, lastSeq, lastKeys, lastActive, discAt}`. Ids count up from 1 and are never reused.
-  Names are de-duplicated case-insensitively with `#2`, `#3`, and so on (`uniqueName`). When
+**Rooms (SPEC §17).** The arena owns the connections, the protocol, the global record and token maps
+(`recs`, `tokens`: ids are global and never reused) and `rooms` (id → `Room`, server/room.js, ids from 1,
+never reused). `createRoom(name, creatorIp)` (seed `seed + id − 1` when the arena has a `seed`, else
+random; its world starts at the arena's `tickNo`), `closeRoom(room, why)` (bots released silently with
+`room.closing` set, `room-close` log and ring event, `{t:'closed'}` and a lobby to every viewer, whose
+`conn.room` is cleared). `conn.room` is the room a connection looks at: members always their own room,
+lobby visitors the one they selected with `view` (`setView` keeps `room.viewers` in step; the watcher count
+is the viewers without a record there). Handlers:
+- `onCreate`: a member is kicked (`protocol`); then the hello fields (`helloFields`: name, colour, word
+  id; else `bad hello`), the create bucket (`take(conn, 'createBucket', …)`; a miss is a `dropped()` and
+  `refused rate`), the room name (typed: `cleanRoomName`, else `refused name`; blank: `defaultRoomName`),
+  `maxRooms` (`refused full`) and `roomsOfIp` (rooms whose `creatorIp` is this address, `refused ip`).
+  Then `createRoom` and `join(…, admin = true)`.
+- `onHello`: resume by token as before (into the record's room: `setView`, `room.promote`); otherwise
+  `room` must be a positive integer (`bad hello`) of an open room (`refused join gone` + lobby).
+  `join` applies the per-address record cap (all rooms), makes the record (`room.uniqueName`), sets
+  `conn.rec` and the view, makes it admin when asked (or when the room has none, which only test rooms
+  made by `createRoom` without a creator have), `room.add`s it and sends the welcome plus a lobby.
+- `onView`: a non-negative integer (else `malformed`); ignored for members; lobby at once.
+- `onRename` / `onAdmin`: type checks (`malformed`), the shared edit bucket (`editBucket`), admin only
+  (`adminRoom(conn)`: the room whose `adminId` is the sender's record), then `cleanRoomName` (rename,
+  event `{type:'room'}` to the room's viewers) or a target that is another human record of the room
+  (`room.setAdmin(to, 'transfer')`, event `{type:'admin'}`). Refusals go through `refuse(conn, what, why)`
+  (a `refused-req` ring event and `{t:'refused'}`).
+- `onBots`: shape check (n ≤ maxPlayers − 1), the per-connection bucket, then admin only (`refused bots
+  admin` plus a lobby), then the server-wide `botBucket` across all rooms.
+- `onLeave`: the admin is refused (`leave admin`) while `room.humans()` has someone else; otherwise the
+  record is released (an admin alone thereby closes the room) and a lobby follows.
+- `lobbyMsg(conn, cache)`: `rooms` (`room.summary()` each), `maxRooms` and the viewed room's `detail()`
+  (`room, rname, admin, players, queue, cap, bots, botMax`; empty without one). The coalesced broadcast
+  computes the list and each room's detail once (`cache`) and sends every connection its own message.
+- `tick()`: heartbeat, grace expiry and idle kicks over all records, `tickNo++`, then `room.step(now)`
+  for every room (its time kept as `room.stepMs` (EMA) and `stepMax`), the lobby broadcast, input rates
+  and the tick statistics (an `overrun` carries the room count). Pongs carry `tickNo`.
+
+- **Records.** `hello` creates a record `{id, room, name, color, token, conn, state: 'play'|'queue',
+  ip, inputs, lastSeq, lastKeys, lastActive, discAt, joinedAt}`. Ids count up from 1 and are never reused.
+  Names are de-duplicated case-insensitively **per room** with `#2`, `#3`, and so on (`room.uniqueName`). When
   `release` frees a name, `reclaimName` gives the bare name to the record (playing, queued or away,
   human or bot) holding its lowest-numbered `#n` variant, logs `rename id= from= to=`, records a
   `rename` event in the ring and broadcasts `{type:'rename'}`; nobody else is renumbered. A drop
@@ -345,7 +399,7 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   the class default is unlimited): a new `hello` past that releases the address's oldest
   *disconnected* record (`leave` with reason `replaced`), so churning connect + hello + close
   cannot fill the slots with records waiting out their grace period.
-- **Slots and queue.** Up to `maxPlayers` records play. The rest wait in a FIFO queue and receive
+- **Slots and queue** (per room). Up to `maxPlayers` (8) records of a room play. The rest wait in a FIFO queue and receive
   snapshots and events as spectators. When a slot frees, the first *connected* queued record is
   promoted (`join` event, then its `spawn`).
 - **Heartbeat (SPEC §6.4).** Every message a connection sends (any type, even one the rate limit
@@ -368,7 +422,11 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   dead, queue promoted) and keeps the connection as a viewer; a later `hello` on it joins afresh.
   On the client, Escape (or ✕ on touch) opens the `#leave` confirm menu (`leaveMenu`, `leaveGame`
   in `game.js`): inputs are zeroed while it is open, "Stay" has the focus, and "Leave" calls
-  `net.leave()` and reopens the lobby. In `?offline` it reloads to the lobby.
+  `net.leave()` and reopens the lobby. In `?offline` it reloads to the lobby. The menu carries the room
+  panel `#lvRoom` (`renderLeave`, re-run on every lobby update while open): the room name, the admin's
+  rename row, the AI row (`renderBots('lv')`) and the room's humans with Make admin buttons. For an
+  admin with other humans in the room Leave is disabled and the note says to make someone admin
+  first; an admin alone sees "Leave and close". The server enforces the rule too (`refused leave admin`).
 - **Inputs.** They are queued per record, at most 12, with older ones dropped. Each tick takes
   one input per playing record. If none is queued, the last keys repeat for up to 8 ticks, then 0.
   A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Every starved tick
@@ -379,33 +437,56 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   survives. Without the drain, input latency ratcheted up to the worst stall seen, up to the
   12-input cap. Inputs with `seq` ≤ the highest seen are ignored.
 - **Tick.** Each tick runs, in order:
-  1. grace expiry and idle kicks,
-  2. input selection,
-  3. `Sim.step(state, inputs, {rewind})` and `recordHistory`,
-  4. events, with `score` events added,
-  5. a snapshot every 2nd tick,
-  6. the coalesced `lobby` broadcast,
-  7. tick-time statistics. A tick over 16.7 ms is an `overrun` event.
+  1. the heartbeat, grace expiry and idle kicks (all rooms),
+  2. per room (`room.step`): input selection, `Sim.step(state, inputs, {rewind})` and `recordHistory`,
+     events with `score` events added (to the room's viewers), a snapshot every 2nd tick (to the room's viewers),
+  3. the coalesced `lobby` broadcast,
+  4. tick-time statistics. A tick over 16.7 ms is an `overrun` event.
+  Measured headless (one process, a laptop Ryzen 5 3550H): 10 rooms of 8 (an input-sending human and 7
+  bots each) plus 2 watchers per room: about 0.5 ms a tick on average, p99 1.3 ms, worst 5.7 ms
+  (warm-up), against the 16.7 ms budget.
 - **Lag compensation.** `rewind(attacker)` returns `positionsAt(hist, tick − d)`, with
   `d = min(150 ms, interpMs 100 + attacker RTT/2)` in ticks. It uses the server-measured RTT.
 - **Loop.** A `setTimeout` scheduler on a fixed 16.67 ms grid. It catches up at most 5 ticks at
   once and resets the grid if it falls more than 100 ms behind.
-- **Debug views.** `adminState()` returns players (with `long`), the lying pickups (`items`), the
-  seconds until the next may appear (`itemInS`), queue, tick time and connections. `tools/debug.js
+- **Debug views.** `adminState()` returns `{tick, uptimeS, maxRooms, rooms, tickTime, conns}`; each room
+  (`room.adminView()`) has `id, name, admin {id, name}, creatorIp, ageS, bots, watchers, stepMs, stepMaxMs`,
+  its players (`recView`, with `room` and `admin: true` for the admin; with `long`), the lying pickups (`items`), the
+  seconds until the next may appear (`itemInS`) and its queue; connections carry `room`. `tools/debug.js
   state` prints a `long-sword pickups` line and marks holders `LONG`. For ninja stars, `adminState()`
   also has each item's `kind`, `starInS`, the stars in flight (`stars`: id, owner, x, y, vx, dist) and
   each player's `stars`; the CLI prints `star pickups` (each with its amount, `#id xN at x,y`),
   `stars in flight` and `stars=n` per player.
   `PRESS_BITS` (carried over a skipped input) includes `THROW`; the input-mask check is `KEY_MASK` (63).
-  `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
+  `viewByToken(token)` returns the server's view of one connection for a report (with the room). Neither contains
   a token. Log word ids and the `log` message (SPEC §13.5) are under server/logs.js below.
+
+## server/room.js (SPEC §17)
+
+`new Room(arena, {id, name, seed, creatorIp})`: `state` (its own sim world, tick = the arena's), `hist`,
+`recs` (its records), `queue`, `bots`, `viewers` (connections getting its snapshots and events),
+`adminId`, `pendingEvents`. It does what the single arena did for its world: `add(rec, by)` (into the
+global `recs`/`tokens` too; a free slot via `activate` with its `join` and `spawn` events sent at once,
+else the queue), `activate`, `promote`, `freeColor` (unique among this room's fighters), `uniqueName` /
+`reclaimName` (per room), `addBot` / `removeBot` (`maxBots()` = 7), `roster`, `queueList`, `detail()`
+(the room's part of a lobby message), `summary()` (its row in the room list), `withScores`,
+`broadcastEvents` (to `viewers` only), `step(now)` (inputs, bots' keys, `Sim.step` with the rewind,
+history, events, a snapshot every 2nd tick), `drainBacklog`, `snapshot()` (to `viewers` only), `recView`
+and `adminView()`. Logs end in `room=<id>` and ring events carry `room`.
+`release(rec, reason, by)` frees the slot, name and token as before and then applies the room rules:
+with no human left (`humans()`: records without `bot`, playing, queued or away) it calls
+`arena.closeRoom` (why `left` for a leave, else `empty`); when the admin went, `setAdmin(successor(),
+'auto')` (the connected human with the earliest `joinedAt`, then away ones) and its `admin` event go out
+with the leave; then `promote()`. A drop inside the grace period is not a release, so the admin keeps the
+role until the grace runs out (or the record resumes).
 
 ## server/debug.js
 
 - `createEventRing(2000)`: `push(type, conn, data)` adds `{n, ts, type, conn, …data}`. The arena
   and server push `connect`, `close`, `join`, `promote`, `queue`, `resume`, `resume-refused`,
   `drop`, `timeout` (heartbeat, with `player` and `silentMs`), `leave`, `kick` (with `reason`), `ratelimit`, `overrun`, `refused` (upgrade refusals,
-  with `why`), `report` and `report-rejected`.
+  with `why`), `report` and `report-rejected`; for rooms (SPEC §17) also `room-create`, `room-rename`,
+  `admin`, `room-close`, `bots` and `refused-req` (`what`, `why`), and every room-scoped event carries `room`.
 - `validateReport(body)` returns `{report, token}`, with the token removed from the report. Rules:
   - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId, w`
     (`w`: the word id, SPEC §13.5),
@@ -442,7 +523,8 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
 2000, 4000, 32 MB) keeps, per word id, `{names, ips, first, seen, entries, lost, bad}` in memory
 only. Each stored entry is `{at, c, size, e}`: the server's receive time, connection id, its JSON
 size and the cleaned client entry (`validateEntry`: keys `ts, tick, cat, msg, data` only, finite
-numbers, `cat` lower case and not `verbose`, strings through `debug.js` `clean()`). The arena owns
+numbers, `cat` lower case and not `verbose`, strings through `debug.js` `clean()`), plus `r`: the room the
+connection was looking at (the arena passes `room`; `find` returns it as `room`). The arena owns
 one (`arena.logs`, the `logs` option) and:
 - `connect` calls `assign(transport.word)` (the `/ws?id=` the server passed on; a valid list pair is
   kept, else a fresh random id, avoiding ids already held) and `touch(word, {ip})`, and sends the
@@ -462,6 +544,10 @@ one (`arena.logs`, the `logs` option) and:
 ## tools/debug.js
 
 `node tools/debug.js [--port N] state | events [n] | reports [n] | report <id> | tail | logs | log <word|name|ip>`.
+`state` prints the tick line, then `rooms (n/10):` and per room a `room <id> "<name>" admin=… players=…
+bots=… queue=… watchers=… creator=… age=… step avg/max` line with its players (marked `ADMIN`, `LONG`),
+pickups, stars in flight and queue indented under it, then the connections (with `room=`). `log` lines show
+the room as `r<id>` after the connection.
 `logs` prints one line per identity (last seen, word, name, IPs, entry count, lost/refused counts);
 `log <q>` prints each matching identity's header and then one line per entry: server time,
 connection, client clock, tick, `[cat] msg` and the data as JSON, under an untrusted-input line. The port is
@@ -474,6 +560,14 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
 
 `createNet({onLobby, onStatus})` returns `net`:
 
+- **Rooms (SPEC §17).** `lobby` also holds `rooms`, `maxRooms`, `room`, `rname` and `admin`.
+  `join(name, color, room)` and `create(name, color, rname)` set what the next `hello`/`create` sends (a
+  resume sends only the token); `viewRoom(id)` sends `view` and is repeated on a new socket's connection
+  welcome (`viewWant`; also kept on `leave`, cleared by `closed`); `rename(name)`, `makeAdmin(id)`,
+  `isAdmin()`. `refused` (a refused join or create clears `want`) and `closed` go to the `onRefused` /
+  `onClosed` callbacks; a lobby whose `room` differs from the last one resets the view (`resetView`:
+  snapshots, the event queue, taken pickups, the arrival clock) and calls `onRoom`. `admin` and `room`
+  events update `lobby.admin` / `lobby.rname` (and the list) and call `onLobby`.
 - **State.**
   - `id`, `token`, `queuePos`, `lobby`.
   - `state`: `connecting`, `open`, `reconnecting` or `kicked`.
@@ -783,16 +877,34 @@ editable physics.
     carries it. Player colours still tint headbands and glows.
 - **Music.** `initAudio` (on the first key, pointer or Fight) creates `music` unless `?nomusic`.
   M toggles `muted`, which silences both the SFX and the music. A hidden tab suspends the context.
-- **Lobby (§9).** An overlay over the live arena. It has:
+- **Lobby (§9, rooms §17).** An overlay over the live arena of the selected room (none: empty). It has:
   - the logo,
-  - a name field (`cleanName`) and 8 swatches,
-  - the live player list with scores, the slot count and the queue length,
+  - a name field (`cleanName`) and 12 swatches (those worn in the selected room greyed),
+  - the room list `#lRoomList` (a button per room: name, `★ admin`, `n/cap +queue`, `👁 watchers`;
+    pressed = selected, a click sends `viewRoom`; "No rooms yet — create one." when empty) under a
+    one-line explainer, and `#lCreateRow` (`#lRoomName`, `#lCreate` → `createRoom()`: `cleanRoomName`
+    or blank, then `net.create`; disabled with `#lCreateNote` at `maxRooms`, hidden for members),
+  - the selected room `#lRoom`: `#lRoomTitle`, `#lBack` (ALL ROOMS, viewers only), the admin's rename
+    row (`#lRenameIn`, `#lRenameBtn` → `renameRoom`), **Fight** (`fight()`: joins the selected room, or
+    for a member, the creator who lands here after Create room, just closes the lobby) and Watch, the
+    info line, the AI row (`renderBots('l')`: − / + for the admin, else hidden and "(the admin sets
+    this)"), the live player list with scores and the queue (`rosterRow`: an ADMIN tag, and for the
+    admin a small `button.mkadm` "Make admin" next to every other human). Lists with buttons are
+    rebuilt only when their content changes (`sameList`), so a lobby update between press and release
+    cannot swallow a click,
   - **Fight**,
   - the word id in the footer (`#lId`, ` · id: amber-otter`, set from `net.onWord`; SPEC §13.5),
     where the "Report a problem" link was.
 
   The name and colour are saved in `localStorage` (`multisplat-name`, `multisplat-color`).
-  After a kick the lobby comes back and shows the reason.
+  After a kick the lobby comes back and shows the reason. `onRefused` maps `refused` reasons to text
+  (`REFUSED`) in `#lErr` and the Esc menu's `#lvErr` (a refused join reopens the lobby); `onRoomClosed`
+  sends a watcher back to the lobby with "The room "…" has closed."; `clearRoomView` (net `onRoom`)
+  clears gore, corpses, the feed and chat when the viewed room changes.
+- **Admin transfer dialog** (`#adm`, `admDialog(target)`): every Make admin tap opens "Make <name> the
+  admin of <room>? You will lose admin." with Cancel focused (Enter on it cancels; Esc or a tap outside
+  cancels too; the keydown handler hands the keyboard to the dialog) and Confirm, which sends
+  `net.makeAdmin(id)`. 44 px buttons, above every other overlay.
 - **HUD.** `hudOnline` shows HP and score, a respawn countdown while dead, `ARENA FULL · QUEUE #n`
   with "you are #n of m waiting" under it while queued, and `RECONNECTING…`. Name tags
   (`drawNameTag`, `(away)` during a grace period) and HP bars float over every player.
@@ -898,6 +1010,19 @@ editable physics.
   a non-array `e` kicked; the 6 + 1/s bucket and the flood kick; one-hour pruning of entries and
   ids; the per-id, id-count and byte caps; `/logs` and `/logs/<word|name|ip>` on the admin
   handler; `w` in reports and the server view.
+- `rooms.test.js` (SPEC §17; no sockets, fake clock): protocol 2 and the empty list, create (admin,
+  default and cleaned names, refusals), the room-name rule, 10 rooms / 2 per address / the create
+  bucket, one room per connection, hello needs a room and `view`, 8 slots and a queue per room,
+  isolation of snapshots, events and chat, per-room names and colours (and a freed name passed on in its
+  room only), admin transfer validation and its event, the admin's leave rule and a sole admin closing
+  the room, the grace-expiry hand-over (a resume inside the grace keeps it; connected humans first), a
+  room closing at its last human's grace expiry or kick with its bots, rename (admin only, validated,
+  rate-limited), and `adminState`, ring events, log lines and streamed log entries with room ids.
+- The older socket-less suites (`arena`, `bots`, `spectate`, `stars`, `logs`) send a bare `hello`;
+  `withRoom` in `test/lib.js` gives it the newest room's id (making a room "Test" when none is open,
+  whose first human becomes its admin) and `roomOf(arena)` is that room. Tests that leave as the admin
+  hand the role on first; lobby viewers `view` the room. `bots.test.js` checks the admin-only rule,
+  7 bots in 8 slots and the server-wide budget across 10 rooms.
 - `arena.test.js` (no sockets, fake clock):
   - welcome/hello/join/spawn/snapshot,
   - name validation and `#2`,
@@ -1067,7 +1192,7 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
 - **AI players** (SPEC §15). `BOT` and `PALETTE` (`COLORS` plus `BOT.hex` at index `BOT.color` = 12)
   in `shared/constants.js`. `server/arena.js`: `onBots` (shape check, per-connection bucket
   `conn.botBucket`, arena-wide `this.botBucket` charged per change, then `send(lobbyMsg)` to the
-  sender), `addBot` (refused at `maxBots()` = `maxPlayers − 1` or with no free slot; a record with
+  sender; admin only since rooms), `addBot` (now on `Room`; refused at `maxBots()` = `maxPlayers − 1` = 7 or with no free slot; a record with
   `bot: true`, `botNo`, `brain`, `conn: null`, `ip: null`, `token: null`, kept in `this.bots` in
   order; `activate` skips `freeColor` for it), `removeBot` (pops the newest, `release(…, 'bot
   removed')`, which also promotes from the queue); `dropped(conn)` is the shared drop/flood
@@ -1091,8 +1216,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   bot walking but not moving for 12–25 ticks hops. Client: `net.bots(d)`; `net.lobby.bots/botMax`;
   `#lBots` (− `#lBotN` +) in the lobby, rendered in `renderLobby`; colours looked up in `PALETTE`.
   Tests: `test/bots.test.js`, `botTest` in `test/multiclient.js`.
-- **Spectator mode** (SPEC §16). No server or protocol change: a watcher is a lobby viewer
-  (`net.mode` `'viewer'`, no `hello`) with the lobby closed. `shared/spectate.js`: `PICK_TOL`
+- **Spectator mode** (SPEC §16). A watcher is a lobby viewer
+  (`net.mode` `'viewer'`, no `hello`) with the lobby closed, looking at the room it selected (`view`, SPEC
+  §17; Watch needs a selected room). `shared/spectate.js`: `PICK_TOL`
   (mouse 6, touch 14 units), `pickAt(players, x, y, tol)` (nearest living ninja, body or name tag),
   `byScore`, `leaderOf(players, rows)`, `followTarget(players, rows, chosen)` (→ `{chosen, id}`,
   `chosen` dropped once that ninja has left) and `cycleTarget(players, rows, cur, dir)`. In `game.js`

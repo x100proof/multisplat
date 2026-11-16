@@ -31,12 +31,16 @@ const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a =>
 // Ninja stars in flight, from a snapshot's `st` ([[id, x, y, vx, owner]]); none from an older server.
 const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).map(a => [a[0], { id: a[0], x: a[1], y: a[2], vx: a[3], owner: a[4] }]) : []);
 
-export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {} } = {}) {
+// Rooms (SPEC §17): onRefused({what, why}) for a request the server turned down, onClosed({room, name,
+// why}) when the room we looked at closed, onRoom(id) when the room whose world we see changes (the
+// game then clears what it drew of the old one).
+export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {} } = {}) {
   const net = {
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
     meta: new Map(),                                   // id -> {name, color, score, deaths, away}
-    lobby: { players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1 },
+    // the room list, and the selected (or our own) room's detail: name, admin id, roster, queue, bots (SPEC §17)
+    lobby: { rooms: [], maxRooms: 10, room: null, rname: null, admin: null, players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1 },
     me: null,                                          // the predicted local player (sim object)
     stats: { rtt: 0, rttAvg: 0, rttMax: 0, offset: 0, jitter: 0, reconnects: 0, snaps: 0, snapGapMax: 0,
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
@@ -46,6 +50,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   if (net.word) setWordId(net.word);
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
+  let viewWant = 0;                                    // the room picked in the lobby (asked for again after a reconnect)
   let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
   // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
   // and the server (which restarts seq at the hello) would take those numbers and then ignore the
@@ -160,19 +165,45 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     sentToken = net.token;
     // after a drop, ask to resume only: if the grace period is over the server says `expired`
     // and we go back to the lobby rather than silently joining as someone new
-    send({ t: 'hello', name: want.name, color: want.color, ...(net.word ? { w: net.word } : {}), ...(net.token ? { token: net.token, ...(dropped ? { resume: true } : {}) } : {}) });
+    // A resume names no room (the token knows it); a fresh join names the room, a create the new room's name.
+    const base = { name: want.name, color: want.color, ...(net.word ? { w: net.word } : {}) };
+    if (net.token) send({ t: 'hello', ...base, token: net.token, ...(dropped ? { resume: true } : {}) });
+    else if (want.create) send({ t: 'create', ...base, room: want.rname || '' });
+    else send({ t: 'hello', ...base, room: want.room });
   }
 
-  net.join = function join(name, color) {
-    want = { name, color };
-    dbg('life', 'join', { color });
+  // Join room `room` (SPEC §17) with this name and colour.
+  net.join = function join(name, color, room) {
+    want = { name, color, room };
+    dbg('life', 'join', { color, room });
     if (net.state === 'open') hello(); else if (net.state !== 'connecting') net.connect();
   };
+  // Create a room ('' for the default "<name>'s room") and join it as its admin.
+  net.create = function create(name, color, rname) {
+    want = { name, color, create: true, rname };
+    dbg('life', 'create room', { color, len: (rname || '').length });
+    if (net.state === 'open') hello(); else if (net.state !== 'connecting') net.connect();
+  };
+  // Look at room `id` from the lobby (its roster, snapshots and events), or at none (0).
+  net.viewRoom = function viewRoom(id) {
+    dbg('life', 'view room', { room: id || 0 });
+    viewWant = id || 0;
+    send({ t: 'view', room: viewWant });
+  };
+  // Admin only (the server checks): rename our room, hand the admin role to player `id`.
+  net.rename = function rename(name) { dbg('life', 'rename room', { len: name.length }); send({ t: 'rename', name }); };
+  net.makeAdmin = function makeAdmin(id) { dbg('life', 'make admin', { id }); send({ t: 'admin', id }); };
+  net.isAdmin = () => net.id != null && net.mode !== 'viewer' && net.lobby.admin === net.id;
+  // Forget what we drew of the room we looked at (another room, or none, is coming).
+  function resetView() {
+    snaps.length = 0; evq.length = 0; taken.clear(); arrOff = null; walk.clear();
+  }
   // Leave the arena on purpose: the server frees the slot at once (no resume) and this connection
   // carries on as a lobby viewer.
   net.leave = function leave() {
     dbg('life', 'leave');
     send({ t: 'leave' });
+    viewWant = net.lobby.room || 0;                    // the server keeps us looking at the room we left
     net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
     live = false; dropped = false; seq = 0; pending = []; unsent = [];
   };
@@ -199,6 +230,14 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       case 'lobby': return onLobbyMsg(m);
       case 'pong': return onPong(m);
       case 'welcome': return onWelcome(m);
+      case 'refused':                                  // a request turned down without a kick (SPEC §17)
+        dbg('net', 'refused', { what: m.what, why: m.why });
+        if ((m.what === 'join' || m.what === 'create') && net.id == null) { want = null; net.mode = 'viewer'; }
+        return onRefused(m);
+      case 'closed':                                   // the room we looked at closed
+        dbg('life', 'room closed', { room: m.room, why: m.why });
+        if (viewWant === m.room) viewWant = 0;
+        return onClosed(m);
       case 'kick':
         kicked = true; net.kickReason = m.reason;
         dbg('net', 'kick', { reason: m.reason });
@@ -226,7 +265,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       status('open');
       return;
     }
-    if (m.id == null) { net.serverTick = m.tick; return; }   // connection welcome (before hello)
+    if (m.id == null) {                                 // connection welcome (before hello)
+      net.serverTick = m.tick;
+      if (viewWant && !want) send({ t: 'view', room: viewWant });   // a new socket looks at nothing until told
+      return;
+    }
     const wasDrop = dropped;
     dropped = false; attempts = 0;
     if (sentToken && !m.resumed) { dbg('net', 'resume refused'); sendReport('auto', 'resume refused'); }
@@ -238,7 +281,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
-    onLobbyMsg({ players: m.players, queue: m.queue, cap: m.cap });
+    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap });
     dbg('life', m.state === 'play' ? 'in arena' : 'queued', { id: m.id, queuePos: m.queuePos, resumed: m.resumed });
     if (wasDrop) sendReport('auto', 'reconnected after drop');
     status('open');
@@ -246,7 +289,12 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
 
   function onLobbyMsg(m) {
     // bots / botMax (SPEC §15) come with every lobby message; a welcome's roster leaves them as they were
-    net.lobby = { players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
+    // rooms (SPEC §17): the list, and the room we look at (null: none, the plain list)
+    const room = m.room ?? null;
+    if (room !== net.lobby.room) { resetView(); dbg('life', 'room view', { from: net.lobby.room, to: room }); onRoom(room); }
+    net.lobby = { rooms: Array.isArray(m.rooms) ? m.rooms : net.lobby.rooms, maxRooms: m.maxRooms || net.lobby.maxRooms,
+      room, rname: m.rname ?? null, admin: m.admin ?? null,
+      players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
       bots: Number.isInteger(m.bots) ? m.bots : net.lobby.bots, botMax: Number.isInteger(m.botMax) ? m.botMax : net.lobby.botMax };
     for (const p of net.lobby.players) net.meta.set(p.id, { ...(net.meta.get(p.id) || {}), ...p });
     if (net.id != null && net.mode === 'queue') {
@@ -280,6 +328,14 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         const mm = net.meta.get(e.id); if (mm) mm.name = e.name;
         for (const p of [...net.lobby.players, ...net.lobby.queue]) if (p.id === e.id) p.name = e.name;
         if (e.id === net.id) dbg('life', 'renamed', { id: e.id });
+        onLobby(net.lobby);
+      } else if (e.type === 'admin') {    // the admin role moved (SPEC §17): a transfer or the old admin gone for good
+        net.lobby.admin = e.id;
+        if (e.id === net.id) dbg('life', 'made admin', { why: e.why });
+        onLobby(net.lobby);
+      } else if (e.type === 'room') {     // the admin renamed the room
+        net.lobby.rname = e.name;
+        for (const r of net.lobby.rooms) if (r.id === e.id) r.name = e.name;
         onLobby(net.lobby);
       } else if (e.type === 'score') {
         const mm = net.meta.get(e.id); if (mm) { mm.score = e.score; mm.deaths = e.deaths; }

@@ -258,6 +258,7 @@ function resize() {
   const rot = matchMedia('(pointer: coarse)').matches && innerHeight > innerWidth;
   const W = rot ? innerHeight : innerWidth, H = rot ? innerWidth : innerHeight;
   stage.classList.toggle('rot', rot);
+  document.body.classList.toggle('rot', rot);
   Object.assign(stage.style, rot ? { width: W + 'px', height: H + 'px', left: innerWidth + 'px' } : { width: '', height: '', left: '' });
   const s = Math.min(W / VW, H / VH), dpr = QS.has('lowdpr') ? 1 : Math.min(window.devicePixelRatio || 1, 2.5);
   cv.style.width = VW * s + 'px'; cv.style.height = VH * s + 'px';
@@ -382,8 +383,9 @@ function heldBits() {
 }
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') { if (e.code === 'Enter') fight(); return; }
+  if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleFullscreen(); return; }
   if (lobbyOpen && e.code === 'Enter') { fight(); return; }
-  if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen) leaveMenu(!leaveOpen); return; }
+  if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen && !(escLeavesFullscreen() && !leaveOpen)) leaveMenu(!leaveOpen); return; }
   if (leaveOpen) { if (e.code === 'Tab') e.preventDefault(); return; }   // the menu owns the keyboard (Enter presses the focused button)
   if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
   noteDevice('keyboard');
@@ -442,9 +444,48 @@ addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preve
 const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
 tapBtn('tMute', () => { setMuted(!muted); document.getElementById('tMute').classList.toggle('off', muted); });
 tapBtn('tLeave', () => leaveMenu(true));
-tapBtn('tFull', () => { triedLandscape = false; goLandscape(true); });
 // On phones that allow it (Android), joining the fight goes full screen and locks landscape.
 let triedLandscape = false;
+// ---------- full screen (SPEC §9): a button top right on desktop and touch, in game and lobby ----------
+// It toggles full screen (Fullscreen API, webkit fallback), shows the current state and follows
+// changes made elsewhere (Escape, the browser's own UI). F toggles it too (not while typing a name).
+// On touch, entering also asks for landscape, as the old ⛶ button did (goLandscape).
+// Escape in full screen: the browser takes that press to leave full screen. Some browsers still pass
+// the key on, so an Escape while in full screen, or within 500 ms of leaving it, does not open the
+// leave menu; the next Escape does.
+const fsBtn = document.getElementById('fsBtn');
+const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+const FS_OK = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+let fsLeftAt = -1e9, fsWas = false;
+if (!FS_OK) document.body.classList.add('nofs');
+function syncFullscreen() {
+  const on = !!fsEl();
+  fsBtn.classList.toggle('on', on);
+  fsBtn.setAttribute('aria-pressed', String(on));
+  const label = on ? 'Leave full screen (F)' : 'Full screen (F)';
+  fsBtn.title = label; fsBtn.setAttribute('aria-label', label);
+  if (fsWas && !on) fsLeftAt = performance.now();
+  if (fsWas !== on) dbg('input', on ? 'full screen on' : 'full screen off');
+  fsWas = on;
+}
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, syncFullscreen);
+function toggleFullscreen() {
+  if (!FS_OK) return;
+  if (fsEl()) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) Promise.resolve().then(() => exit.call(document)).catch(() => {});
+    return;
+  }
+  if (TOUCH_UI) { triedLandscape = false; goLandscape(true); return; }
+  const el = document.documentElement, req = el.requestFullscreen || el.webkitRequestFullscreen;
+  Promise.resolve().then(() => req.call(el)).catch(e => dbg('input', 'full screen refused', { e: String(e && e.name) }));
+}
+fsBtn.addEventListener('click', e => { e.preventDefault(); initAudio(); toggleFullscreen(); fsBtn.blur(); });
+fsBtn.addEventListener('pointerdown', e => e.stopPropagation());
+// Escape that only took us out of full screen must not also open the leave menu
+const escLeavesFullscreen = () => !!fsEl() || performance.now() - fsLeftAt < 500;
+syncFullscreen();
+
 function goLandscape(force) {
   if (triedLandscape || (!force && !matchMedia('(pointer: coarse)').matches)) return;
   triedLandscape = true;

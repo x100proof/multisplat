@@ -487,6 +487,27 @@ async function starTest() {
   assert.ok(after.life.includes('star thrown'));
   assert.equal(hit.dmg, 20);
   log(`stars: ${after.throws} thrown, hit for ${hit.dmg} seen on all 3 pages, count ${before} -> ${after.me} ("${after.hud}")`);
+  // Rapid fire: every star held, one press each 7 ticks (just past the cooldown), gives one swish
+  // per throw. The local count once took off throws the server count already showed, so the last
+  // throws of a quick burst stayed silent.
+  await installBot(T.page, { mode: 'fetch' });
+  await waitFor(() => T.page.evaluate(() => (__mp.net.me && __mp.net.me.stars) >= 3), { timeout: 30000, every: 100, what: 'Thrower restocks stars' });
+  await stopBot(T.page);
+  const held = await T.page.evaluate(() => {
+    const n = __mp.net.me.stars, s = { t: 0, left: n };
+    window.__swish0 = __mp.debug.entries().filter(e => e.msg === 'throw swish').length;
+    __mp.autopilot = () => (++s.t % 7 === 0 && s.left > 0 ? (s.left--, 32) : 0);
+    return n;
+  });
+  const burst = await waitFor(async () => {
+    const u = await T.page.evaluate(() => ({ me: __mp.net.me.stars, swishes: __mp.debug.entries().filter(e => e.msg === 'throw swish').length - window.__swish0 }));
+    return u.me === 0 ? u : null;
+  }, { timeout: 5000, every: 100, what: 'the burst empties the stars' });
+  await new Promise(r => setTimeout(r, 300));
+  const swishes = await T.page.evaluate(() => __mp.debug.entries().filter(e => e.msg === 'throw swish').length - window.__swish0);
+  await stopBot(T.page);
+  assert.equal(swishes, held, `a swish for each of ${held} quick throws (heard ${swishes})`);
+  log(`stars: rapid fire of ${held}, ${swishes} swishes (count ${burst.me})`);
   // admin state and the CLI list star pickups, stars in flight and counts
   const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
     (e, so) => (e ? rej(e) : res(so))));

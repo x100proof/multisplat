@@ -213,7 +213,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     net.id = m.id; net.token = m.token; net.mode = m.state; net.queuePos = m.queuePos;
     net.kickReason = null;
     want.name = m.name.replace(/#\d+$/, '');
-    seq = 0; pending = []; unsent = []; net.me = null; live = true;
+    seq = 0; pending = []; unsent = []; localThrows = []; net.me = null; live = true;
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
@@ -318,6 +318,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     const before = net.me;
     const me = m.me;
     pending = pending.filter(p => p.seq > m.seq);
+    localThrows = localThrows.filter(t => t > m.seq);   // throws up to m.seq are already in me.stars
     const world = { tick: m.tick, rng: 1, players: obstacles(m.tick, me) };
     for (const p of pending) Sim.predictStep(world, me.id, p.keys, { cfg: DEFAULTS, level: LEVEL });
     net.me = me;
@@ -366,8 +367,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       const me = net.me;
       // The server's own cooldown and star count reach us late (they are a snapshot old), so they
       // must not gate the sound: a quick second or third throw would stay silent. We count our own
-      // cooldown, and take off the stars we threw in the last 20 ticks that the count may not show yet.
-      localThrows = localThrows.filter(t => seq - t < 20);
+      // cooldown, and take off the stars of our throws the server has not processed yet (seq > the
+      // snapshot's m.seq; reconcile drops the rest, which me.stars already counts).
       if ((keys & KEY.THROW) && !(prevKeys & KEY.THROW) && me.alive && (me.stars | 0) - localThrows.length > 0 && me.stun <= 0 && localThrowCd <= 0) {
         me.fx |= FX.THROW; localThrowCd = DEFAULTS.throwCd; localThrows.push(seq);
       }

@@ -60,7 +60,7 @@ export const NET = Object.freeze({
   historyMs: 200, rewindCapMs: 150, snapshotHz: 30, maxInputBatch: 3,
   interpMs: 100,           // remote players are drawn this far behind the newest snapshot
   extrapMs: 100,           // at most this much extrapolation when snapshots stall
-  maxPlayers: 12,          // active fighters; later joiners queue as spectators
+  maxPlayers: 8,           // active fighters per room (SPEC §17), AI players included; later joiners queue
   graceMs: 5000,           // a dropped player keeps its slot and score this long (resume token)
   heartbeatMs: 5000,       // the server closes a connection it has heard nothing from for this long
   timeoutClose: 4100,      // the close code for that: the client treats it as a network drop (resume), not a kick
@@ -78,6 +78,24 @@ export function cleanName(s) {
   if (typeof s !== 'string') return null;
   const n = s.trim().replace(/ {2,}/g, ' ');
   return NAME_RE.test(n) ? n : null;
+}
+// Rooms (SPEC §17). At most `max` rooms at once and `perIp` open rooms created from one address.
+// Creating is limited per connection (burst 2, one more every 15 s); renaming and admin transfers
+// share another bucket (burst 4, one more every 2 s). Room names use the player-name allowlist plus
+// the apostrophe (so the default "Ann's room" is a name one could type), 1-20 characters.
+export const ROOM = Object.freeze({ max: 10, perIp: 2, nameMax: 20,
+  createBurst: 2, createRefillMs: 15000, editBurst: 4, editRefillMs: 2000 });
+export const ROOM_NAME_RE = /^[A-Za-z0-9 _'-]{1,20}$/;
+export function cleanRoomName(s) {
+  if (typeof s !== 'string') return null;
+  const n = s.trim().replace(/ {2,}/g, ' ');
+  return ROOM_NAME_RE.test(n) ? n : null;
+}
+// The name a room gets when its creator leaves the field blank: "<name>'s room", cut to fit (a "#2"
+// de-duplication suffix is dropped first: it is outside the allowlist).
+export function defaultRoomName(playerName) {
+  const base = String(playerName).replace(/#\d+$/, '').slice(0, ROOM.nameMax - 7).trim() || 'New';
+  return `${base}'s room`;
 }
 // Chat (SPEC §9): the longest message, in code points, and the per-player rate (1 per 1.5 s, burst 3).
 export const CHAT = Object.freeze({ maxLen: 80, burst: 3, refillMs: 1500, showMs: 6000, fadeMs: 1000 });

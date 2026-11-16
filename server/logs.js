@@ -110,8 +110,9 @@ export function createLogStore({ now = () => Date.now(), keepMs = LOG.keepMs, ra
       remember(id.names, typeof name === 'string' ? name.slice(0, 32) : null, C.keepNames);
     },
     // Store a batch of raw client entries for w. Returns {kept, bad}. `lost` is the client's own
-    // count of entries it dropped before sending (its queue overflowed).
-    add(w, list, { ip, conn = null, lost = 0 } = {}) {
+    // count of entries it dropped before sending (its queue overflowed). `room` is the server's own
+    // note of the room the connection was looking at (SPEC §17), stored as `r` (null: the room list).
+    add(w, list, { ip, conn = null, lost = 0, room = null } = {}) {
       if (!isWordId(w) || !Array.isArray(list)) return { kept: 0, bad: 0 };
       prune();
       const id = get(w), t = now();
@@ -123,7 +124,7 @@ export function createLogStore({ now = () => Date.now(), keepMs = LOG.keepMs, ra
         const e = validateEntry(raw);
         if (!e) { bad++; continue; }
         const size = JSON.stringify(e).length + 32;
-        id.entries.push({ at: t, c: conn, size, e });
+        id.entries.push({ at: t, c: conn, r: Number.isInteger(room) ? room : null, size, e });
         id.bytes += size; bytes += size; kept++;
       }
       id.dropped += bad;
@@ -149,7 +150,7 @@ export function createLogStore({ now = () => Date.now(), keepMs = LOG.keepMs, ra
         .sort((a, b) => a.first - b.first)
         .map(id => ({ w: id.w, names: id.names.slice(), ips: id.ips.slice(), lost: id.lost, bad: id.dropped,
           seen: new Date(id.seen).toISOString(),
-          entries: id.entries.map(x => ({ at: new Date(x.at).toISOString(), conn: x.c, ...x.e })) }));
+          entries: id.entries.map(x => ({ at: new Date(x.at).toISOString(), conn: x.c, room: x.r ?? null, ...x.e })) }));
     },
     stats: () => ({ ids: ids.size, bytes, entries: [...ids.values()].reduce((a, id) => a + id.entries.length, 0) }),
     prune: () => prune(true),

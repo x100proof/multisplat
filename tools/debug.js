@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Terminal client for the multisplat admin listener (SPEC §13.3). Read-only.
 //
-//   node tools/debug.js [--port N] state            players, queue, tick time, connections
+//   node tools/debug.js [--port N] state            rooms (players, bots, queue, watchers), tick time, connections
 //   node tools/debug.js [--port N] events [n]       newest server events (default 50)
 //   node tools/debug.js [--port N] reports [n]      newest stored player reports (summaries)
 //   node tools/debug.js [--port N] report <id>      one report in full
@@ -67,18 +67,21 @@ async function main() {
     case 'state': {
       const s = await get('/state');
       out(`tick ${s.tick} · up ${s.uptimeS}s · tick time avg ${s.tickTime.avgMs} ms, p99 ${s.tickTime.p99Ms}, max ${s.tickTime.maxMs} (budget ${s.tickTime.budgetMs}), overruns ${s.tickTime.overruns}`);
-      out(`players (${s.players.length}${s.bots ? `, ${s.bots} AI` : ''}):`);   // bots show state 'play (bot)', conn=null
-      for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} stars=${p.stars ?? 0} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
-      if (s.items) {
-        const longs = s.items.filter(i => i.kind !== 'star'), stars = s.items.filter(i => i.kind === 'star');
-        out(`long-sword pickups (${longs.length}): ${longs.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.itemInS}s when there is room`);
-        out(`star pickups (${stars.length}): ${stars.map(i => `#${i.id} x${i.n ?? 3} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.starInS ?? '?'}s when there is room`);
+      // Rooms (SPEC §17): each with its admin, players (bots show state 'play (bot)', conn=null),
+      // pickups, stars in flight, queue and watcher count.
+      out(`rooms (${s.rooms.length}/${s.maxRooms}):`);
+      for (const r of s.rooms) {
+        out(`room ${r.id} ${JSON.stringify(r.name)} admin=${r.admin ? `${r.admin.id} ${JSON.stringify(r.admin.name)}` : '-'} players=${r.players.length} bots=${r.bots} queue=${r.queue.length} watchers=${r.watchers} creator=${r.creatorIp ?? '-'} age=${r.ageS}s step avg ${r.stepMs} ms max ${r.stepMaxMs}`);
+        for (const p of r.players) out(`  ${p.id} ${JSON.stringify(p.name)}${p.admin ? ' ADMIN' : ''} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} stars=${p.stars ?? 0} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
+        const longs = r.items.filter(i => i.kind !== 'star'), stars = r.items.filter(i => i.kind === 'star');
+        out(`  long-sword pickups (${longs.length}): ${longs.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${r.itemInS}s when there is room`);
+        out(`  star pickups (${stars.length}): ${stars.map(i => `#${i.id} x${i.n ?? 3} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${r.starInS ?? '?'}s when there is room`);
+        out(`  stars in flight (${r.stars.length}): ${r.stars.map(f => `#${f.id} by ${f.owner} at ${f.x},${f.y} ${f.vx > 0 ? '→' : '←'} ${f.dist}u`).join(' ') || '-'}`);
+        out(`  queue (${r.queue.length}):`);
+        for (const p of r.queue) out(`    #${p.queuePos} ${p.id} ${JSON.stringify(p.name)}${p.admin ? ' ADMIN' : ''} ${p.state}`);
       }
-      if (s.stars) out(`stars in flight (${s.stars.length}): ${s.stars.map(f => `#${f.id} by ${f.owner} at ${f.x},${f.y} ${f.vx > 0 ? '→' : '←'} ${f.dist}u`).join(' ') || '-'}`);
-      out(`queue (${s.queue.length}):`);
-      for (const p of s.queue) out(`  #${p.queuePos} ${p.id} ${JSON.stringify(p.name)} ${p.state}`);
       out(`connections (${s.conns.length}):`);
-      for (const c of s.conns) out(`  conn=${c.conn} ip=${c.ip} id=${c.word ?? '-'} player=${c.player} rtt=${c.rttMs}ms in=${c.inputRate}/s dropped=${c.dropped} age=${c.ageS}s`);
+      for (const c of s.conns) out(`  conn=${c.conn} ip=${c.ip} id=${c.word ?? '-'} player=${c.player} room=${c.room ?? '-'} rtt=${c.rttMs}ms in=${c.inputRate}/s dropped=${c.dropped} age=${c.ageS}s`);
       return;
     }
     case 'events':
@@ -132,7 +135,7 @@ async function main() {
         out(`== ${i.w} names=${JSON.stringify(i.names)} ip=${i.ips.join(',') || '-'} entries=${i.entries.length} last seen ${i.seen}` +
           (i.lost ? ` (client dropped ${i.lost})` : '') + (i.bad ? ` (refused ${i.bad})` : ''));
         // server receive time, connection, client clock (ms since page load), tick, category, message, data
-        for (const e of i.entries) out(`${e.at} c${e.conn ?? '-'} +${(e.ts / 1000).toFixed(1)}s t${e.tick} [${e.cat}] ${e.msg}` +
+        for (const e of i.entries) out(`${e.at} c${e.conn ?? '-'} r${e.room ?? '-'} +${(e.ts / 1000).toFixed(1)}s t${e.tick} [${e.cat}] ${e.msg}` +
           (e.data !== undefined ? ' ' + JSON.stringify(e.data) : ''));
       }
       return;

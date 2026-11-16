@@ -1,5 +1,6 @@
 // The authoritative arena without sockets: fake connections and a fake clock, tick() by hand.
 import test from 'node:test';
+import { roomOf, withRoom } from './lib.js';
 import assert from 'node:assert/strict';
 import { Arena, KICK } from '../server/arena.js';
 import { loadConfig } from '../server/server.js';
@@ -34,7 +35,7 @@ function setup(opts = {}) {
     const c = { msgs: [], closed: null, silent, pingAt: t };
     c.conn = arena.connect({ ip: 'test', send: s => { const m = JSON.parse(s); if (!(m.t === 'pong' && m.id === HB_PING_ID)) c.msgs.push(m); },
       close: (code, reason) => { c.closed = { code, reason }; } });
-    c.say = m => arena.onMessage(c.conn, typeof m === 'string' ? m : JSON.stringify(m));
+    c.say = m => arena.onMessage(c.conn, typeof m === 'string' ? m : JSON.stringify(withRoom(arena, m)));
     c.last = t => [...c.msgs].reverse().find(m => m.t === t);
     c.all = t => c.msgs.filter(m => m.t === t);
     c.events = () => c.msgs.filter(m => m.t === 'event').flatMap(m => m.ev);
@@ -60,7 +61,7 @@ test('connect gets a server welcome and the lobby; hello joins the arena', () =>
   assert.ok(a.events().some(e => e.type === 'spawn' && e.id === 1));
   const s = a.last('snapshot');
   assert.equal(s.me.id, 1); assert.equal(s.p.length, 1); assert.equal(s.p[0][0], 1);
-  assert.equal(arena.activeCount(), 1);
+  assert.equal(roomOf(arena).activeCount(), 1);
 });
 
 test('names are validated and duplicates get #2', () => {
@@ -90,7 +91,7 @@ test('inputs are consumed one per tick in seq order; batches and duplicates', ()
   const { conn, tick, arena } = setup();
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
   tick(100);                                       // past spawn
-  const p = Sim.getPlayer(arena.state, 1), x0 = p.x;
+  const p = Sim.getPlayer(roomOf(arena).state, 1), x0 = p.x;
   a.say({ t: 'input', seq: 1, keys: [KEY.RIGHT, KEY.RIGHT, KEY.RIGHT] });
   a.say({ t: 'input', seq: 2, keys: KEY.LEFT });   // stale, ignored
   a.say({ t: 'input', seq: 4, keys: KEY.RIGHT });
@@ -140,7 +141,7 @@ test('a one-tick slash tap inside a skipped (drained) input still fires', () => 
   const { conn, tick, arena } = setup();
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
   tick(100);
-  const rec = arena.recs.get(1), p = Sim.getPlayer(arena.state, 1);
+  const rec = arena.recs.get(1), p = Sim.getPlayer(roomOf(arena).state, 1);
   let seq = 0;
   const send = (keys = 0) => a.say({ t: 'input', seq: ++seq, keys });
   for (let i = 0; i < 10; i++) { send(); tick(1); }
@@ -167,7 +168,7 @@ test('after a long absence inputs are applied again at once', () => {
   for (let s = 2; s <= 40; s++) { a.say({ t: 'input', seq: s, keys: KEY.LEFT }); tick(1); assert.equal(rec.lastSeq, s); }
 });
 
-test('12 slots, then a FIFO queue with automatic promotion', () => {
+test('8 slots per room (2 here), then a FIFO queue with automatic promotion', () => {
   const { conn, tick, arena, clock } = setup({ maxPlayers: 2, graceMs: 1000 });
   const [a, b, c, d] = [conn(), conn(), conn(), conn()];
   a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 0 });
@@ -178,12 +179,12 @@ test('12 slots, then a FIFO queue with automatic promotion', () => {
   assert.deepEqual(a.last('lobby').queue.map(q => q.name), ['C', 'D']);
   arena.disconnect(a.conn);                         // A drops: slot held for the grace period
   tick(10);
-  assert.equal(arena.activeCount(), 2);
+  assert.equal(roomOf(arena).activeCount(), 2);
   clock.advance(1000); tick(1);                     // grace over: C is promoted
   assert.ok(c.events().some(e => e.type === 'leave' && e.id === 1));
   assert.ok(c.events().some(e => e.type === 'join' && e.id === 3));
   assert.equal(arena.recs.get(3).state, 'play');
-  assert.equal(arena.queuePos(arena.recs.get(4)), 1);
+  assert.equal(roomOf(arena).queuePos(arena.recs.get(4)), 1);
   tick(2);
   assert.ok(c.last('snapshot').me, 'promoted player gets its own state');
 });
@@ -194,7 +195,7 @@ test('resume within the 5 s grace period keeps the slot and score; after it the 
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 2 });
   const { token, id } = a.last('welcome');
   tick(5);
-  Sim.getPlayer(arena.state, id).score = 3;
+  Sim.getPlayer(roomOf(arena).state, id).score = 3;
   arena.disconnect(a.conn);
   clock.advance(4000); tick(1);
   const a2 = conn(); a2.say({ t: 'hello', name: 'A', color: 2, token });
@@ -216,7 +217,7 @@ test('a queued player who resumes into a free slot is promoted at once', () => {
   assert.equal(b.last('welcome').state, 'queue');
   arena.disconnect(b.conn);                         // B drops while queued
   arena.kick(a.conn, 'idle');                       // the slot frees; B is away, so nobody is promoted
-  assert.equal(arena.activeCount(), 0);
+  assert.equal(roomOf(arena).activeCount(), 0);
   const b2 = conn(); b2.say({ t: 'hello', name: 'B', color: 1, token });
   assert.equal(b2.last('welcome').resumed, true);
   assert.equal(b2.last('welcome').state, 'play');
@@ -228,7 +229,7 @@ test('one address churning connect + hello + close cannot hold more than maxPerI
   const { conn, tick, arena } = setup({ maxPlayers: 12, maxPerIp: 3 });
   for (let i = 0; i < 20; i++) { const c = conn(); c.say({ t: 'hello', name: 'X', color: 0 }); arena.disconnect(c.conn); }
   assert.equal(arena.recs.size, 3, 'older away records from the same address are released');
-  assert.equal(arena.activeCount(), 3);
+  assert.equal(roomOf(arena).activeCount(), 3);
   tick(1);
   // connected players from one address are never evicted by this
   const live = [conn(), conn(), conn()];
@@ -237,7 +238,7 @@ test('one address churning connect + hello + close cannot hold more than maxPerI
   assert.ok(live.every(c => c.last('welcome').id && arena.recs.get(c.last('welcome').id).conn === c.conn));
   // another address is unaffected
   const other = arena.connect({ ip: 'other', send() {}, close() {} });
-  arena.onMessage(other, JSON.stringify({ t: 'hello', name: 'Z', color: 0 }));
+  arena.onMessage(other, JSON.stringify(withRoom(arena, { t: 'hello', name: 'Z', color: 0 })));
   assert.equal(arena.recs.size, 4);
 });
 
@@ -257,6 +258,7 @@ test('leave frees the slot at once, keeps the connection as a viewer, and promot
   assert.equal(b.last('welcome').state, 'queue');
   tick(5);
   const token = a.last('welcome').token;
+  a.say({ t: 'admin', id: 2 });                      // A is the room's admin: it hands the role on first (SPEC §17)
   a.say({ t: 'leave' });
   assert.equal(a.closed, null, 'the connection stays open');
   assert.equal(arena.recs.has(1), false);
@@ -269,7 +271,7 @@ test('leave frees the slot at once, keeps the connection as a viewer, and promot
   const w = a.last('welcome');
   assert.equal(w.resumed, false); assert.equal(w.id, 3); assert.equal(w.state, 'queue');
   a.say({ t: 'leave' });
-  assert.equal(arena.queue.length, 0, 'leaving the queue gives up the place');
+  assert.equal(roomOf(arena).queue.length, 0, 'leaving the queue gives up the place');
 });
 
 test('heartbeat: a silent lobby viewer is closed after 5 s with the timeout code, not a kick', () => {
@@ -313,7 +315,7 @@ test('heartbeat: a silent player is dropped, kept for the 5 s grace, then releas
   assert.equal(a.closed.code, NET.timeoutClose);
   const rec = arena.recs.get(id);
   assert.ok(rec && rec.conn === null && rec.state === 'play', 'record kept, away');
-  assert.ok(Sim.getPlayer(arena.state, id), 'still in the world during the grace period');
+  assert.ok(Sim.getPlayer(roomOf(arena).state, id), 'still in the world during the grace period');
   const ev = events.list(50);
   assert.ok(ev.some(e => e.type === 'timeout' && e.player === id));
   assert.ok(ev.some(e => e.type === 'drop' && e.player === id), 'the normal drop path');
@@ -323,7 +325,7 @@ test('heartbeat: a silent player is dropped, kept for the 5 s grace, then releas
   assert.ok(arena.recs.has(id), 'not released before the grace period ends');
   clock.advance(400); tick(1);
   assert.ok(!arena.recs.has(id), 'released');
-  assert.equal(Sim.getPlayer(arena.state, id), null);
+  assert.equal(Sim.getPlayer(roomOf(arena).state, id), null);
   assert.ok(b.events().some(e => e.type === 'leave' && e.id === id && e.reason === 'timeout'));
   assert.equal(b.closed, null, 'the pinging player is untouched');
 });
@@ -335,7 +337,7 @@ test('heartbeat: a pinging player with no input is kept (until the 120 s idle ki
   for (let i = 0; i < 60; i++) { clock.advance(1000); tick(1); }
   assert.equal(a.closed, null);
   assert.equal(arena.recs.get(id).conn, a.conn);
-  assert.equal(arena.activeCount(), 1);
+  assert.equal(roomOf(arena).activeCount(), 1);
 });
 
 test('heartbeat: a timed-out player resumes inside 5 s; at 6 s an automatic resume is refused', () => {
@@ -343,7 +345,7 @@ test('heartbeat: a timed-out player resumes inside 5 s; at 6 s an automatic resu
   const a = conn({ silent: true }); a.say({ t: 'hello', name: 'A', color: 2 });
   const { token, id } = a.last('welcome');
   tick(5);
-  Sim.getPlayer(arena.state, id).score = 2;
+  Sim.getPlayer(roomOf(arena).state, id).score = 2;
   clock.advance(5000); tick(1);
   assert.equal(a.closed.code, NET.timeoutClose);
   clock.advance(4000); tick(1);
@@ -358,7 +360,7 @@ test('heartbeat: a timed-out player resumes inside 5 s; at 6 s an automatic resu
   const w = a3.last('welcome');
   assert.equal(w.resumed, false); assert.equal(w.expired, true); assert.equal(w.id, undefined, 'not joined');
   assert.equal(a3.closed, null, 'stays a lobby viewer');
-  assert.equal(arena.activeCount(), 0);
+  assert.equal(roomOf(arena).activeCount(), 0);
   // a manual join with the dead token (no resume flag) joins afresh
   a3.say({ t: 'hello', name: 'A', color: 2, token });
   assert.equal(a3.last('welcome').resumed, false); assert.notEqual(a3.last('welcome').id, id);
@@ -375,7 +377,7 @@ test('idle for 120 s goes back to the lobby', () => {
   assert.equal(a.closed, null, 'input resets the idle timer');
   clock.advance(2000); tick(1);
   assert.equal(a.last('kick').reason, 'idle'); assert.equal(a.closed.code, KICK.idle);
-  assert.equal(arena.activeCount(), 0);
+  assert.equal(arena.recs.size, 0); assert.equal(arena.rooms.size, 0, 'its last human gone, the room closed');
 });
 
 test('input flood: excess dropped, sustained flood kicked', () => {
@@ -393,7 +395,7 @@ test('lag compensation: a slash is tested against positions rewound by interp de
   const a = conn(), v = conn();
   a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
   tick(100);
-  const st = arena.state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
+  const st = roomOf(arena).state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
   // stand them side by side on the floor, then let history record it
   Object.assign(pa, { x: 60, y: 259, vx: 0, vy: 0, face: 1, iframes: 0 });
   Object.assign(pv, { x: 72, y: 259, vx: 0, vy: 0, iframes: 0 });
@@ -412,15 +414,16 @@ test('long swords: item/pickup events relayed; snapshots carry pickups and long;
   const { conn, tick, arena } = setup({ cfg: { ...DEFAULTS, itemMinTicks: 30, itemMaxTicks: 30 } });
   const a = conn(), b = conn(), viewer = conn();
   a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  viewer.say({ t: 'view', room: 1 });               // a lobby visitor who selected the room
   tick(80);
   const items = a.events().filter(e => e.type === 'item');
   assert.equal(items.length, 2, 'two appeared (30 ticks apart)');
   assert.ok(viewer.events().some(e => e.type === 'item'), 'viewers get item events too');
   let snap = a.last('snapshot');
-  assert.deepEqual(snap.it, arena.state.items.map(i => [i.id, i.x, i.y, 0]), '[id, x, y, kind 0 = long sword]');
+  assert.deepEqual(snap.it, roomOf(arena).state.items.map(i => [i.id, i.x, i.y, 0]), '[id, x, y, kind 0 = long sword]');
   assert.equal(snap.it.length, 2);
   // put A on the first pickup
-  const it = arena.state.items[0], pa = Sim.getPlayer(arena.state, 1);
+  const it = roomOf(arena).state.items[0], pa = Sim.getPlayer(roomOf(arena).state, 1);
   Object.assign(pa, { x: it.x - 5, y: it.y - 13, px: it.x - 5, py: it.y - 13, vx: 0, vy: 0, iframes: 0 });
   tick(2);
   const pick = a.events().find(e => e.type === 'pickup');
@@ -440,12 +443,12 @@ test('long swords: item/pickup events relayed; snapshots carry pickups and long;
   assert.equal(cs.p.find(r => r[0] === 1)[8] & 8, 8);
   assert.ok(JSON.stringify(cs).length < 2000, 'snapshot size stays small');
   // admin state shows pickups and holders
-  const adm = arena.adminState();
+  const adm = arena.adminState().rooms[0];
   assert.deepEqual(adm.items.map(i => i.id), [items[1].id]);
   assert.equal(adm.players.find(p => p.id === 1).long, true);
   assert.equal(adm.players.find(p => p.id === 2).long, false);
   // the holder dies: the flag goes on every client's next snapshot, and the kill says it was held
-  const kills = Sim.killPlayer(arena.state, 1, 'self');
+  const kills = Sim.killPlayer(roomOf(arena).state, 1, 'self');
   assert.equal(kills[0].held, true);
   tick(2);
   assert.equal(c.last('snapshot').p.find(r => r[0] === 1)[8] & 8, 0);
@@ -458,7 +461,7 @@ test('lag compensation with a long sword: the rewound check uses the longer box'
     const a = conn(), v = conn();
     a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
     tick(100);
-    const st = arena.state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
+    const st = roomOf(arena).state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
     st.itemT = 1e9;
     Object.assign(pa, { x: 60, y: 259, vx: 0, vy: 0, face: 1, iframes: 0, long });
     Object.assign(pv, { x: 90, y: 259, vx: 0, vy: 0, iframes: 0 });   // beyond standard reach (78), inside long (96.8)
@@ -475,8 +478,9 @@ test('ninja stars: the throw bit passes input validation, bit 64 does not; snaps
   const { conn, tick, arena } = setup();
   const a = conn(), v = conn(), w = conn();                // w: a lobby viewer
   a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
+  w.say({ t: 'view', room: 1 });
   tick(4);
-  const st = arena.state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
+  const st = roomOf(arena).state, pa = Sim.getPlayer(st, 1), pv = Sim.getPlayer(st, 2);
   st.itemT = 1e9; st.starT = 1e9;
   Object.assign(pa, { x: 40, y: 259, px: 40, py: 259, vx: 0, vy: 0, face: 1, iframes: 0, stars: 2 });
   Object.assign(pv, { x: 150, y: 259, px: 150, py: 259, vx: 0, vy: 0, iframes: 0 });
@@ -509,7 +513,7 @@ test('ninja stars: the throw bit passes input validation, bit 64 does not; snaps
   // admin state lists star pickups, stars in flight and counts
   a.say({ t: 'input', seq: 3, keys: KEY.THROW });
   tick(1);
-  const ad = arena.adminState();
+  const ad = arena.adminState().rooms[0];
   assert.ok(ad.items.some(i => i.id === 90 && i.kind === 'star'));
   assert.equal(ad.stars.length, 1); assert.equal(ad.stars[0].owner, 1);
   assert.equal(ad.players.find(p => p.id === 1).stars, 0);
@@ -524,8 +528,8 @@ test('kills send score events and credit survives a leave', () => {
   const a = conn(), v = conn();
   a.say({ t: 'hello', name: 'A', color: 0 }); v.say({ t: 'hello', name: 'V', color: 1 });
   tick(100);
-  const pv = Sim.getPlayer(arena.state, 2);
-  pv.lastHitBy = 1; pv.lastHitTick = arena.state.tick;
+  const pv = Sim.getPlayer(roomOf(arena).state, 2);
+  pv.lastHitBy = 1; pv.lastHitTick = roomOf(arena).state.tick;
   arena.kick(v.conn, 'malformed');                // a kick releases at once: last hitter scores
   const evs = a.events();
   const kill = evs.find(e => e.type === 'kill');
@@ -647,6 +651,7 @@ test('no two fighters share a colour; a queued player gets a free one on promoti
   c.say({ t: 'leave' });                       // D is promoted; 11 is free again, so D keeps it
   assert.equal(arena.recs.get(4).state, 'play'); assert.equal(arena.recs.get(4).color, 11);
   const e = conn(); e.say({ t: 'hello', name: 'E', color: 11 });
+  a.say({ t: 'admin', id: 2 });                // the admin hands over before leaving (SPEC §17)
   a.say({ t: 'leave' });                       // E is promoted while D wears 11: wraps to 0
   assert.equal(arena.recs.get(5).color, 0);
   const worn = [...arena.recs.values()].filter(r => r.state === 'play').map(r => r.color);
@@ -659,11 +664,12 @@ function chatSetup(opts) {
   const s = setup(opts);
   const a = s.conn(), b = s.conn(), v = s.conn();
   a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  v.say({ t: 'view', room: 1 });   // a lobby visitor who selected the room
   const chats = c => c.events().filter(e => e.type === 'chat');
   return { ...s, a, b, v, chats };
 }
 
-test('chat is relayed as an event to players and lobby viewers alike', () => {
+test('chat is relayed as an event to the room\'s players and its lobby viewers alike', () => {
   const { a, b, v, chats } = chatSetup();
   a.say({ t: 'chat', text: 'hello world' });
   for (const c of [a, b, v]) assert.deepEqual(chats(c), [{ type: 'chat', id: 1, text: 'hello world' }]);
@@ -757,12 +763,14 @@ test('a freed name passes to its #2 holder: everyone is told, the lobby and welc
   b.say({ t: 'hello', name: 'sean', color: 1 });
   const bid = b.last('welcome').id;
   assert.equal(b.last('welcome').name, 'sean#2');
+  v.say({ t: 'view', room: 1 });
+  a.say({ t: 'admin', id: bid });            // the admin hands over before leaving (SPEC §17)
   a.say({ t: 'leave' });
   for (const c of [a, b, v]) assert.ok(c.events().some(e => e.type === 'rename' && e.id === bid && e.name === 'sean'), 'rename broadcast');
   assert.equal(arena.recs.get(bid).name, 'sean');
-  assert.ok(logs.some(s => s === `rename id=${bid} from=sean#2 to=sean`));
+  assert.ok(logs.some(s => s === `rename id=${bid} from=sean#2 to=sean room=1`));
   assert.ok(events.all().some(e => e.type === 'rename' && e.player === bid));
-  assert.equal(arena.adminState().players.find(p => p.id === bid).name, 'sean');
+  assert.equal(arena.adminState().rooms[0].players.find(p => p.id === bid).name, 'sean');
   tick(40);
   assert.equal(v.last('lobby').players.find(p => p.id === bid).name, 'sean');
   // the next one to ask for Sean gets #2 again
@@ -804,6 +812,7 @@ test('three holders: only the lowest suffix is renamed; a freed #2 is not passed
   assert.deepEqual(names(), ['Sean', 'Sean#2', undefined, 'Sean#4']);
   b.say({ t: 'leave' });                    // Sean#2 goes: still nobody moves
   assert.deepEqual(names(), ['Sean', undefined, undefined, 'Sean#4']);
+  a.say({ t: 'admin', id: ids[3] });        // the admin hands over before leaving (SPEC §17)
   a.say({ t: 'leave' });                    // Sean goes: the lowest remaining suffix takes it
   assert.deepEqual(names(), [undefined, undefined, undefined, 'Sean']);
 });
@@ -814,6 +823,7 @@ test('a queued holder is renamed too, and keeps the name when promoted', () => {
   a.say({ t: 'hello', name: 'Sean', color: 0 });
   b.say({ t: 'hello', name: 'Sean', color: 1 });
   assert.equal(b.last('welcome').state, 'queue');
+  a.say({ t: 'admin', id: b.last('welcome').id });   // a queued human can be made admin too
   a.say({ t: 'leave' });
   const ev = b.events();
   const ri = ev.findIndex(e => e.type === 'rename'), ji = ev.findIndex(e => e.type === 'join' && e.id === b.last('welcome').id);

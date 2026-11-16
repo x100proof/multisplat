@@ -1,104 +1,128 @@
 // AI players (SPEC §15): the lobby control, slots, the reserved colour and the brain, headless.
 import test from 'node:test';
+import { roomOf, withRoom } from './lib.js';
 import assert from 'node:assert/strict';
 import { Arena, KICK } from '../server/arena.js';
+import { Room } from '../server/room.js';
 import { newBrain, botKeys, navOf, surfaceAt } from '../server/ai.js';
 import * as Sim from '../shared/sim.js';
 import { KEY, NET, BOT, COLORS, PALETTE, PW, PH, DEFAULTS } from '../shared/constants.js';
 import { LEVEL } from '../shared/level.js';
 
-// An arena on a fake clock with fake connections (no heartbeat: these tests are about bots).
+// Every event a room broadcasts, for the assertions below (rooms send only to their own viewers).
+let sent = [];
+const roomBroadcast = Room.prototype.broadcastEvents;
+Room.prototype.broadcastEvents = function (evs) { sent.push(...evs); return roomBroadcast.call(this, evs); };
+
+// An arena on a fake clock with fake connections (no heartbeat: these tests are about bots). A bare
+// hello joins the newest room (made on demand, test/lib.js withRoom); its first human is the admin,
+// the only one who may ask for bots (SPEC §17).
 function setup(opts = {}) {
   let t = 1000;
   const evlog = [];
   const arena = new Arena({ now: () => t, seed: 7, heartbeatMs: 0, event: (type, conn, data) => evlog.push({ type, conn, ...data }), ...opts });
-  const sent = [];
-  const orig = arena.broadcastEvents.bind(arena);
-  arena.broadcastEvents = evs => { sent.push(...evs); orig(evs); };
+  sent = [];
   const conn = (ip = 'test') => {
     const c = { msgs: [], closed: null };
     c.conn = arena.connect({ ip, send: s => c.msgs.push(JSON.parse(s)), close: (code, reason) => { c.closed = { code, reason }; } });
-    c.say = m => arena.onMessage(c.conn, JSON.stringify(m));
+    c.say = m => arena.onMessage(c.conn, JSON.stringify(withRoom(arena, m)));
     c.last = ty => [...c.msgs].reverse().find(m => m.t === ty);
     return c;
   };
+  const admin = (name = 'Boss', ip = 'adm') => { const c = conn(ip); c.say({ t: 'hello', name, color: 0 }); return c; };
+  const room = () => roomOf(arena) || arena.createRoom('Test');
   const advance = ms => { t += ms; };
   const ticks = n => { for (let i = 0; i < n; i++) { t += 1000 / 60; arena.tick(); } };
-  return { arena, conn, advance, ticks, sent, evlog };
+  return { arena, conn, admin, room, advance, ticks, sent, evlog };
 }
 
-test('bots: + and - from any connection, the count is in every lobby message', () => {
-  const { arena, conn, advance, ticks } = setup();
-  const a = conn(), b = conn();
+test('bots: + and - from the room admin only, the count is in every lobby message', () => {
+  const { arena, conn, admin, advance, ticks } = setup();
+  const a = admin(), b = conn(), v = conn();
+  b.say({ t: 'hello', name: 'Bea', color: 1 });
+  v.say({ t: 'view', room: 1 });
   a.say({ t: 'bots', d: 1 });
-  assert.equal(arena.bots.length, 1);
+  assert.equal(roomOf(arena).bots.length, 1);
   assert.equal(a.last('lobby').bots, 1);                       // the sender hears at once
   assert.equal(a.last('lobby').botMax, NET.maxPlayers - 1);
+  assert.equal(NET.maxPlayers - 1, 7, 'bots count toward the 8 slots: at most 7');
   ticks(1);
-  assert.equal(b.last('lobby').bots, 1);                       // everyone else with the next broadcast
-  const bot = b.last('lobby').players.find(p => p.bot);
+  for (const c of [b, v]) assert.equal(c.last('lobby').bots, 1);   // everyone else with the next broadcast
+  const bot = v.last('lobby').players.find(p => p.bot);
   assert.equal(bot.name, 'AI 1'); assert.equal(bot.color, BOT.color); assert.equal(bot.away, false);
+  b.say({ t: 'bots', d: 1 }); v.say({ t: 'bots', d: 1 });      // not the admin: refused, no kick
+  assert.equal(roomOf(arena).bots.length, 1);
+  assert.deepEqual(b.last('refused'), { t: 'refused', what: 'bots', why: 'admin' });
+  assert.equal(v.last('refused').why, 'admin');
+  assert.equal(b.closed, null); assert.equal(v.closed, null);
   advance(1000);
-  b.say({ t: 'bots', d: 1 }); b.say({ t: 'bots', d: 1 });
-  assert.deepEqual(arena.bots.map(r => r.name), ['AI 1', 'AI 2', 'AI 3']);
-  b.say({ t: 'bots', d: -1 });                                // the newest goes first
-  assert.deepEqual(arena.bots.map(r => r.name), ['AI 1', 'AI 2']);
+  a.say({ t: 'bots', d: 1 }); a.say({ t: 'bots', d: 1 });
+  assert.deepEqual(roomOf(arena).bots.map(r => r.name), ['AI 1', 'AI 2', 'AI 3']);
+  a.say({ t: 'bots', d: -1 });                                // the newest goes first
+  assert.deepEqual(roomOf(arena).bots.map(r => r.name), ['AI 1', 'AI 2']);
   advance(1000);
   a.say({ t: 'bots', n: 0 });
-  assert.equal(arena.bots.length, 0);
-  assert.equal(arena.state.players.length, 0);
+  assert.equal(roomOf(arena).bots.length, 0);
+  assert.equal(roomOf(arena).state.players.length, 2, 'only the two humans are left');
   a.say({ t: 'bots', d: -1 });                                // - at zero: nothing, no kick
   assert.equal(a.closed, null);
+  // after a transfer the new admin may, the old one may not
+  a.say({ t: 'admin', id: b.last('welcome').id });
+  advance(1000);
+  a.say({ t: 'bots', d: 1 }); assert.equal(roomOf(arena).bots.length, 0);
+  b.say({ t: 'bots', d: 1 }); assert.equal(roomOf(arena).bots.length, 1);
 });
 
-test('bots: count limits, at most slots - 1, and + is refused when no slot is free', () => {
-  const { arena, conn, advance } = setup();
-  const a = conn();
+test('bots: 8 slots per room include bots: at most slots - 1, and + is refused when no slot is free', () => {
+  const { arena, conn, admin, advance } = setup();
+  const a = admin();
   a.say({ t: 'bots', n: NET.maxPlayers - 1 });
-  assert.equal(arena.bots.length, NET.maxPlayers - 1);
+  assert.equal(roomOf(arena).bots.length, 7);
+  assert.equal(roomOf(arena).activeCount(), 8, 'the admin and 7 bots fill the room');
   advance(2000);
   a.say({ t: 'bots', d: 1 });                                 // at botMax
-  assert.equal(arena.bots.length, NET.maxPlayers - 1);
+  assert.equal(roomOf(arena).bots.length, 7);
   const h = conn();
-  h.say({ t: 'hello', name: 'Kit', color: 0 });               // the last slot goes to a human
-  assert.equal(h.last('welcome').state, 'play');
-  assert.equal(arena.activeCount(), NET.maxPlayers);
+  h.say({ t: 'hello', name: 'Kit', color: 1 });               // a full room: humans queue, bots are not evicted
+  assert.equal(h.last('welcome').state, 'queue');
   advance(2000);
-  a.say({ t: 'bots', n: 3 });
-  assert.equal(arena.bots.length, 3);
+  a.say({ t: 'bots', n: 3 });                                 // 4 bots go: Kit is promoted
+  assert.equal(roomOf(arena).bots.length, 3);
+  assert.equal(arena.recs.get(h.last('welcome').id).state, 'play');
   advance(2000);
-  for (let i = 0; i < 8; i++) conn('ip' + i).say({ t: 'hello', name: 'P' + i, color: i % COLORS.length });   // fill the arena
-  assert.equal(arena.activeCount(), NET.maxPlayers);
+  for (let i = 0; i < 3; i++) conn('ip' + i).say({ t: 'hello', name: 'P' + i, color: i % COLORS.length });   // fill the room
+  assert.equal(roomOf(arena).activeCount(), NET.maxPlayers);
   a.say({ t: 'bots', d: 1 });                                 // full: refused, nobody evicted
-  assert.equal(arena.bots.length, 3);
+  assert.equal(roomOf(arena).bots.length, 3);
   const q = conn('q');
-  q.say({ t: 'hello', name: 'Late', color: 1 });             // humans queue as before, bots are not evicted
+  q.say({ t: 'hello', name: 'Late', color: 1 });
   assert.equal(q.last('welcome').state, 'queue');
-  assert.equal(arena.bots.length, 3);
   advance(2000);
   a.say({ t: 'bots', d: -1 });                                // a removed bot's slot goes to the queue
-  assert.equal(arena.bots.length, 2);
+  assert.equal(roomOf(arena).bots.length, 2);
   assert.equal(arena.recs.get(q.last('welcome').id).state, 'play');
 });
 
 test('bots: malformed requests are kicks, floods are dropped then kicked', () => {
-  for (const bad of [{}, { d: 2 }, { d: '1' }, { n: -1 }, { n: 12 }, { n: 1.5 }, { d: 1, n: 1 }, { n: null }]) {
+  for (const bad of [{}, { d: 2 }, { d: '1' }, { n: -1 }, { n: 8 }, { n: 1.5 }, { d: 1, n: 1 }, { n: null }]) {
     const { conn } = setup();
     const c = conn();
     c.say({ t: 'bots', ...bad });
     assert.equal(c.closed && c.closed.code, KICK.malformed, JSON.stringify(bad));
   }
-  const { arena, conn, advance } = setup();
-  const c = conn();
-  for (let i = 0; i < 10; i++) c.say({ t: 'bots', d: 1 });   // 10/s message bucket, 4-burst bot bucket
-  assert.equal(arena.bots.length, BOT.burst);
-  assert.ok(c.conn.dropCount >= 10 - BOT.burst);
+  const { arena, admin } = setup();
+  const c = admin();
+  for (let i = 0; i < 9; i++) c.say({ t: 'bots', d: 1 });    // 10/s message bucket (the hello took one), 4-burst bot bucket
+  assert.equal(roomOf(arena).bots.length, BOT.burst);
+  assert.ok(c.conn.dropCount >= 9 - BOT.burst);
   assert.equal(c.closed, null);                               // a few drops are no kick
 });
 
-test('bots: the arena-wide budget caps bot changes per second', () => {
+test('bots: the server-wide budget caps bot changes per second, across rooms', () => {
   const { arena, conn, evlog } = setup();
   const cs = Array.from({ length: 10 }, (_, i) => conn('ip' + i));
+  cs.forEach((c, i) => c.say({ t: 'create', name: 'P' + i, color: 0 }));
+  assert.equal(arena.rooms.size, 10);
   for (let r = 0; r < 4; r++) for (const c of cs) c.say({ t: 'bots', d: r % 2 ? -1 : 1 });
   const changed = evlog.filter(e => e.type === 'bots').reduce((s, e) => s + e.changed, 0);
   assert.ok(changed <= BOT.globalBurst, `changed ${changed}`);
@@ -113,34 +137,35 @@ test('bots: the reserved colour is not in the human palette and a human hello wi
   assert.equal(c.closed && c.closed.code, KICK['bad hello']);
   assert.equal(arena.recs.size, 0);
   // and a human never gets it handed out by the free-colour rule, even among many bots
-  const { arena: a2, conn: conn2 } = setup();
-  conn2().say({ t: 'bots', n: 4 });
+  const { arena: a2, conn: conn2, admin: admin2 } = setup();
+  admin2().say({ t: 'bots', n: 4 });
   const h = conn2('h');
   h.say({ t: 'hello', name: 'Kit', color: 3 });
   assert.equal(h.last('welcome').color, 3);
-  for (const r of a2.bots) assert.equal(r.color, BOT.color);
+  for (const r of roomOf(a2).bots) assert.equal(r.color, BOT.color);
 });
 
 test('bots: names respect the #suffix rule and the debug views show them', () => {
-  const { arena, conn } = setup();
-  const h = conn();
-  h.say({ t: 'hello', name: 'AI 1', color: 0 });
-  conn('v').say({ t: 'bots', d: 1 });
-  assert.equal(arena.bots[0].name, 'AI 1#2');
-  const s = arena.adminState();
+  const { arena, admin } = setup();
+  const h = admin('AI 1');
+  h.say({ t: 'bots', d: 1 });
+  assert.equal(roomOf(arena).bots[0].name, 'AI 1#2');
+  const s = arena.adminState().rooms[0];
   assert.equal(s.bots, 1);
   const bv = s.players.find(p => p.bot);
-  assert.equal(bv.state, 'play (bot)'); assert.equal(bv.conn, null);
+  assert.equal(bv.state, 'play (bot)'); assert.equal(bv.conn, null); assert.equal(bv.room, 1);
+  assert.equal(s.admin.name, 'AI 1');
   assert.equal(arena.viewByToken(null), null);
 });
 
 test('bots: never idle-kicked, never timed out, and not counted toward a per-IP cap', () => {
-  const { arena, conn, advance, ticks } = setup({ maxPerIp: 1, idleMs: 1000, graceMs: 500 });
-  conn().say({ t: 'bots', n: 2 });
-  advance(5000); ticks(5);
-  assert.equal(arena.bots.length, 2);
+  const { arena, conn, admin, advance, ticks } = setup({ maxPerIp: 1, idleMs: 1000, graceMs: 500 });
+  const a = admin('Boss', 'test');
+  a.say({ t: 'bots', n: 2 });
+  for (let i = 1; i <= 10; i++) { a.say({ t: 'input', seq: i, keys: KEY.LEFT }); advance(600); ticks(1); }   // the admin keeps moving
+  assert.equal(roomOf(arena).bots.length, 2);
   const h = conn();
-  h.say({ t: 'hello', name: 'Kit', color: 0 });
+  h.say({ t: 'hello', name: 'Kit', color: 1 });
   assert.equal(h.last('welcome').state, 'play');
 });
 
@@ -196,12 +221,12 @@ test('ai: climbs to an opponent on a higher surface', () => {
   // at running speed and slides off); it gets up by detouring for pickups, so whether it arrives in
   // time depends on where pickups appear, i.e. on the seed. Seed 3 does; seed 7 did until star
   // bundles (SPEC §5.2) added an RNG draw per star pickup.
-  const { arena, ticks } = setup({ seed: 3 });
-  arena.addBot();
-  const st = arena.state, nav = navOf(arena.level, arena.cfg);
+  const { arena, ticks, room } = setup({ seed: 3 });
+  room().addBot();
+  const st = roomOf(arena).state, nav = navOf(arena.level, arena.cfg);
   // a dummy (no brain, no inputs) standing on the high left plank
   Sim.addPlayer(st, 99);
-  const bot = Sim.getPlayer(st, arena.bots[0].id);
+  const bot = Sim.getPlayer(st, roomOf(arena).bots[0].id);
   standAt(st, bot.id, 40, (LEVEL.h - 1) * 16);
   const dummy = standAt(st, 99, 100, 3 * 16); dummy.iframes = 0;
   let reached = false;
@@ -218,10 +243,10 @@ test('ai: bots kill each other, kill a passive human and can be killed (60 s hea
   const h = conn();
   h.say({ t: 'hello', name: 'Kit', color: 0 });
   const hid = h.last('welcome').id;
-  arena.addBot(); arena.addBot(); arena.addBot();
+  roomOf(arena).addBot(); roomOf(arena).addBot(); roomOf(arena).addBot();
   ticks(3600);
   const kills = sent.filter(e => e.type === 'kill');
-  const isBot = id => arena.bots.some(r => r.id === id);
+  const isBot = id => roomOf(arena).bots.some(r => r.id === id);
   assert.ok(kills.some(e => isBot(e.killer) && isBot(e.victim)), 'bot kills bot');
   assert.ok(kills.some(e => isBot(e.killer) && e.victim === hid), 'bot kills human');
   // bots respawn like players
@@ -234,13 +259,13 @@ test('ai: a human that fights back kills bots', () => {
   const h = conn();
   h.say({ t: 'hello', name: 'Kit', color: 0 });
   const hid = h.last('welcome').id;
-  arena.addBot(); arena.addBot();
+  roomOf(arena).addBot(); roomOf(arena).addBot();
   // the "human": an un-delayed copy of the bot brain, swinging at every chance (no hesitation)
   const brain = newBrain(1); brain.delay = 0; brain.aggr = 1;
   let seq = 0;
   for (let i = 0; i < 3600; i++) {
-    const me = Sim.getPlayer(arena.state, hid);
-    h.say({ t: 'input', seq: seq++, keys: botKeys(brain, me, arena.state, null) });
+    const me = Sim.getPlayer(roomOf(arena).state, hid);
+    h.say({ t: 'input', seq: seq++, keys: botKeys(brain, me, roomOf(arena).state, null) });
     ticks(1);
   }
   assert.ok(sent.some(e => e.type === 'kill' && e.killer === hid), 'human kills a bot');
@@ -248,36 +273,38 @@ test('ai: a human that fights back kills bots', () => {
 
 test('ai: deterministic: the same seed gives the same fight, and the sim stays deterministic', () => {
   const run = () => {
-    const { arena, ticks, sent } = setup();
-    for (let i = 0; i < 4; i++) arena.addBot();
+    const { arena, ticks, sent, room } = setup();
+    for (let i = 0; i < 4; i++) room().addBot();
     ticks(1200);
-    return JSON.stringify([Sim.serialize(arena.state), sent.filter(e => e.type === 'kill')]);
+    return JSON.stringify([Sim.serialize(roomOf(arena).state), sent.filter(e => e.type === 'kill')]);
   };
   assert.equal(run(), run());
   // bots act only through their key masks: replaying the masks into a bare sim gives the same world
-  const { arena, ticks } = setup();
-  for (let i = 0; i < 4; i++) arena.addBot();
-  const ids = arena.bots.map(r => r.id), masks = [];
-  for (let i = 0; i < 900; i++) { ticks(1); masks.push(new Map(arena.bots.map(r => [r.id, r.lastKeys]))); }
+  const { arena, ticks, room } = setup();
+  for (let i = 0; i < 4; i++) room().addBot();
+  const ids = roomOf(arena).bots.map(r => r.id), masks = [];
+  for (let i = 0; i < 900; i++) { ticks(1); masks.push(new Map(roomOf(arena).bots.map(r => [r.id, r.lastKeys]))); }
   const w = Sim.createWorld({ seed: 7 });
   for (const id of ids) Sim.addPlayer(w, id);
   for (const m of masks) Sim.step(w, m);
-  assert.equal(Sim.serialize(w), Sim.serialize(arena.state));
+  assert.equal(Sim.serialize(w), Sim.serialize(roomOf(arena).state));
 });
 
-test('bots: a freed name passes between humans and bots', () => {
-  const { arena, conn, sent } = setup();
+test('bots: a freed name passes between humans and bots (in one room)', () => {
+  const { arena, conn, admin, advance, sent } = setup();
+  const a = admin();
   const h = conn();
-  h.say({ t: 'hello', name: 'AI 1', color: 0 });
-  conn('v').say({ t: 'bots', d: 1 });
-  const bot = arena.bots[0];
+  h.say({ t: 'hello', name: 'AI 1', color: 1 });
+  a.say({ t: 'bots', d: 1 });
+  const bot = roomOf(arena).bots[0];
   assert.equal(bot.name, 'AI 1#2');
   h.say({ t: 'leave' });                       // the human goes: the bot becomes "AI 1"
   assert.equal(bot.name, 'AI 1');
   assert.ok(sent.some(e => e.type === 'rename' && e.id === bot.id && e.name === 'AI 1'));
-  const h2 = conn(); h2.say({ t: 'hello', name: 'ai 1', color: 0 });
+  const h2 = conn(); h2.say({ t: 'hello', name: 'ai 1', color: 1 });
   assert.equal(h2.last('welcome').name, 'ai 1#2');
-  conn('v').say({ t: 'bots', d: -1 });          // the bot goes: the human becomes "ai 1"
+  advance(1000);
+  a.say({ t: 'bots', d: -1 });                 // the bot goes: the human becomes "ai 1"
   assert.equal(arena.recs.get(h2.last('welcome').id).name, 'ai 1');
   assert.ok(sent.some(e => e.type === 'rename' && e.id === h2.last('welcome').id && e.name === 'ai 1'));
 });

@@ -1,21 +1,23 @@
-// The authoritative arena: one shared world, the 60 Hz tick loop, the protocol (SPEC §6.1), the
-// lobby, the 12 slots and the FIFO spectator queue, resume tokens, idle kicks and lag-compensated
-// slashes. It knows nothing about sockets: a connection is any object with send(string) and
+// The authoritative game server without sockets: the protocol (SPEC §6.1), connections, rate limits,
+// the heartbeat, resume tokens, idle kicks, and the rooms (SPEC §17). Up to ROOM.max (10) rooms live
+// at once, each a server/room.js Room with its own world, 8 slots, queue, bots, chat and events; this
+// class creates and closes them, routes every message to the right one and steps them all from one
+// timer. There is no permanent room: a lobby visitor sees the room list, may select a room (then it
+// gets that room's lobby detail, snapshots and events: this is also how Watch works), and joins one
+// with `hello` or creates one with `create`. A connection is any object with send(string) and
 // close(code, reason), so unit tests can drive it with fakes and call tick() by hand.
 // AI players (SPEC §15) are records with `bot: true` and no connection; server/ai.js drives them.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName, cleanChat, CHAT, BOT } from '../shared/constants.js';
-import { newBrain, botKeys, navOf } from './ai.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName, cleanChat, cleanRoomName, defaultRoomName, CHAT, BOT, ROOM } from '../shared/constants.js';
+import { navOf } from './ai.js';
 import { createLogStore } from './logs.js';
 import { isWordId, LOG } from '../shared/logid.js';
+import { Room, r2 } from './room.js';
 
-export const PROTOCOL = 1;
-const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
+// 2: rooms (SPEC §17). hello needs a room id; create, view, rename and admin are new; bots is admin-only.
+export const PROTOCOL = 2;
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
-const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
-const DRAIN_WINDOW = 30;                            // ticks over which a standing input backlog is measured
-const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a skipped input must not lose
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
 const FLOOD_KICK_DROPS = 90;                        // dropped messages within FLOOD_WINDOW_MS → kick
@@ -28,25 +30,33 @@ export const KICK = Object.freeze({
   replaced: 4007, shutdown: 4008,
 });
 
-const r2 = v => Math.round(v * 100) / 100;
+// A token bucket kept on an object: true (and one token spent) if a token was there.
+function take(holder, key, burst, refillMs, now) {
+  const b = holder[key] || (holder[key] = { tokens: burst, at: now });
+  b.tokens = Math.min(burst, b.tokens + (now - b.at) / refillMs); b.at = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
 
 export class Arena {
   constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
     maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, heartbeatMs = NET.heartbeatMs,
-    maxPerIp = Infinity, seed, build = '', logs = createLogStore() } = {}) {
+    maxPerIp = Infinity, seed, build = '', logs = createLogStore(), maxRooms = ROOM.max, roomsPerIp = ROOM.perIp } = {}) {
     this.logs = logs;     // the streamed client logs, per word id (SPEC §13.5; server/logs.js)
     this.build = build;   // the server's build id, sent in every welcome (SPEC §10)
     this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
     this.heartbeatMs = heartbeatMs;   // 0 or Infinity: no heartbeat (never used by the server itself)
-    this.state = Sim.createWorld({ seed: seed ?? (randomBytes(4).readUInt32BE() % 2147483646) + 1 });
-    this.hist = Sim.createHistory();
+    this.maxRooms = maxRooms; this.roomsPerIp = roomsPerIp;
+    this.seed = seed;     // tests pin it: room n then gets seed + n - 1; otherwise each room draws its own
+    this.tickNo = 0;      // the one tick number every room shares (each room steps once per tick)
+    this.rooms = new Map();       // room id -> Room, in creation order
+    this.nextRoom = 1;
     this.conns = new Set();
-    this.recs = new Map();        // player id -> record (active, queued or waiting for a resume)
+    this.recs = new Map();        // player id -> record, every room (ids are global and never reused)
     this.tokens = new Map();      // resume token -> record (never logged or stored)
-    this.queue = [];              // queued records, FIFO
-    this.bots = [];               // bot records in the order they were added (SPEC §15)
-    this.botBucket = { tokens: BOT.globalBurst, at: now() };   // arena-wide bot add/remove budget
+    this.botBucket = { tokens: BOT.globalBurst, at: now() };   // server-wide bot add/remove budget (all rooms)
     navOf(level, cfg);            // build the bots' route table now, not on the first + press
     this.nextId = 1; this.nextConn = 1;
     this.lobbyDirty = false; this.lobbyAt = -Infinity;
@@ -54,10 +64,50 @@ export class Arena {
     this.startedAt = now();
   }
 
+  // ---------- rooms (SPEC §17) ----------
+  createRoom(name, creatorIp = null) {
+    const id = this.nextRoom++;
+    const seed = this.seed != null ? this.seed + id - 1 : (randomBytes(4).readUInt32BE() % 2147483646) + 1;
+    const room = new Room(this, { id, name, seed, creatorIp });
+    this.rooms.set(id, room);
+    this.lobbyDirty = true;
+    return room;
+  }
+
+  // The last human is gone for good (left, kicked or the resume grace ran out): the room's bots go,
+  // and everyone still looking at it (watchers, lobby visitors who selected it) is told and goes back
+  // to the room list.
+  closeRoom(room, why) {
+    if (!this.rooms.has(room.id)) return;
+    room.closing = true;
+    for (const b of [...room.bots]) room.release(b, 'room closed');
+    this.rooms.delete(room.id);
+    room.log(`room-close name=${JSON.stringify(room.name)} why=${why}`);
+    room.event('room-close', null, { why });
+    for (const c of [...room.viewers]) {
+      c.room = null;
+      this.send(c, { t: 'closed', room: room.id, name: room.name, why });
+      this.send(c, this.lobbyMsg(c));
+    }
+    room.viewers.clear();
+    this.lobbyDirty = true;
+  }
+
+  // The room this connection looks at (gets snapshots and events from). Members always look at their own.
+  setView(conn, room) {
+    if (conn.room === room) return;
+    if (conn.room) conn.room.viewers.delete(conn);
+    conn.room = room;
+    if (room) room.viewers.add(conn);
+    this.lobbyDirty = true;   // watcher counts changed
+  }
+
+  roomsOfIp(ip) { let n = 0; for (const r of this.rooms.values()) if (r.creatorIp === ip) n++; return n; }
+
   // ---------- connections ----------
   // conn: { send(str), close(code, reason), ip }. Returns the connection record.
   connect(transport) {
-    const conn = { ...transport, id: this.nextConn++, rec: null, rtt: 0, connectedAt: this.now(),
+    const conn = { ...transport, id: this.nextConn++, rec: null, room: null, rtt: 0, connectedAt: this.now(),
       bucket: NET.inputRate, pingBucket: PING_RATE, bucketAt: this.now(), drops: [], dropCount: 0,
       inCount: 0, inRate: 0, rateAt: this.now(), heardAt: this.now(), closed: false };
     // Log identity (SPEC §13.5): the word id the browser offered (transport.word, from the /ws URL)
@@ -66,8 +116,8 @@ export class Arena {
     conn.logBucket = LOG.burst; conn.logAt = this.now(); conn.logDropped = 0;
     this.logs.touch(conn.word, { ip: conn.ip });
     this.conns.add(conn);
-    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS, w: conn.word });
-    this.send(conn, this.lobbyMsg());
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.tickNo, cap: this.maxPlayers, colors: COLORS, w: conn.word });
+    this.send(conn, this.lobbyMsg(conn));
     return conn;
   }
 
@@ -78,8 +128,8 @@ export class Arena {
 
   kick(conn, reason) {
     if (conn.closed) return;
-    this.log(`kick conn=${conn.id} ip=${conn.ip} reason=${reason}`);
-    this.event('kick', conn.id, { reason, player: conn.rec ? conn.rec.id : null });
+    this.log(`kick conn=${conn.id} ip=${conn.ip} reason=${reason}${conn.room ? ` room=${conn.room.id}` : ''}`);
+    this.event('kick', conn.id, { reason, player: conn.rec ? conn.rec.id : null, room: conn.room ? conn.room.id : null });
     this.send(conn, { t: 'kick', reason });
     const rec = conn.rec;
     // A kick ends the player's session: no resume. (Except 'replaced': the record lives on.)
@@ -101,17 +151,18 @@ export class Arena {
     try { conn.close(NET.timeoutClose, 'timeout'); } catch { /* already closed */ }
   }
 
-  // The socket closed (or was kicked). A player keeps its slot for graceMs.
+  // The socket closed (or was kicked). A player keeps its slot (and an admin its role) for graceMs.
   disconnect(conn) {
     if (conn.closed) return;
     conn.closed = true;
     this.conns.delete(conn);
+    this.setView(conn, null);
     this.logs.touch(conn.word);         // last seen
     const rec = conn.rec;
     if (rec && rec.conn === conn) {
       rec.conn = null; rec.discAt = this.now(); rec.inputs.length = 0;
-      this.log(`drop conn=${conn.id} id=${rec.id}`);
-      this.event('drop', conn.id, { player: rec.id });
+      this.log(`drop conn=${conn.id} id=${rec.id} room=${rec.room.id}`);
+      this.event('drop', conn.id, { player: rec.id, room: rec.room.id });
       this.lobbyDirty = true;
     }
   }
@@ -128,6 +179,10 @@ export class Arena {
       case 'input': return this.onInput(conn, m);
       case 'ping': return this.onPing(conn, m);
       case 'hello': return this.onHello(conn, m);
+      case 'create': return this.onCreate(conn, m);
+      case 'view': return this.onView(conn, m);
+      case 'rename': return this.onRename(conn, m);
+      case 'admin': return this.onAdmin(conn, m);
       case 'leave': return this.onLeave(conn);
       case 'chat': return this.onChat(conn, m);
       case 'bots': return this.onBots(conn, m);
@@ -136,10 +191,17 @@ export class Arena {
     }
   }
 
-  // Chat (SPEC §9). Only a player in the arena or the queue may chat; a viewer's message is ignored.
+  // A request the server turned down without a kick (a full server, a closed room, not the admin, a
+  // rate limit, a bad room name …): the client shows `why` (SPEC §17).
+  refuse(conn, what, why) {
+    this.event('refused-req', conn.id, { what, why, room: conn.room ? conn.room.id : null });
+    this.send(conn, { t: 'refused', what, why });
+  }
+
+  // Chat (SPEC §9). Only a player in a room (arena or queue) may chat; a viewer's message is ignored.
   // Per-player token bucket kept on the record (so a reconnect does not refill it): burst 3, one
   // more every 1.5 s. A message over the limit is dropped and counts toward the flood kick. The
-  // text is relayed as an event to every connection and is never logged: only its length is.
+  // text is relayed as an event to the room's viewers and is never logged: only its length is.
   onChat(conn, m) {
     if (typeof m.text !== 'string') return this.kick(conn, 'malformed');
     const rec = conn.rec;
@@ -152,14 +214,15 @@ export class Arena {
     const text = cleanChat(m.text);
     if (!text) return;
     c.tokens -= 1;
-    this.event('chat', conn.id, { player: rec.id, len: Array.from(text).length });
-    this.broadcastEvents([{ type: 'chat', id: rec.id, text }]);
+    this.event('chat', conn.id, { player: rec.id, room: rec.room.id, len: Array.from(text).length });
+    rec.room.broadcastEvents([{ type: 'chat', id: rec.id, text }]);
   }
 
   // Streamed client log (SPEC §13.5): {t:'log', e:[entry…], lost?}. Any connection may send it (lobby
   // viewers too). A non-array `e` is a `malformed` kick; entries past LOG.maxEntries and entries of
   // the wrong shape are dropped and counted in the store. Its own bucket per connection (LOG.burst,
-  // LOG.perSec): a message over it is dropped and counts toward the flood kick.
+  // LOG.perSec): a message over it is dropped and counts toward the flood kick. Entries are tagged
+  // with the room the connection was looking at (SPEC §17).
   onLog(conn, m) {
     if (!Array.isArray(m.e)) return this.kick(conn, 'malformed');
     const now = this.now();
@@ -169,7 +232,7 @@ export class Arena {
     conn.logBucket -= 1;
     const over = Math.max(0, m.e.length - LOG.maxEntries);
     const lost = (Number.isInteger(m.lost) && m.lost > 0 ? m.lost : 0) + over;
-    this.logs.add(conn.word, m.e.slice(0, LOG.maxEntries), { ip: conn.ip, conn: conn.id, lost });
+    this.logs.add(conn.word, m.e.slice(0, LOG.maxEntries), { ip: conn.ip, conn: conn.id, lost, room: conn.room ? conn.room.id : null });
   }
 
   // Drop a rate-limited message: it counts toward the flood kick like allow()'s drops.
@@ -182,65 +245,36 @@ export class Arena {
     if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
   }
 
-  // AI players (SPEC §15): {t:'bots', d: 1|-1} adds or removes one, {t:'bots', n} asks for n in all.
-  // Any connection may send it (lobby viewers too). Anything else in d/n is a `malformed` kick. Each
+  // The room whose admin plays on this connection, or null.
+  adminRoom(conn) {
+    const rec = conn.rec;
+    return rec && rec.room && rec.room.adminId === rec.id ? rec.room : null;
+  }
+
+  // AI players (SPEC §15, §17): {t:'bots', d: 1|-1} adds or removes one, {t:'bots', n} asks for n in
+  // all, in the sender's room. Anything else in d/n is a `malformed` kick. Only the room's admin may
+  // ask; anyone else gets `refused` (not a kick: an admin transfer may have crossed the click). Each
   // connection has a bucket (BOT.burst, one more every BOT.refillMs; an empty bucket drops the message
-  // and counts toward the flood kick) and the arena has one more, charged per bot actually added or
-  // removed (BOT.globalBurst, one every BOT.globalRefillMs), so many connections together still can't
-  // put more than a few spawns a second on the tick loop. The sender gets the lobby at once; everyone
-  // else with the next (coalesced) lobby broadcast.
+  // and counts toward the flood kick) and the server one more, charged per bot actually added or
+  // removed in any room (BOT.globalBurst, one every BOT.globalRefillMs), so many admins together still
+  // can't put more than a few spawns a second on the tick loop. The sender gets the lobby at once;
+  // everyone else with the next (coalesced) lobby broadcast.
   onBots(conn, m) {
     const hasD = m.d !== undefined, hasN = m.n !== undefined;
-    if (hasD === hasN || (hasD && m.d !== 1 && m.d !== -1) || (hasN && (!Number.isInteger(m.n) || m.n < 0 || m.n > this.maxBots())))
+    if (hasD === hasN || (hasD && m.d !== 1 && m.d !== -1) || (hasN && (!Number.isInteger(m.n) || m.n < 0 || m.n > Math.max(0, this.maxPlayers - 1))))
       return this.kick(conn, 'malformed');
     const now = this.now();
-    const c = conn.botBucket || (conn.botBucket = { tokens: BOT.burst, at: now });
-    c.tokens = Math.min(BOT.burst, c.tokens + (now - c.at) / BOT.refillMs); c.at = now;
-    if (c.tokens < 1) return this.dropped(conn);
-    c.tokens -= 1;
-    const want = hasN ? m.n : this.bots.length + m.d;
+    if (!take(conn, 'botBucket', BOT.burst, BOT.refillMs, now)) return this.dropped(conn);
+    const room = this.adminRoom(conn);
+    if (!room) { this.refuse(conn, 'bots', 'admin'); return this.send(conn, this.lobbyMsg(conn)); }
+    const want = hasN ? m.n : room.bots.length + m.d;
     const g = this.botBucket;
     g.tokens = Math.min(BOT.globalBurst, g.tokens + (now - g.at) / BOT.globalRefillMs); g.at = now;
     let changed = 0;
-    while (g.tokens >= 1 && want > this.bots.length && this.addBot(conn)) { g.tokens -= 1; changed++; }
-    while (g.tokens >= 1 && want < this.bots.length) { this.removeBot(conn); g.tokens -= 1; changed++; }
-    this.event('bots', conn.id, { want, n: this.bots.length, changed });
-    this.send(conn, this.lobbyMsg());
-  }
-
-  maxBots() { return Math.max(0, this.maxPlayers - 1); }
-
-  // Add a bot in a free slot. Refused (false) at maxBots or with no free slot: bots never evict and
-  // never queue. Name "AI n" with the lowest free n (then the usual #2 de-duplication); the reserved
-  // colour BOT.color, which no human can pick, so freeColor() leaves it alone.
-  addBot(conn = null) {
-    if (this.bots.length >= this.maxBots() || this.activeCount() >= this.maxPlayers) return false;
-    const used = new Set(this.bots.map(r => r.botNo));
-    let no = 1; while (used.has(no)) no++;
-    const id = this.nextId++;
-    const rec = {
-      id, name: this.uniqueName(`${BOT.name} ${no}`), color: BOT.color, token: null, bot: true, botNo: no,
-      brain: newBrain(this.state.rng ^ (id * 7919)),   // seeded from the sim's seed, without consuming it
-      conn: null, ip: null, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
-      lastActive: this.now(), discAt: null, fx: 0, joinedAt: this.now(),
-    };
-    this.recs.set(id, rec);
-    this.bots.push(rec);
-    const saved = this.pendingEvents;
-    this.pendingEvents = [];
-    this.activate(rec, false, conn);
-    this.broadcastEvents([this.joinEvent(rec), ...this.pendingEvents]);
-    this.pendingEvents = saved;
-    this.lobbyDirty = true;
-    return true;
-  }
-
-  // Remove the most recently added bot (its slot goes to the first queued human, as any leave does).
-  removeBot(conn = null) {
-    const rec = this.bots.pop();
-    if (!rec) return false;
-    this.release(rec, 'bot removed', conn);
-    return true;
+    while (g.tokens >= 1 && want > room.bots.length && room.addBot(conn)) { g.tokens -= 1; changed++; }
+    while (g.tokens >= 1 && want < room.bots.length) { room.removeBot(conn); g.tokens -= 1; changed++; }
+    room.event('bots', conn.id, { want, n: room.bots.length, changed });
+    this.send(conn, this.lobbyMsg(conn));
   }
 
   // Token buckets: 90 input messages/s, 10 other messages/s. Excess is dropped; sustained excess
@@ -257,32 +291,46 @@ export class Arena {
   }
 
   // The player chose to leave: the slot (or queue place) is released at once, with no resume, and
-  // the connection stays open as a lobby viewer. A recently hit leaver still counts as a kill.
+  // the connection stays open as a lobby viewer of that room. A recently hit leaver still counts as
+  // a kill. The admin may not leave while another human is in the room (SPEC §17): it must make
+  // someone admin first (`refused` leave/admin). An admin who is the only human closes the room.
   onLeave(conn) {
     const rec = conn.rec;
     if (!rec) return;   // already a viewer: nothing to do
-    this.release(rec, 'left');
+    const room = rec.room;
+    if (room.adminId === rec.id && room.humans().some(r => r !== rec)) return this.refuse(conn, 'leave', 'admin');
     conn.rec = null;
+    this.release(rec, 'left');
+    if (this.rooms.has(room.id)) this.send(conn, this.lobbyMsg(conn));
   }
 
   onPing(conn, m) {
     if (m.id !== undefined && !Number.isInteger(m.id)) return this.kick(conn, 'malformed');
     if (m.ct !== undefined && !Number.isFinite(m.ct)) return this.kick(conn, 'malformed');
     // tf: how far into the current tick the server is (0..1), for the client's clock sync
-    this.send(conn, { t: 'pong', id: m.id ?? 0, ct: m.ct ?? 0, tick: this.state.tick,
+    this.send(conn, { t: 'pong', id: m.id ?? 0, ct: m.ct ?? 0, tick: this.tickNo,
       tf: r2(Math.min(1, Math.max(0, (this.now() - this.lastTickAt) / TICK_MS))) });
   }
 
-  onHello(conn, m) {
-    if (conn.rec) return this.kick(conn, 'protocol');
+  // The name, colour and word id of a hello or create; null after a `bad hello` kick.
+  helloFields(conn, m) {
     const name = cleanName(m.name);
     const color = m.color;
     // Only the 12 human colours: BOT.color (= COLORS.length, SPEC §15) and anything past it is refused.
-    if (!name || !Number.isInteger(color) || color < 0 || color >= COLORS.length) return this.kick(conn, 'bad hello');
-    if (m.token !== undefined && (typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token))) return this.kick(conn, 'bad hello');
+    if (!name || !Number.isInteger(color) || color < 0 || color >= COLORS.length) { this.kick(conn, 'bad hello'); return null; }
     // The word id may come again in the hello (SPEC §13.5); an invalid one is ignored. Tag it with the typed name.
     if (isWordId(m.w) && m.w !== conn.word) { conn.word = m.w; this.logs.touch(conn.word, { ip: conn.ip }); }
     this.logs.touch(conn.word, { name });
+    return { name, color };
+  }
+
+  // {t:'hello', name, color, room, token?, resume?}: join room `room` (an id from the lobby list), or
+  // resume the record holding `token` (in whatever room it is; `room` is then not needed).
+  onHello(conn, m) {
+    if (conn.rec) return this.kick(conn, 'protocol');
+    if (m.token !== undefined && (typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token))) return this.kick(conn, 'bad hello');
+    const f = this.helloFields(conn, m);
+    if (!f) return;
 
     // resume: the token is valid while the record exists (connected or within the grace period)
     const old = m.token && this.tokens.get(m.token);
@@ -290,10 +338,11 @@ export class Arena {
       if (old.conn) { const prev = old.conn; prev.rec = null; this.kick(prev, 'replaced'); }
       old.conn = conn; old.ip = conn.ip; old.discAt = null; old.lastActive = this.now(); old.inputs.length = 0; this.resetInputs(old);
       conn.rec = old;
-      this.log(`resume conn=${conn.id} id=${old.id}`);
-      this.event('resume', conn.id, { player: old.id });
+      this.setView(conn, old.room);
+      old.room.log(`resume conn=${conn.id} id=${old.id}`);
+      old.room.event('resume', conn.id, { player: old.id });
       // A queued player who was away while a slot freed up was skipped by promote(): retry now.
-      if (old.state === 'queue') this.promote();
+      if (old.state === 'queue') old.room.promote();
       this.welcome(conn, old, true);
       this.lobbyDirty = true;
       return;
@@ -302,38 +351,111 @@ export class Arena {
     // An automatic reconnect asks to resume only: with the token gone (the grace period ran out),
     // it is told so and stays a lobby viewer instead of silently joining as a new player.
     if (m.token && m.resume === true) {
-      this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, resumed: false, expired: true });
+      this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.tickNo, cap: this.maxPlayers, resumed: false, expired: true });
       return;
     }
+    if (!Number.isInteger(m.room) || m.room < 1) return this.kick(conn, 'bad hello');
+    const room = this.rooms.get(m.room);
+    if (!room) { this.refuse(conn, 'join', 'gone'); return this.send(conn, this.lobbyMsg(conn)); }
+    this.join(conn, room, f.name, f.color);
+  }
 
+  // {t:'create', name, color, room}: create a room named `room` ('' or absent: "<name>'s room") and
+  // join it as its admin (SPEC §17). Turned down (`refused`) at ROOM.max rooms, at ROOM.perIp open
+  // rooms created from this address, over the per-connection create bucket, or for a bad room name.
+  // A connection plays in at most one room, so it is admin of at most one: a create from a
+  // connection already in a room is a `protocol` kick, like a second hello.
+  onCreate(conn, m) {
+    if (conn.rec) return this.kick(conn, 'protocol');
+    if (m.room !== undefined && typeof m.room !== 'string') return this.kick(conn, 'malformed');
+    const f = this.helloFields(conn, m);
+    if (!f) return;
+    const now = this.now();
+    if (!take(conn, 'createBucket', ROOM.createBurst, ROOM.createRefillMs, now)) { this.dropped(conn); return this.refuse(conn, 'create', 'rate'); }
+    const typed = (m.room || '').trim();
+    const name = typed ? cleanRoomName(typed) : defaultRoomName(f.name);
+    if (!name) return this.refuse(conn, 'create', 'name');
+    if (this.rooms.size >= this.maxRooms) return this.refuse(conn, 'create', 'full');
+    if (this.roomsOfIp(conn.ip) >= this.roomsPerIp) return this.refuse(conn, 'create', 'ip');
+    const room = this.createRoom(name, conn.ip);
+    room.log(`room-create conn=${conn.id} ip=${conn.ip} name=${JSON.stringify(name)}`);
+    room.event('room-create', conn.id, { name });
+    this.join(conn, room, f.name, f.color, true);
+  }
+
+  // A new record for `conn` in `room`: a free slot, else the room's queue.
+  join(conn, room, name, color, admin = false) {
     // Records outlive their sockets for graceMs, so without this one address could churn
-    // connect + hello + close and hold every slot and queue place. Past maxPerIp records, the
-    // oldest disconnected one from that address is released.
+    // connect + hello + close and hold every slot and queue place. Past maxPerIp records (all
+    // rooms), the oldest disconnected one from that address is released.
     const mine = [...this.recs.values()].filter(r => r.ip === conn.ip);
     if (mine.length >= this.maxPerIp) {
       const away = mine.filter(r => !r.conn).sort((a, b) => a.discAt - b.discAt)[0];
       if (away) this.release(away, 'replaced');
+      if (!this.rooms.has(room.id)) { this.refuse(conn, 'join', 'gone'); return this.send(conn, this.lobbyMsg(conn)); }
     }
-
+    const now = this.now();
     const rec = {
-      id: this.nextId++, name: this.uniqueName(name), color, token: randomBytes(16).toString('hex'),
+      id: this.nextId++, name: room.uniqueName(name), color, token: randomBytes(16).toString('hex'),
       conn, ip: conn.ip, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
-      lastActive: this.now(), discAt: null, fx: 0, joinedAt: this.now(),
+      lastActive: now, discAt: null, fx: 0, joinedAt: now,
     };
     conn.rec = rec;
-    this.recs.set(rec.id, rec);
-    this.tokens.set(rec.token, rec);
-    if (this.activeCount() < this.maxPlayers) this.activate(rec, false);
-    else { this.queue.push(rec); this.log(`queue conn=${conn.id} id=${rec.id} pos=${this.queue.length}`); this.event('queue', conn.id, { player: rec.id, pos: this.queue.length }); }
+    this.setView(conn, room);
+    if (admin || room.adminId == null) room.adminId = rec.id;   // a room without an admin (only made by tests) takes its first human
+    room.add(rec);
     this.welcome(conn, rec, false);
-    if (rec.state === 'play') this.broadcastEvents([this.joinEvent(rec)]);
-    this.lobbyDirty = true;
   }
 
   welcome(conn, rec, resumed) {
+    const room = rec.room;
     this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, id: rec.id, token: rec.token, resumed, state: rec.state,
-      name: rec.name, color: rec.color, tick: this.state.tick, queuePos: this.queuePos(rec),
-      players: this.roster(), queue: this.queueList(), cap: this.maxPlayers });
+      name: rec.name, color: rec.color, tick: this.tickNo, queuePos: room.queuePos(rec),
+      room: room.id, rname: room.name, admin: room.adminId,
+      players: room.roster(), queue: room.queueList(), cap: this.maxPlayers });
+    this.send(conn, this.lobbyMsg(conn));
+  }
+
+  // {t:'view', room: id|0}: the room a lobby visitor looks at (its roster, snapshots and events; Watch
+  // is this with the lobby closed). 0 (or a room that has closed meanwhile) means none: the plain room
+  // list. A member always looks at its own room, so its view request is ignored. The answer is a lobby
+  // message at once.
+  onView(conn, m) {
+    if (!Number.isInteger(m.room) || m.room < 0) return this.kick(conn, 'malformed');
+    if (!conn.rec) this.setView(conn, m.room ? this.rooms.get(m.room) || null : null);
+    this.send(conn, this.lobbyMsg(conn));
+  }
+
+  // {t:'rename', name}: the admin names its room (SPEC §17). Same cleaning and allowlist as player
+  // names, plus the apostrophe, 1-20 characters. Rate-limited per connection (the edit bucket).
+  onRename(conn, m) {
+    if (typeof m.name !== 'string') return this.kick(conn, 'malformed');
+    if (!take(conn, 'editBucket', ROOM.editBurst, ROOM.editRefillMs, this.now())) { this.dropped(conn); return this.refuse(conn, 'rename', 'rate'); }
+    const room = this.adminRoom(conn);
+    if (!room) return this.refuse(conn, 'rename', 'admin');
+    const name = cleanRoomName(m.name);
+    if (!name) return this.refuse(conn, 'rename', 'name');
+    if (name === room.name) return;
+    const from = room.name;
+    room.name = name;
+    room.log(`room-rename conn=${conn.id} from=${JSON.stringify(from)} to=${JSON.stringify(name)}`);
+    room.event('room-rename', conn.id, { from, to: name });
+    room.broadcastEvents([{ type: 'room', tick: room.state.tick, id: room.id, name }]);
+    this.lobbyDirty = true;
+  }
+
+  // {t:'admin', id}: the admin hands the role to player `id` (SPEC §17), after the client's confirm
+  // dialog. Valid only from the room's current admin, to another human record of the same room,
+  // playing or queued (an `away` one inside its grace period too). Everyone in the room is told with
+  // an `admin` event. Rate-limited per connection (the edit bucket).
+  onAdmin(conn, m) {
+    if (!Number.isInteger(m.id)) return this.kick(conn, 'malformed');
+    if (!take(conn, 'editBucket', ROOM.editBurst, ROOM.editRefillMs, this.now())) { this.dropped(conn); return this.refuse(conn, 'admin', 'rate'); }
+    const room = this.adminRoom(conn);
+    if (!room) return this.refuse(conn, 'admin', 'admin');
+    const to = room.recs.get(m.id);
+    if (!to || to.bot || to === conn.rec) return this.refuse(conn, 'admin', 'target');
+    room.broadcastEvents([room.setAdmin(to, 'transfer', conn)]);
   }
 
   onInput(conn, m) {
@@ -352,134 +474,28 @@ export class Arena {
     if (rec.inputs.length > MAX_QUEUED_INPUTS) rec.inputs.splice(0, rec.inputs.length - MAX_QUEUED_INPUTS);
   }
 
-  // ---------- roster ----------
-  activeCount() { let n = 0; for (const r of this.recs.values()) if (r.state === 'play') n++; return n; }
-
-  uniqueName(name) {
-    const taken = new Set([...this.recs.values()].map(r => r.name.toLowerCase()));
-    if (!taken.has(name.toLowerCase())) return name;
-    for (let i = 2; ; i++) if (!taken.has(`${name}#${i}`.toLowerCase())) return `${name}#${i}`;
-  }
-
-  // `gone` was released, freeing its name (SPEC §9): the holder of the lowest-numbered variant of
-  // it ("Sean#2" when "Sean" goes; same case-insensitive comparison as uniqueName) takes the bare
-  // name. Nobody else is renumbered, and a freed "Sean#2" is not passed on. `#` is outside the name
-  // allowlist, so only uniqueName ever puts one in a name. Returns the `rename` event, or null.
-  reclaimName(gone) {
-    const freed = gone.name.toLowerCase();
-    let best = null, bestN = Infinity;
-    for (const r of this.recs.values()) {
-      const m = /^(.*)#(\d+)$/.exec(r.name);
-      if (m && m[1].toLowerCase() === freed && +m[2] < bestN) { best = r; bestN = +m[2]; }
-    }
-    if (!best) return null;
-    const from = best.name;
-    best.name = from.slice(0, from.lastIndexOf('#'));
-    this.log(`rename id=${best.id} from=${from} to=${best.name}`);
-    this.event('rename', best.conn ? best.conn.id : null, { player: best.id, from, to: best.name });
-    return { type: 'rename', tick: this.state.tick, id: best.id, name: best.name };
-  }
-
   // Forget input sequencing: a new session (resume) restarts its seq from 1.
   resetInputs(rec) {
     rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.minQ = Infinity; rec.qTicks = 0;
   }
 
-  // by: the connection that asked for a bot (for the logs only)
-  activate(rec, promoted, by = null) {
-    if (!rec.bot) rec.color = this.freeColor(rec);
-    rec.state = 'play'; rec.lastActive = this.now(); rec.inputs.length = 0;
-    const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg, level: this.level });
-    const cid = rec.conn ? rec.conn.id : by ? by.id : null;
-    this.log(`${promoted ? 'promote' : rec.bot ? 'bot-add' : 'join'} conn=${cid ?? '-'} id=${rec.id} name=${rec.name}`);
-    this.event(promoted ? 'promote' : rec.bot ? 'bot-add' : 'join', cid, { player: rec.id });
-    this.pendingEvents.push(...evs.map(e => ({ ...e })));
-  }
+  // The player is gone for good (its room does the work, including admin hand-over and closing).
+  release(rec, reason, by = null) { if (rec.room) rec.room.release(rec, reason, by); }
 
-  joinEvent(rec) { return { type: 'join', tick: this.state.tick, id: rec.id, name: rec.name, color: rec.color, ...(rec.bot ? { bot: true } : {}) }; }
-
-  // The player is gone for good: free its slot, invalidate its token, promote from the queue.
-  release(rec, reason, by = null) {
-    if (!this.recs.has(rec.id)) return;
-    this.recs.delete(rec.id);
-    if (rec.token) this.tokens.delete(rec.token);
-    if (rec.bot) { const bi = this.bots.indexOf(rec); if (bi >= 0) this.bots.splice(bi, 1); }
-    const qi = this.queue.indexOf(rec);
-    if (qi >= 0) this.queue.splice(qi, 1);
-    const evs = [];
-    if (rec.state === 'play') {
-      const p = Sim.getPlayer(this.state, rec.id);
-      // a player who leaves while recently hit is a kill for the hitter (SPEC §5 credit rule)
-      if (p && p.alive && p.lastHitBy != null && this.state.tick - p.lastHitTick <= this.cfg.creditTicks)
-        evs.push(...this.withScores(Sim.killPlayer(this.state, rec.id, 'leave', this.cfg)));
-      Sim.removePlayer(this.state, rec.id);
-      evs.push({ type: 'leave', tick: this.state.tick, id: rec.id, reason });
-    }
-    this.log(`leave id=${rec.id} reason=${reason}`);
-    this.event('leave', rec.conn ? rec.conn.id : by ? by.id : null, { player: rec.id, reason });
-    rec.state = 'gone';
-    const rn = this.reclaimName(rec);
-    if (rn) evs.push(rn);
-    if (evs.length) this.broadcastEvents(evs);
-    this.promote();
-    this.lobbyDirty = true;
-  }
-
-  // No two fighters share a colour (SPEC §9): a player entering the arena keeps the colour it asked
-  // for if no other fighter has it, otherwise takes the next free one. Queued players don't hold one.
-  freeColor(rec) {
-    const used = new Set();
-    for (const r of this.recs.values()) if (r !== rec && r.state === 'play') used.add(r.color);
-    for (let k = 0; k < COLORS.length; k++) { const c = (rec.color + k) % COLORS.length; if (!used.has(c)) return c; }
-    return rec.color;   // more fighters than colours (only with a raised maxPlayers)
-  }
-
-  promote() {
-    while (this.activeCount() < this.maxPlayers) {
-      const i = this.queue.findIndex(r => r.conn);
-      if (i < 0) return;
-      const [rec] = this.queue.splice(i, 1);
-      const saved = this.pendingEvents;
-      this.pendingEvents = [];
-      this.activate(rec, true);
-      this.broadcastEvents([this.joinEvent(rec), ...this.pendingEvents]);
-      this.pendingEvents = saved;
-    }
-  }
-
-  queuePos(rec) { const i = this.queue.indexOf(rec); return i < 0 ? 0 : i + 1; }
-  roster() {
-    return [...this.recs.values()].filter(r => r.state === 'play').map(r => {
-      const p = Sim.getPlayer(this.state, r.id);
-      return { id: r.id, name: r.name, color: r.color, score: p ? p.score : 0, deaths: p ? p.deaths : 0, away: !r.conn && !r.bot, ...(r.bot ? { bot: true } : {}) };
-    });
-  }
-  queueList() { return this.queue.map(r => ({ id: r.id, name: r.name, color: r.color, away: !r.conn })); }
-  lobbyMsg() { return { t: 'lobby', players: this.roster(), queue: this.queueList(), cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots() }; }
-
-  // Add a 'score' event for the killer and the victim after each kill.
-  withScores(evs) {
-    const out = [];
-    for (const e of evs) {
-      out.push(e);
-      if (e.type !== 'kill') continue;
-      for (const id of [e.killer, e.victim]) {
-        const p = id != null && Sim.getPlayer(this.state, id);
-        if (p) out.push({ type: 'score', tick: e.tick, id, score: p.score, deaths: p.deaths });
-      }
-      this.lobbyDirty = true;
-    }
-    return out;
-  }
-
-  broadcastEvents(evs) {
-    if (!evs.length) return;
-    const msg = JSON.stringify({ t: 'event', tick: this.state.tick, ev: evs });
-    for (const c of this.conns) this.send(c, msg);
+  // ---------- lobby messages (SPEC §9, §17) ----------
+  // Every connection gets the room list; a member or a visitor who selected a room also gets that
+  // room's detail (roster, queue, admin, bots) in the same fields the single arena used to send.
+  roomList() { return [...this.rooms.values()].map(r => r.summary()); }
+  lobbyMsg(conn, cache = null) {
+    const rooms = cache ? cache.rooms || (cache.rooms = this.roomList()) : this.roomList();
+    const room = conn.room;
+    let detail;
+    if (room) detail = cache ? cache[room.id] || (cache[room.id] = room.detail()) : room.detail();
+    else detail = { room: null, rname: null, admin: null, players: [], queue: [], cap: this.maxPlayers, bots: 0, botMax: Math.max(0, this.maxPlayers - 1) };
+    return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail };
   }
 
   // ---------- the tick ----------
-  pendingEvents = [];
   lastTickAt = 0;
 
   tick() {
@@ -489,48 +505,23 @@ export class Arena {
     // heartbeat: close connections that have gone silent (playing, queued or lobby viewers)
     if (this.heartbeatMs > 0 && this.heartbeatMs < Infinity)
       for (const c of [...this.conns]) if (now - c.heardAt >= this.heartbeatMs) this.timeout(c);
-    // grace expiry and idle kicks
+    // grace expiry and idle kicks (every room)
     for (const rec of [...this.recs.values()]) {
       if (!rec.conn && rec.discAt != null && now - rec.discAt >= this.graceMs) this.release(rec, 'timeout');
       else if (rec.conn && rec.state === 'play' && now - rec.lastActive >= this.idleMs) this.kick(rec.conn, 'idle');
     }
-    // one input per player per tick; a missing input repeats the last one for a few ticks. A bot's
-    // keys come from its brain, which sees the others as they were brain.delay ticks ago (SPEC §15).
-    const inputs = new Map();
-    for (const rec of this.recs.values()) {
-      if (rec.state !== 'play') continue;
-      let keys = 0;
-      if (rec.bot) {
-        const seen = new Map();
-        for (const o of Sim.positionsAt(this.hist, this.state.tick - rec.brain.delay) || []) seen.set(o.id, o);
-        keys = botKeys(rec.brain, Sim.getPlayer(this.state, rec.id), this.state, seen, { cfg: this.cfg, level: this.level });
-      } else if (rec.conn && rec.inputs.length) {
-        const inp = rec.inputs.shift();
-        keys = inp.keys | rec.carry; rec.carry = 0;
-        rec.lastSeq = inp.seq; rec.starve = 0;
-        if (inp.keys !== 0) rec.lastActive = now;
-      } else if (rec.conn && ++rec.starve <= STARVE_ZERO_TICKS) keys = rec.lastKeys;
-      rec.lastKeys = keys;
-      if (rec.conn) this.drainBacklog(rec);
-      inputs.set(rec.id, keys);
+    // every room steps once (empty rooms don't exist: a room closes with its last human)
+    this.tickNo++;
+    for (const room of this.rooms.values()) {
+      const r0 = this.now();
+      room.step(now);
+      const d = this.now() - r0;
+      room.stepMs += (d - room.stepMs) * .05; room.stepMax = Math.max(room.stepMax, d);
     }
-    const st = this.state;
-    const rewind = a => {
-      const rec = this.recs.get(a.id);
-      if (rec && rec.bot) return null;              // a bot sees the present: no lag compensation
-      const ms = Math.min(NET.rewindCapMs, NET.interpMs + (rec && rec.conn ? rec.conn.rtt : 0) / 2);
-      return Sim.positionsAt(this.hist, st.tick - ms / TICK_MS);
-    };
-    const evs = [...this.pendingEvents, ...Sim.step(st, inputs, { cfg: this.cfg, level: this.level, rewind })];
-    this.pendingEvents = [];
-    Sim.recordHistory(this.hist, st);
-    for (const p of st.players) { const rec = this.recs.get(p.id); if (rec) rec.fx |= p.fx; }
-    this.broadcastEvents(this.withScores(evs));
-    if (st.tick % SNAP_DIV === 0) this.snapshot();
     if (this.lobbyDirty && now - this.lobbyAt >= LOBBY_MIN_MS) {
       this.lobbyDirty = false; this.lobbyAt = now;
-      const msg = JSON.stringify(this.lobbyMsg());
-      for (const c of this.conns) this.send(c, msg);
+      const cache = {};
+      for (const c of this.conns) this.send(c, this.lobbyMsg(c, cache));
     }
     // per-connection input rate, once a second
     for (const c of this.conns) if (now - c.rateAt >= 1000) { c.inRate = Math.round(c.inCount * 1000 / (now - c.rateAt)); c.inCount = 0; c.rateAt = now; }
@@ -538,56 +529,11 @@ export class Arena {
     this.recordTickTime(dt);
   }
 
-  // Every starved tick (a repeat or a 0) leaves the late inputs queued one tick further behind, and
-  // without this nothing ever took that back: input latency ratcheted up to the worst stall seen
-  // (up to the 12-input cap, past which inputs were simply lost). So: if the queue never fell below
-  // `min` over the last DRAIN_WINDOW ticks, `min - 1` of its oldest inputs are pure added latency
-  // and are skipped, keeping one as a cushion against the next bit of jitter. A fresh jump or
-  // slash press in a skipped input is carried into the next tick, so a one-tick tap survives.
-  // Batched senders (2-3 inputs a frame) bring the queue to 0 or 1 every frame and are untouched.
-  drainBacklog(rec) {
-    rec.minQ = Math.min(rec.minQ, rec.inputs.length);
-    if (++rec.qTicks < DRAIN_WINDOW) return;
-    let prev = rec.lastKeys;
-    for (let n = rec.minQ - 1; n > 0; n--) {
-      const inp = rec.inputs.shift();
-      rec.carry |= inp.keys & ~prev & PRESS_BITS; prev = inp.keys;
-      rec.lastSeq = inp.seq;
-    }
-    rec.minQ = Infinity; rec.qTicks = 0;
-  }
-
   recordTickTime(dt) {
     const s = this.tickStats;
     s.n++; s.sum += dt; s.max = Math.max(s.max, dt);
     s.recent.push(dt); if (s.recent.length > 600) s.recent.shift();
-    if (dt > TICK_MS) { s.overruns++; this.event('overrun', null, { tick: this.state.tick, ms: r2(dt) }); }
-  }
-
-  // Snapshot (SPEC §6.1): every player as [id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars],
-  // flags = alive 1 | onGround 2 | sweep 4 | long sword 8; the lying pickups `it` as [[id, x, y, kind]]
-  // (kind 1 = ninja stars, 0 = long sword; a star pickup adds its amount: [id, x, y, 1, n]); the stars in flight `st` as [[id, x, y, vx, owner]].
-  // Each client also gets its own full player state (`me`, with `stars`) and its last processed
-  // input `seq`, for reconciliation.
-  snapshot() {
-    const st = this.state;
-    const p = st.players.map(q => {
-      const rec = this.recs.get(q.id), fx = rec ? rec.fx : 0;
-      if (rec) rec.fx = 0;
-      return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
-        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx, q.stars | 0];
-    });
-    const it = (st.items || []).map(i => (Sim.itemKind(i) === 'star' ? [i.id, i.x, i.y, 1, Sim.starAmount(i)] : [i.id, i.x, i.y, 0]));
-    const fl = (st.stars || []).map(f => [f.id, r2(f.x), r2(f.y), f.vx, f.owner]);
-    const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + ',"st":' + JSON.stringify(fl) + '}';
-    const head = '{"t":"snapshot","tick":' + st.tick;
-    for (const c of this.conns) {
-      const rec = c.rec;
-      if (rec && rec.state === 'play') {
-        const me = Sim.getPlayer(st, rec.id);
-        this.send(c, head + ',"seq":' + rec.lastSeq + ',"me":' + JSON.stringify(me) + tail);
-      } else this.send(c, head + ',"seq":-1' + tail);
-    }
+    if (dt > TICK_MS) { s.overruns++; this.event('overrun', null, { tick: this.tickNo, ms: r2(dt), rooms: this.rooms.size }); }
   }
 
   // ---------- loop ----------
@@ -616,24 +562,14 @@ export class Arena {
       maxMs: r2(s.max), overruns: s.overruns, budgetMs: r2(TICK_MS) };
   }
   connView(c) {
-    return { conn: c.id, ip: c.ip, word: c.word, player: c.rec ? c.rec.id : null, rttMs: Math.round(c.rtt), inputRate: c.inRate,
+    return { conn: c.id, ip: c.ip, word: c.word, player: c.rec ? c.rec.id : null, room: c.room ? c.room.id : null,
+      rttMs: Math.round(c.rtt), inputRate: c.inRate,
       dropped: c.dropCount, logDropped: c.logDropped, ageS: Math.round((this.now() - c.connectedAt) / 1000) };
   }
-  recView(rec) {
-    const p = Sim.getPlayer(this.state, rec.id);
-    return { id: rec.id, name: rec.name, color: rec.color, state: rec.bot ? rec.state + ' (bot)' : rec.conn ? rec.state : rec.state + ' (disconnected)',
-      ...(rec.bot ? { bot: true } : {}),
-      queuePos: this.queuePos(rec), conn: rec.conn ? rec.conn.id : null, lastSeq: rec.lastSeq, inputQueue: rec.inputs.length,
-      idleS: Math.round((this.now() - rec.lastActive) / 1000),
-      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, stars: p.stars | 0, score: p.score, deaths: p.deaths } : {}) };
-  }
+  recView(rec) { return rec.room.recView(rec); }
   adminState() {
-    return { tick: this.state.tick, bots: this.bots.length, uptimeS: Math.round((this.now() - this.startedAt) / 1000),
-      items: (this.state.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, this.state.itemT) * TICK_MS / 1000),
-      starInS: r2(Math.max(0, this.state.starT ?? 0) * TICK_MS / 1000),
-      stars: (this.state.stars || []).map(f => ({ id: f.id, owner: f.owner, x: r2(f.x), y: r2(f.y), vx: f.vx, dist: r2(f.dist) })),
-      players: [...this.recs.values()].filter(r => r.state === 'play').map(r => this.recView(r)),
-      queue: this.queue.map(r => this.recView(r)), tickTime: this.tickTimeStats(),
+    return { tick: this.tickNo, uptimeS: Math.round((this.now() - this.startedAt) / 1000), maxRooms: this.maxRooms,
+      rooms: [...this.rooms.values()].map(r => r.adminView()), tickTime: this.tickTimeStats(),
       conns: [...this.conns].map(c => this.connView(c)) };
   }
   // The server's own view of the connection holding `token`, for a debug report. Never exposes it.

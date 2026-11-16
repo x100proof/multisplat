@@ -1,0 +1,351 @@
+// One room (SPEC §17): a world of its own with up to NET.maxPlayers (8) slots, AI players included,
+// its own FIFO queue, scores, pickups, stars, bots, chat and events. It owns the per-world half of
+// what used to be the single global arena: records, slots, the queue, names (de-duplicated per room),
+// colours (unique per room), promotion, release, the sim step with lag compensation, snapshots and
+// the room's admin. The connection half (protocol, buckets, heartbeat, resume tokens, the list of
+// rooms, the one timer that steps every room) stays in server/arena.js, which owns every Room.
+// Every room steps once per server tick, so all rooms share one tick number (`arena.tickNo`): a
+// lobby visitor switching rooms keeps one continuous timeline and clock sync.
+import * as Sim from '../shared/sim.js';
+import { NET, TICK_MS, COLORS, KEY, BOT } from '../shared/constants.js';
+import { newBrain, botKeys } from './ai.js';
+
+const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
+const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
+const DRAIN_WINDOW = 30;                            // ticks over which a standing input backlog is measured
+const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a skipped input must not lose
+export const r2 = v => Math.round(v * 100) / 100;
+
+export class Room {
+  // arena: the owning Arena (config, clock, logs, the global record and token maps).
+  constructor(arena, { id, name, seed, creatorIp = null }) {
+    this.arena = arena; this.id = id; this.name = name; this.creatorIp = creatorIp;
+    this.cfg = arena.cfg; this.level = arena.level; this.maxPlayers = arena.maxPlayers;
+    this.adminId = null;          // the record id of the admin (a human in this room) — SPEC §17
+    this.state = Sim.createWorld({ seed });
+    this.state.tick = arena.tickNo;   // lockstep with every other room (see above)
+    this.hist = Sim.createHistory();
+    this.recs = new Map();        // player id -> record of this room (playing, queued or waiting for a resume)
+    this.queue = [];              // queued records, FIFO
+    this.bots = [];               // bot records in the order they were added (SPEC §15)
+    this.viewers = new Set();     // connections that get this room's snapshots and events: its members
+                                  // and every lobby visitor who selected it (watchers)
+    this.pendingEvents = [];
+    this.createdAt = arena.now();
+    this.stepMs = 0; this.stepMax = 0;   // this room's share of the tick (EMA and max), for adminState
+  }
+
+  // Logs and ring events of this room carry its id (SPEC §13.3).
+  log(s) { this.arena.log(`${s} room=${this.id}`); }
+  event(type, connId, data = {}) { this.arena.event(type, connId, { room: this.id, ...data }); }
+
+  // ---------- roster ----------
+  activeCount() { let n = 0; for (const r of this.recs.values()) if (r.state === 'play') n++; return n; }
+  humans() { return [...this.recs.values()].filter(r => !r.bot); }
+  watchers() { let n = 0; for (const c of this.viewers) if (!c.rec || c.rec.room !== this) n++; return n; }
+  admin() { return this.adminId != null ? this.recs.get(this.adminId) || null : null; }
+  maxBots() { return Math.max(0, this.maxPlayers - 1); }
+
+  // Names are de-duplicated per room (SPEC §9, §17), case-insensitively, with #2, #3, …
+  uniqueName(name) {
+    const taken = new Set([...this.recs.values()].map(r => r.name.toLowerCase()));
+    if (!taken.has(name.toLowerCase())) return name;
+    for (let i = 2; ; i++) if (!taken.has(`${name}#${i}`.toLowerCase())) return `${name}#${i}`;
+  }
+
+  // `gone` was released, freeing its name (SPEC §9): the holder of the lowest-numbered variant of
+  // it in this room ("Sean#2" when "Sean" goes) takes the bare name. Nobody else is renumbered, and a
+  // freed "Sean#2" is not passed on. `#` is outside the name allowlist, so only uniqueName ever puts
+  // one in a name. Returns the `rename` event, or null.
+  reclaimName(gone) {
+    const freed = gone.name.toLowerCase();
+    let best = null, bestN = Infinity;
+    for (const r of this.recs.values()) {
+      const m = /^(.*)#(\d+)$/.exec(r.name);
+      if (m && m[1].toLowerCase() === freed && +m[2] < bestN) { best = r; bestN = +m[2]; }
+    }
+    if (!best) return null;
+    const from = best.name;
+    best.name = from.slice(0, from.lastIndexOf('#'));
+    this.log(`rename id=${best.id} from=${from} to=${best.name}`);
+    this.event('rename', best.conn ? best.conn.id : null, { player: best.id, from, to: best.name });
+    return { type: 'rename', tick: this.state.tick, id: best.id, name: best.name };
+  }
+
+  // Put a new record (human or bot) in this room: a free slot, else the queue (humans only).
+  add(rec, by = null) {
+    rec.room = this;
+    this.recs.set(rec.id, rec);
+    this.arena.recs.set(rec.id, rec);
+    if (rec.token) this.arena.tokens.set(rec.token, rec);
+    if (rec.bot) this.bots.push(rec);
+    if (this.activeCount() < this.maxPlayers) {
+      const saved = this.pendingEvents;
+      this.pendingEvents = [];
+      this.activate(rec, false, by);
+      this.broadcastEvents([this.joinEvent(rec), ...this.pendingEvents]);
+      this.pendingEvents = saved;
+    } else {
+      this.queue.push(rec);
+      this.log(`queue conn=${rec.conn ? rec.conn.id : '-'} id=${rec.id} pos=${this.queue.length}`);
+      this.event('queue', rec.conn ? rec.conn.id : null, { player: rec.id, pos: this.queue.length });
+    }
+    this.arena.lobbyDirty = true;
+  }
+
+  // by: the connection that asked for a bot (for the logs only)
+  activate(rec, promoted, by = null) {
+    if (!rec.bot) rec.color = this.freeColor(rec);
+    rec.state = 'play'; rec.lastActive = this.arena.now(); rec.inputs.length = 0;
+    const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg, level: this.level });
+    const cid = rec.conn ? rec.conn.id : by ? by.id : null;
+    this.log(`${promoted ? 'promote' : rec.bot ? 'bot-add' : 'join'} conn=${cid ?? '-'} id=${rec.id} name=${rec.name}`);
+    this.event(promoted ? 'promote' : rec.bot ? 'bot-add' : 'join', cid, { player: rec.id });
+    this.pendingEvents.push(...evs.map(e => ({ ...e })));
+  }
+
+  joinEvent(rec) { return { type: 'join', tick: this.state.tick, id: rec.id, name: rec.name, color: rec.color, ...(rec.bot ? { bot: true } : {}) }; }
+
+  // The player is gone for good: free its slot and name, invalidate its token, promote from the
+  // queue. Then the room rules (SPEC §17): a departed admin's role passes to the longest-present
+  // human, and a room left with no human at all closes (its bots go with it).
+  release(rec, reason, by = null) {
+    if (!this.recs.has(rec.id)) return;
+    this.recs.delete(rec.id);
+    this.arena.recs.delete(rec.id);
+    if (rec.token) this.arena.tokens.delete(rec.token);
+    if (rec.bot) { const bi = this.bots.indexOf(rec); if (bi >= 0) this.bots.splice(bi, 1); }
+    const qi = this.queue.indexOf(rec);
+    if (qi >= 0) this.queue.splice(qi, 1);
+    const evs = [];
+    if (rec.state === 'play') {
+      const p = Sim.getPlayer(this.state, rec.id);
+      // a player who leaves while recently hit is a kill for the hitter (SPEC §5 credit rule)
+      if (p && p.alive && p.lastHitBy != null && this.state.tick - p.lastHitTick <= this.cfg.creditTicks)
+        evs.push(...this.withScores(Sim.killPlayer(this.state, rec.id, 'leave', this.cfg)));
+      Sim.removePlayer(this.state, rec.id);
+      evs.push({ type: 'leave', tick: this.state.tick, id: rec.id, reason });
+    }
+    this.log(`leave id=${rec.id} reason=${reason}`);
+    this.event('leave', rec.conn ? rec.conn.id : by ? by.id : null, { player: rec.id, reason });
+    rec.state = 'gone';
+    const rn = this.reclaimName(rec);
+    if (rn) evs.push(rn);
+    this.arena.lobbyDirty = true;
+    if (this.closing) return;   // closeRoom is removing the bots: nobody is left to tell
+    if (!this.humans().length) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
+    if (rec.id === this.adminId) evs.push(this.setAdmin(this.successor(), 'auto'));
+    if (evs.length) this.broadcastEvents(evs);
+    this.promote();
+  }
+
+  // The human who has been in the room longest (connected ones first), to take over as admin.
+  successor() {
+    const hs = this.humans().sort((a, b) => (!a.conn - !b.conn) || (a.joinedAt - b.joinedAt) || (a.id - b.id));
+    return hs[0] || null;
+  }
+
+  // Make `rec` the admin. Returns the `admin` event for the room's viewers (the caller sends it).
+  setAdmin(rec, why, by = null) {
+    const from = this.adminId;
+    this.adminId = rec ? rec.id : null;
+    this.log(`admin from=${from ?? '-'} to=${this.adminId ?? '-'} why=${why}`);
+    this.event('admin', by ? by.id : rec && rec.conn ? rec.conn.id : null, { from, to: this.adminId, why });
+    this.arena.lobbyDirty = true;
+    return { type: 'admin', tick: this.state.tick, id: this.adminId, from, why };
+  }
+
+  // No two fighters in a room share a colour (SPEC §9): a player entering the arena keeps the colour
+  // it asked for if no other fighter here has it, otherwise takes the next free one.
+  freeColor(rec) {
+    const used = new Set();
+    for (const r of this.recs.values()) if (r !== rec && r.state === 'play') used.add(r.color);
+    for (let k = 0; k < COLORS.length; k++) { const c = (rec.color + k) % COLORS.length; if (!used.has(c)) return c; }
+    return rec.color;   // more fighters than colours (only with a raised maxPlayers)
+  }
+
+  promote() {
+    while (this.activeCount() < this.maxPlayers) {
+      const i = this.queue.findIndex(r => r.conn);
+      if (i < 0) return;
+      const [rec] = this.queue.splice(i, 1);
+      const saved = this.pendingEvents;
+      this.pendingEvents = [];
+      this.activate(rec, true);
+      this.broadcastEvents([this.joinEvent(rec), ...this.pendingEvents]);
+      this.pendingEvents = saved;
+    }
+  }
+
+  // ---------- AI players (SPEC §15), now per room and asked for by its admin only ----------
+  // Add a bot in a free slot. Refused (false) at maxBots or with no free slot: bots never evict and
+  // never queue. Name "AI n" with the lowest free n in this room (then the usual #2 de-duplication);
+  // the reserved colour BOT.color, which no human can pick, so freeColor() leaves it alone.
+  addBot(by = null) {
+    if (this.bots.length >= this.maxBots() || this.activeCount() >= this.maxPlayers) return false;
+    const used = new Set(this.bots.map(r => r.botNo));
+    let no = 1; while (used.has(no)) no++;
+    const id = this.arena.nextId++, now = this.arena.now();
+    this.add({
+      id, name: this.uniqueName(`${BOT.name} ${no}`), color: BOT.color, token: null, bot: true, botNo: no,
+      brain: newBrain(this.state.rng ^ (id * 7919)),   // seeded from the room's sim seed, without consuming it
+      conn: null, ip: null, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
+      lastActive: now, discAt: null, fx: 0, joinedAt: now,
+    }, by);
+    return true;
+  }
+  // Remove the most recently added bot (its slot goes to the first queued human, as any leave does).
+  removeBot(by = null) {
+    const rec = this.bots[this.bots.length - 1];
+    if (!rec) return false;
+    this.release(rec, 'bot removed', by);
+    return true;
+  }
+
+  queuePos(rec) { const i = this.queue.indexOf(rec); return i < 0 ? 0 : i + 1; }
+  roster() {
+    return [...this.recs.values()].filter(r => r.state === 'play').map(r => {
+      const p = Sim.getPlayer(this.state, r.id);
+      return { id: r.id, name: r.name, color: r.color, score: p ? p.score : 0, deaths: p ? p.deaths : 0, away: !r.conn && !r.bot, ...(r.bot ? { bot: true } : {}) };
+    });
+  }
+  queueList() { return this.queue.map(r => ({ id: r.id, name: r.name, color: r.color, away: !r.conn })); }
+  // The room's half of a lobby message (SPEC §17): what a member or a visitor who selected it sees.
+  detail() {
+    return { room: this.id, rname: this.name, admin: this.adminId, players: this.roster(), queue: this.queueList(),
+      cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots() };
+  }
+  // One row of the room list every lobby visitor sees.
+  summary() {
+    const a = this.admin();
+    return { id: this.id, name: this.name, admin: a ? a.name : null, n: this.activeCount(), cap: this.maxPlayers,
+      bots: this.bots.length, q: this.queue.length, watch: this.watchers() };
+  }
+
+  // Add a 'score' event for the killer and the victim after each kill.
+  withScores(evs) {
+    const out = [];
+    for (const e of evs) {
+      out.push(e);
+      if (e.type !== 'kill') continue;
+      for (const id of [e.killer, e.victim]) {
+        const p = id != null && Sim.getPlayer(this.state, id);
+        if (p) out.push({ type: 'score', tick: e.tick, id, score: p.score, deaths: p.deaths });
+      }
+      this.arena.lobbyDirty = true;
+    }
+    return out;
+  }
+
+  // Events go to this room's viewers only (its members and watchers).
+  broadcastEvents(evs) {
+    if (!evs.length) return;
+    const msg = JSON.stringify({ t: 'event', tick: this.state.tick, ev: evs });
+    for (const c of this.viewers) this.arena.send(c, msg);
+  }
+
+  // ---------- the tick (the server's timer calls Arena.tick, which steps every room) ----------
+  step(now) {
+    // one input per player per tick; a missing input repeats the last one for a few ticks. A bot's
+    // keys come from its brain, which sees the others as they were brain.delay ticks ago (SPEC §15).
+    const inputs = new Map();
+    for (const rec of this.recs.values()) {
+      if (rec.state !== 'play') continue;
+      let keys = 0;
+      if (rec.bot) {
+        const seen = new Map();
+        for (const o of Sim.positionsAt(this.hist, this.state.tick - rec.brain.delay) || []) seen.set(o.id, o);
+        keys = botKeys(rec.brain, Sim.getPlayer(this.state, rec.id), this.state, seen, { cfg: this.cfg, level: this.level });
+      } else if (rec.conn && rec.inputs.length) {
+        const inp = rec.inputs.shift();
+        keys = inp.keys | rec.carry; rec.carry = 0;
+        rec.lastSeq = inp.seq; rec.starve = 0;
+        if (inp.keys !== 0) rec.lastActive = now;
+      } else if (rec.conn && ++rec.starve <= STARVE_ZERO_TICKS) keys = rec.lastKeys;
+      rec.lastKeys = keys;
+      if (rec.conn) this.drainBacklog(rec);
+      inputs.set(rec.id, keys);
+    }
+    const st = this.state;
+    const rewind = a => {
+      const rec = this.recs.get(a.id);
+      if (rec && rec.bot) return null;              // a bot sees the present: no lag compensation
+      const ms = Math.min(NET.rewindCapMs, NET.interpMs + (rec && rec.conn ? rec.conn.rtt : 0) / 2);
+      return Sim.positionsAt(this.hist, st.tick - ms / TICK_MS);
+    };
+    const evs = [...this.pendingEvents, ...Sim.step(st, inputs, { cfg: this.cfg, level: this.level, rewind })];
+    this.pendingEvents = [];
+    Sim.recordHistory(this.hist, st);
+    for (const p of st.players) { const rec = this.recs.get(p.id); if (rec) rec.fx |= p.fx; }
+    this.broadcastEvents(this.withScores(evs));
+    if (st.tick % SNAP_DIV === 0) this.snapshot();
+  }
+
+  // Every starved tick (a repeat or a 0) leaves the late inputs queued one tick further behind, and
+  // without this nothing ever took that back: input latency ratcheted up to the worst stall seen
+  // (up to the 12-input cap, past which inputs were simply lost). So: if the queue never fell below
+  // `min` over the last DRAIN_WINDOW ticks, `min - 1` of its oldest inputs are pure added latency
+  // and are skipped, keeping one as a cushion against the next bit of jitter. A fresh jump or
+  // slash press in a skipped input is carried into the next tick, so a one-tick tap survives.
+  // Batched senders (2-3 inputs a frame) bring the queue to 0 or 1 every frame and are untouched.
+  drainBacklog(rec) {
+    rec.minQ = Math.min(rec.minQ, rec.inputs.length);
+    if (++rec.qTicks < DRAIN_WINDOW) return;
+    let prev = rec.lastKeys;
+    for (let n = rec.minQ - 1; n > 0; n--) {
+      const inp = rec.inputs.shift();
+      rec.carry |= inp.keys & ~prev & PRESS_BITS; prev = inp.keys;
+      rec.lastSeq = inp.seq;
+    }
+    rec.minQ = Infinity; rec.qTicks = 0;
+  }
+
+  // Snapshot (SPEC §6.1), to this room's viewers only: every player as [id, x, y, vx, vy, face, hp,
+  // atk, flags, iframes, stun, fx, stars], flags = alive 1 | onGround 2 | sweep 4 | long sword 8; the
+  // lying pickups `it` as [[id, x, y, kind]] (kind 1 = ninja stars, 0 = long sword; a star pickup
+  // adds its amount: [id, x, y, 1, n]); the stars in flight `st` as [[id, x, y, vx, owner]]. Each
+  // player also gets its own full player state (`me`, with `stars`) and its last processed input
+  // `seq`, for reconciliation.
+  snapshot() {
+    const st = this.state;
+    const p = st.players.map(q => {
+      const rec = this.recs.get(q.id), fx = rec ? rec.fx : 0;
+      if (rec) rec.fx = 0;
+      return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
+        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx, q.stars | 0];
+    });
+    const it = (st.items || []).map(i => (Sim.itemKind(i) === 'star' ? [i.id, i.x, i.y, 1, Sim.starAmount(i)] : [i.id, i.x, i.y, 0]));
+    const fl = (st.stars || []).map(f => [f.id, r2(f.x), r2(f.y), f.vx, f.owner]);
+    const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + ',"st":' + JSON.stringify(fl) + '}';
+    const head = '{"t":"snapshot","tick":' + st.tick;
+    for (const c of this.viewers) {
+      const rec = c.rec;
+      if (rec && rec.room === this && rec.state === 'play') {
+        const me = Sim.getPlayer(st, rec.id);
+        this.arena.send(c, head + ',"seq":' + rec.lastSeq + ',"me":' + JSON.stringify(me) + tail);
+      } else this.arena.send(c, head + ',"seq":-1' + tail);
+    }
+  }
+
+  // ---------- views for the debug tools (SPEC §13) ----------
+  recView(rec) {
+    const p = Sim.getPlayer(this.state, rec.id);
+    return { id: rec.id, room: this.id, name: rec.name, color: rec.color,
+      state: rec.bot ? rec.state + ' (bot)' : rec.conn ? rec.state : rec.state + ' (disconnected)',
+      ...(rec.bot ? { bot: true } : {}), ...(rec.id === this.adminId ? { admin: true } : {}),
+      queuePos: this.queuePos(rec), conn: rec.conn ? rec.conn.id : null, lastSeq: rec.lastSeq, inputQueue: rec.inputs.length,
+      idleS: Math.round((this.arena.now() - rec.lastActive) / 1000),
+      ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, stars: p.stars | 0, score: p.score, deaths: p.deaths } : {}) };
+  }
+  adminView() {
+    const a = this.admin(), st = this.state;
+    return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : null, creatorIp: this.creatorIp,
+      ageS: Math.round((this.arena.now() - this.createdAt) / 1000), bots: this.bots.length, watchers: this.watchers(),
+      stepMs: r2(this.stepMs), stepMaxMs: r2(this.stepMax),
+      items: (st.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, st.itemT) * TICK_MS / 1000),
+      starInS: r2(Math.max(0, st.starT ?? 0) * TICK_MS / 1000),
+      stars: (st.stars || []).map(f => ({ id: f.id, owner: f.owner, x: r2(f.x), y: r2(f.y), vx: f.vx, dist: r2(f.dist) })),
+      players: [...this.recs.values()].filter(r => r.state === 'play').map(r => this.recView(r)),
+      queue: this.queue.map(r => this.recView(r)) };
+  }
+}

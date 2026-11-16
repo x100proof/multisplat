@@ -121,7 +121,8 @@
   #chatbox { position: absolute; left: 50%; bottom: 1.2em; transform: translateX(-50%); width: min(30em, 70%); z-index: 6; }
   #chatbox.hidden { display: none; }
   body.touchui #chatbox { bottom: auto; top: calc(var(--sh) + 4px); }
-  #chatIn { width: 100%; box-sizing: border-box; padding: .45em .7em; font: 700 clamp(13px, 2vw, 18px) ui-monospace, Menlo, Consolas, monospace;
+  #chatIn { width: 100%; box-sizing: border-box; padding: .45em .7em; font: 700 clamp(16px, 2vw, 18px) ui-monospace, Menlo, Consolas, monospace;
+  #chatIn { touch-action: manipulation; }   /* 16px minimum: iOS zooms the page when a smaller input is focused */
             color: #fff; background: rgba(5,3,10,.88); border: 2px solid #05d9e8; border-radius: 8px; outline: none; box-shadow: 0 0 12px rgba(5,217,232,.5); }
   #leave { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
     background: rgba(5,3,14,.6); }

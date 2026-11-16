@@ -8,7 +8,8 @@ Status: **M6** (in progress). This covers:
 - client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3),
 - long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX,
 - M6 changes: leaving with Escape, no spike traps in the arena (§3), the 5 s heartbeat and resume
-  window (§6.4), scores for everyone along the top (§9).
+  window (§6.4), scores for everyone along the top (§9), neon blood by default with a real-gore
+  option (§7).
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -619,8 +620,21 @@ editable physics.
     crimson cut face and a wet highlight, drawn without shadow blur (dozens of blurred shadows were
     too slow). The sword is drawn on its own.
   - Flying drops use the `'lighter'` blend, batched per colour. Stained spikes use `TILE.spikeBloody`.
-  - Blood is **red**: `BLOOD` (arterial to dark crimson) for drops and decals, the darker `POOL`
-    for pools; the spike stains use `BLOOD` too. Player colours still tint headbands and glows.
+  - **Two blood styles** (`BLOOD_STYLES`, SPEC §7). gore.js stores a colour index 0–5 with every
+    drop, decal and pool (drawn from the kill's seeded RNG, as before), and the style maps the index to
+    a colour: `BLOOD` (drops, decals, spike stains and the sword tip) and `POOL` (pools) are the
+    current style's palettes, `BSTYLE` holds them plus the layer's blend and the gib cut-face colours.
+    - **neon** (the default): NinjaRunner's `NEON_LIST` for drops and decals, dimmer neon for pools,
+      and the baked layer drawn with `'lighter'` (alpha .85), so all blood glows; pink cut faces;
+    - **real gore** (`CFG.realGore`): the reds (arterial to dark crimson, darker pools), the layer
+      drawn normally (alpha .96); flying drops still use `'lighter'`, which keeps stacked red red.
+
+    The choice is the debug panel's "Real gore" checkbox (online too), saved with the other client
+    settings in `localStorage` (`multisplat-cfg`). `applyBloodStyle()` switches the palettes and
+    rebuilds the baked layer (and the stained-spike tile), so blood already on the arena is repainted.
+    The style never reaches gore.js, so the particles, decals, pools and fingerprints are the same in
+    both. `__mp.gore.style` / `setStyle('neon'|'real')` read and set it; reports' `env.gore.style`
+    carries it. Player colours still tint headbands and glows.
 - **Music.** `initAudio` (on the first key, pointer or Fight) creates `music` unless `?nomusic`.
   M toggles `muted`, which silences both the SFX and the music. A hidden tab suspends the context.
 - **Lobby (§9).** An overlay over the live arena. It has:
@@ -656,7 +670,8 @@ editable physics.
   The lobby's info line turns pink when the arena is full ("you will be #n in the queue"), and a
   numbered queue list marks our own place.
 - **Debug panel (D).** In both modes: the FPS line with gore counts and the gore step / render
-  times, the **Gore** toggle (`CFG.gore`, on by default), and a **Music volume** slider
+  times, the **Gore** toggle (`CFG.gore`, on by default), **Real gore** (`CFG.realGore`, off: neon
+  blood), and a **Music volume** slider
   (`CFG.musicVol`, 0.5) with the music's state. Online it adds:
   - RTT (current/avg/max) and snapshot jitter,
   - prediction-error RMS, the snap count and reconnects,
@@ -772,7 +787,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
     the only highlighted one, text-only names, the strip above the HP, score and feed, and no
     rebuilds without data changes,
   - waits until the kill's gore has settled on every page and asserts the same gore fingerprint
-    everywhere (and that over 100 landings went into it),
+    everywhere (and that over 100 landings went into it); Cy's page uses real gore and the others
+    neon, so this also proves the style does not touch the simulation; then switching Ash's page to
+    real gore and back rebuilds the blood layer, saves the choice and keeps the fingerprint,
   - drops the killer's socket and asserts the resume keeps id and score on every page,
   - sends a manual debug report and reads it back with `tools/debug.js report <id>`: the
     untrusted-input line, the server's view of that player, and no token in the files,

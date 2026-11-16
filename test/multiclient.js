@@ -49,6 +49,11 @@ async function fightTest() {
   for (const p of all) await waitFor(() => p.page.evaluate(ids => ids.every(id => __mp.net.meta.get(id)), ids), { what: 'names on ' + p.name });
   log(`joined: ${all.map(p => `${p.name}=${p.id}`).join(' ')}`);
 
+  // blood style (SPEC §7): neon by default; Cy watches in real gore, which must not change the
+  // simulation (the gore fingerprint below is compared across both styles)
+  for (const p of [A, B]) assert.equal(await p.page.evaluate(() => __mp.gore.style), 'neon', 'neon blood by default');
+  assert.equal(await C.page.evaluate(() => __mp.gore.setStyle('real')), 'real');
+
   // --- fight: A and B meet on the floor and slash until one dies; C parks out of the way
   await installBot(A.page, { mode: 'fight', target: B.id });
   await installBot(B.page, { mode: 'fight', target: A.id });
@@ -137,7 +142,21 @@ async function fightTest() {
   }
   log(`gore fingerprints for kill ${key}: ${fps.map(f => f.fp).join(' ')} (decals ${fps[0].c.decals}, pools ${fps[0].c.pools})`);
   assert.ok(fps[0].fp && +fps[0].fp.split(':')[0] > 100, 'plenty of blood landed');
-  for (const f of fps) assert.equal(f.fp, fps[0].fp, 'same gore on every page');
+  for (const f of fps) assert.equal(f.fp, fps[0].fp, 'same gore on every page (neon and real-gore pages alike)');
+  // switching style repaints the blood already there (the baked layer is rebuilt) and changes nothing
+  // in the simulation; the choice is saved in localStorage
+  const sw = await A.page.evaluate(k => {
+    const before = __mp.gore.counts.layerRebuilds;
+    __mp.gore.setStyle('real');
+    const mid = { fp: __mp.gore.fingerprint(k), rebuilt: __mp.gore.counts.layerRebuilds > before, saved: JSON.parse(localStorage.getItem('multisplat-cfg') || '{}').realGore };
+    __mp.gore.setStyle('neon');
+    return { ...mid, back: __mp.gore.style, fp2: __mp.gore.fingerprint(k) };
+  }, key);
+  assert.ok(sw.rebuilt, 'switching style rebuilds the baked blood layer');
+  assert.equal(sw.saved, true, 'the style is saved');
+  assert.equal(sw.fp, fps[0].fp); assert.equal(sw.fp2, fps[0].fp); assert.equal(sw.back, 'neon');
+  assert.equal(await C.page.evaluate(() => __mp.gore.style), 'real');
+  log('blood styles: real-gore page has the same fingerprint as the neon pages; switching repaints');
 
   // --- drop and reconnect within 5 s keeps the score
   const score = await killer.page.evaluate(id => __mp.net.meta.get(id).score, killer.id);

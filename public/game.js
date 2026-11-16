@@ -21,7 +21,7 @@ let SCALE = 1;   // device pixels per world unit
 
 // ---------- tunables (edited live by the debug panel, D) ----------
 // Sim tunables come from shared/constants.js; the rest are client-only view and dummy switches.
-const CLIENT_DEFAULTS = { gameSpeed: 1, gore: true, musicVol: .5, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
+const CLIENT_DEFAULTS = { gameSpeed: 1, gore: true, realGore: false, musicVol: .5, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
 const ALL_DEFAULTS = { ...DEFAULTS, ...CLIENT_DEFAULTS };
 const CFG = { ...ALL_DEFAULTS };
 const CFG_KEY = 'multisplat-cfg';
@@ -36,9 +36,30 @@ function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.h
 function rng(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
 const NEON = { pink: '#ff2a6d', cyan: '#05d9e8', yellow: '#f9f871', purple: '#b026ff', green: '#39ff14', magenta: '#ff6ec7' };
 const NEON_LIST = Object.values(NEON);
-// Blood is red (not NinjaRunner's neon): arterial to dark crimson. gore.js stores indices into this.
-const BLOOD = ['#ff1f1f', '#e8100c', '#ff2a22', '#c40a0a', '#9c0410', '#6e0008'];
-const POOL = ['#b30a0a', '#a0060b', '#b00c08', '#8e0508', '#760309', '#5a0006'];   // pools: darker, as blood that has gathered
+// Two blood styles (SPEC §7), a per-client look only. gore.js stores a colour index (0-5) with every
+// drop, decal and pool, drawn from the kill's seed, and each style maps the index to its own colour,
+// so the same kill paints the same spatter in either style and switching repaints it.
+// - neon (the default): NinjaRunner's multi-colour neon blood (BLOOD = NEON_LIST), glowing with the
+//   'lighter' blend, for flying drops and for the baked layer of decals and pools;
+// - real: reds, arterial to dark crimson, with darker pools; flying drops still add up ('lighter'),
+//   which keeps stacked red red; the baked layer is drawn normally.
+const BLOOD_STYLES = {
+  neon: { drops: NEON_LIST, pools: ['#c8205a', '#04a8b4', '#c4c25a', '#8a1ec8', '#2cc810', '#c8579c'],
+    layerBlend: 'lighter', layerAlpha: .85, cut: ['#4a0a3a', '#ff2a6d', '#ffd1e6'] },
+  real: { drops: ['#ff1f1f', '#e8100c', '#ff2a22', '#c40a0a', '#9c0410', '#6e0008'],
+    pools: ['#b30a0a', '#a0060b', '#b00c08', '#8e0508', '#760309', '#5a0006'],   // darker, as blood that has gathered
+    layerBlend: 'source-over', layerAlpha: .96, cut: ['#5a0006', '#e8100c', '#ff6a5a'] },
+};
+const bloodStyleName = () => (CFG.realGore ? 'real' : 'neon');
+let BSTYLE = BLOOD_STYLES[bloodStyleName()], BLOOD = BSTYLE.drops, POOL = BSTYLE.pools;
+// Switch the palette and repaint: the baked decal/pool layer is rebuilt from G (and the stained
+// spike tile, for levels that have spikes); nothing in the gore simulation changes.
+function applyBloodStyle() {
+  BSTYLE = BLOOD_STYLES[bloodStyleName()]; BLOOD = BSTYLE.drops; POOL = BSTYLE.pools;
+  if (TILE.spikeBloody) TILE.spikeBloody = tileCanvas(drawSpikesBloody);
+  if (GL.c) rebuildGoreLayer();
+  dbg('perf', 'gore: blood style', { style: bloodStyleName() });
+}
 function rrect(g, x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
   g.beginPath(); g.moveTo(x + r, y);
@@ -106,7 +127,10 @@ function buildTiles() {
     g.shadowBlur = 0;
   });
   TILE.spike = tileCanvas(drawSpikes);
-  TILE.spikeBloody = tileCanvas(g => {
+  TILE.spikeBloody = tileCanvas(drawSpikesBloody);
+}
+function drawSpikesBloody(g) {
+  {
     drawSpikes(g);
     g.lineCap = 'round';
     for (let i = 0; i < 4; i++) {
@@ -121,7 +145,7 @@ function buildTiles() {
     }
     g.shadowBlur = 0;
     g.globalAlpha = .7; g.fillStyle = NEON.purple; g.fillRect(0, 15, T, 1); g.globalAlpha = 1;
-  });
+  }
 }
 
 // ---------- background: night city (vector, cached; capped resolution for memory) ----------
@@ -850,9 +874,9 @@ function render() {
   if (G.decals.length || G.pools.size) {
     updateGoreLayer();
     const sx = Math.max(0, cx), sy = Math.max(0, CY), w = Math.min(VW, L.w * T - sx), h = Math.min(VH, L.h * T - sy);
-    ctx.globalAlpha = .96;
+    ctx.globalAlpha = BSTYLE.layerAlpha; ctx.globalCompositeOperation = BSTYLE.layerBlend;   // neon glows ('lighter')
     ctx.drawImage(GL.c, sx * GL.s, sy * GL.s, w * GL.s, h * GL.s, sx - cx, sy, w, h);
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   }
 
   // the dead: flipped over and falling (impaled ones stay on the spikes), fading out
@@ -1101,13 +1125,13 @@ function drawGib(g, cx) {
     noGlow = true;
     drawKanbei(DEAD_KANBEI, -5, -13, g.face, { impaled: true }, g.meta || COLORS[0]);
     noGlow = false;
-    // the raw cut face: dark crimson edge with a bright wet line
-    const fx = g.cut[0] + g.ox, fy = g.cut[1] + g.oy, dx = -g.cut[3] * 8, dy = g.cut[2] * 8;
+    // the raw cut face: a dark edge with a bright wet line, in the blood style's colours
+    const fx = g.cut[0] + g.ox, fy = g.cut[1] + g.oy, dx = -g.cut[3] * 8, dy = g.cut[2] * 8, [c0, c1, c2] = BSTYLE.cut;
     ctx.clip(BODY);
     ctx.lineCap = 'round';
-    ctx.strokeStyle = '#5a0006'; ctx.lineWidth = 2.2; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
-    ctx.strokeStyle = '#e8100c'; ctx.lineWidth = 1.1; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
-    ctx.strokeStyle = '#ff6a5a'; ctx.lineWidth = .35; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+    ctx.strokeStyle = c0; ctx.lineWidth = 2.2; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+    ctx.strokeStyle = c1; ctx.lineWidth = 1.1; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
+    ctx.strokeStyle = c2; ctx.lineWidth = .35; line(ctx, fx - dx, fy - dy, fx + dx, fy + dy);
   }
   ctx.restore();
 }
@@ -1231,11 +1255,15 @@ function buildDebug() {
     }
   }
   const g = document.createElement('h3'); g.textContent = 'Cheats & view'; panel.appendChild(g);
-  const toggles = [['hitboxes', 'Show hitboxes'], ['gore', 'Gore (blood, body pieces)'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
-  for (const [key, name] of ONLINE ? toggles.slice(0, 2) : toggles) {
+  const toggles = [['hitboxes', 'Show hitboxes'], ['gore', 'Gore (blood, body pieces)'], ['realGore', 'Real gore (red blood, not neon)'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
+  for (const [key, name] of ONLINE ? toggles.slice(0, 3) : toggles) {
     const lab = document.createElement('label'); lab.className = 'chk';
     const c = document.createElement('input'); c.type = 'checkbox'; c.checked = CFG[key];
-    c.addEventListener('change', () => { CFG[key] = c.checked; saveCfg(); if (key === 'gore') dbg('perf', 'gore: ' + (c.checked ? 'on' : 'off')); });
+    c.addEventListener('change', () => {
+      CFG[key] = c.checked; saveCfg();
+      if (key === 'gore') dbg('perf', 'gore: ' + (c.checked ? 'on' : 'off'));
+      if (key === 'realGore') applyBloodStyle();
+    });
     lab.append(c, document.createTextNode(name)); panel.appendChild(lab);
   }
   // sound: available online too (it is not physics)
@@ -1252,7 +1280,7 @@ function buildDebug() {
   }
   const btns = document.createElement('div'); btns.className = 'btns';
   const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); btns.appendChild(b); return b; };
-  mkBtn('Reset defaults', () => { Object.assign(CFG, ALL_DEFAULTS); saveCfg(); buildDebug(); });
+  mkBtn('Reset defaults', () => { Object.assign(CFG, ALL_DEFAULTS); saveCfg(); applyBloodStyle(); buildDebug(); });
   const copy = mkBtn('Copy values', async () => {
     try { await navigator.clipboard.writeText(JSON.stringify(CFG, null, 2)); copy.textContent = 'Copied!'; }
     catch (e) { copy.textContent = 'Copy failed'; }
@@ -1470,7 +1498,7 @@ setReportSource(() => {
       touch: matchMedia('(pointer: coarse)').matches, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
       online: ONLINE, cfg: changed, page: location.pathname,
       music: music ? { state: music.state, ...music.rendered, muted } : null,
-      gore: { on: CFG.gore, parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
+      gore: { on: CFG.gore, style: bloodStyleName(), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
     net: ONLINE ? { state: net.state, mode: net.mode, id: net.id, rttAvg: net.stats.rttAvg, rttMax: net.stats.rttMax,
       jitterMs: net.stats.jitter, predErrRms: net.predErrRms(), reconnects: net.stats.reconnects, snaps: net.stats.snaps,
       snapCorrections: net.stats.snapsSnapped, pending: net.pending(), queuePos: net.queuePos, fps: Math.round(fps) } : { fps: Math.round(fps) },
@@ -1502,6 +1530,9 @@ window.__mp = {
   gore: {
     G, fingerprint: key => fingerprint(G, key), settled: key => settled(G, key), keys: () => [...G.kills.keys()],
     get counts() { return { parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, bloody: G.bloody.size, ...G.stats, layerRebuilds: GL.rebuilds, layerMs: GL.lastMs }; },
+    // the blood style (SPEC §7), as the debug panel's "Real gore" toggle sets it (saved in localStorage)
+    get style() { return bloodStyleName(); },
+    setStyle(st) { CFG.realGore = st === 'real'; saveCfg(); applyBloodStyle(); if (!panel.classList.contains('hidden')) buildDebug(); return bloodStyleName(); },
   },
   get strip() { return { builds: stripBuilds, chips: [...stripEl.children].map(c => ({ id: +c.dataset.id, me: c.classList.contains('me'), text: c.textContent })) }; },
   get feed() { return [...feedEl.children].map(e => e.textContent); },

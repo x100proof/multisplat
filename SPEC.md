@@ -263,7 +263,9 @@ reverb) but **fast and aggressive**:
 ## 9. Lobby and HUD
 
 - **Lobby screen:** a logo, a name field (1–16 chars, allowlist `[A-Za-z0-9 _-]`, trimmed, and
-  validated on the server too), a palette of 8 neon colour swatches, a live list of players
+  validated on the server too), a palette of 12 neon colour swatches (**no two fighters share a colour**: swatches worn by
+  players in the arena are greyed out, and the server gives a player whose colour is taken the
+  next free one), a live list of players
   with their scores, and the queue position if the arena is full. There is a Fight button.
 - **In-game HUD:**
   - Your HP, your score and your ninja-star count (§5.2).

@@ -634,3 +634,22 @@ test('tools/debug.js never prints terminal control characters from a report', as
     assert.doesNotMatch(out, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f‮]/);
   } finally { srv.close(); }
 });
+
+test('no two fighters share a colour; a queued player gets a free one on promotion', () => {
+  const { conn, arena } = setup({ maxPlayers: 3 });
+  const [a, b, c, d] = [conn(), conn(), conn(), conn()];
+  a.say({ t: 'hello', name: 'A', color: 4 }); b.say({ t: 'hello', name: 'B', color: 4 }); c.say({ t: 'hello', name: 'C', color: 11 });
+  assert.equal(a.last('welcome').color, 4);
+  assert.equal(b.last('welcome').color, 5, 'a taken colour becomes the next free one');
+  assert.equal(c.last('welcome').color, 11);
+  d.say({ t: 'hello', name: 'D', color: 11 });
+  assert.equal(d.last('welcome').state, 'queue');
+  c.say({ t: 'leave' });                       // D is promoted; 11 is free again, so D keeps it
+  assert.equal(arena.recs.get(4).state, 'play'); assert.equal(arena.recs.get(4).color, 11);
+  const e = conn(); e.say({ t: 'hello', name: 'E', color: 11 });
+  a.say({ t: 'leave' });                       // E is promoted while D wears 11: wraps to 0
+  assert.equal(arena.recs.get(5).color, 0);
+  const worn = [...arena.recs.values()].filter(r => r.state === 'play').map(r => r.color);
+  assert.equal(new Set(worn).size, worn.length);
+  assert.ok(b.events().some(ev => ev.type === 'join' && ev.id === 5 && ev.color === 0), 'others learn the assigned colour');
+});

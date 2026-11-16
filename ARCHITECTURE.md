@@ -66,7 +66,7 @@ from `/shared/*.js`.
 
   Next to it are `HISTORY_TICKS` (12) and `TICK_MS` (16.67).
 - `COLORS` holds the 8 lobby colours. The first six are NinjaRunner's NEON set. Players pick one
-  by index (0–7).
+  by index (0–11). No two fighters share one: `Arena.freeColor` runs when a record enters the arena.
 - `NAME_RE` / `cleanName(s)` trims, collapses double spaces and checks for 1–16 characters from
   `[A-Za-z0-9 _-]`. It returns the clean name or `null`. The lobby and the server both use it.
 
@@ -240,7 +240,7 @@ The protocol is JSON text frames, each with a `t` field. Server limits:
 Client → server:
 
 ```js
-{ t: 'hello', name, color /* 0-7 */, token? /* resume */, resume? /* true: resume only (an automatic
+{ t: 'hello', name, color /* 0-11 */, token? /* resume */, resume? /* true: resume only (an automatic
   reconnect); a dead token gets the `expired` welcome below instead of a fresh join */ }
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }

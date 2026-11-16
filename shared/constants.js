@@ -77,4 +77,6 @@ export function cleanName(s) {
 export const HISTORY_TICKS = Math.ceil(NET.historyMs * TICK_HZ / 1000);
 
 // The 8 lobby colours (SPEC §9). The first six are NinjaRunner's NEON palette.
-export const COLORS = Object.freeze(['#ff2a6d', '#05d9e8', '#f9f871', '#b026ff', '#39ff14', '#ff6ec7', '#ff8c1a', '#ffffff']);
+// 12 colours for 12 fighters: no two players in the arena share one (the server enforces it).
+export const COLORS = Object.freeze(['#ff2a6d', '#05d9e8', '#f9f871', '#b026ff', '#39ff14', '#ff6ec7', '#ff8c1a', '#ffffff',
+  '#3d6bff', '#ff2d1a', '#00c9a7', '#c6ff1a']);

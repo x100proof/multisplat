@@ -243,6 +243,7 @@ export class Arena {
   }
 
   activate(rec, promoted) {
+    rec.color = this.freeColor(rec);
     rec.state = 'play'; rec.lastActive = this.now(); rec.inputs.length = 0;
     const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg, level: this.level });
     this.log(`${promoted ? 'promote' : 'join'} conn=${rec.conn ? rec.conn.id : '-'} id=${rec.id} name=${rec.name}`);
@@ -274,6 +275,15 @@ export class Arena {
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
     this.lobbyDirty = true;
+  }
+
+  // No two fighters share a colour (SPEC §9): a player entering the arena keeps the colour it asked
+  // for if no other fighter has it, otherwise takes the next free one. Queued players don't hold one.
+  freeColor(rec) {
+    const used = new Set();
+    for (const r of this.recs.values()) if (r !== rec && r.state === 'play') used.add(r.color);
+    for (let k = 0; k < COLORS.length; k++) { const c = (rec.color + k) % COLORS.length; if (!used.has(c)) return c; }
+    return rec.color;   // more fighters than colours (only with a raised maxPlayers)
   }
 
   promote() {

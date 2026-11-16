@@ -1551,7 +1551,7 @@ function setupLobby() {
   COLORS.forEach((c, i) => {
     const b = document.createElement('button');
     b.className = 'sw'; b.style.setProperty('--c', c); b.title = `colour ${i + 1}`; b.dataset.i = i;
-    b.addEventListener('click', () => { pickedColor = i; lsSet(LS_COLOR, String(i)); markColor(); });
+    b.addEventListener('click', () => { if (takenColors().has(i)) return; pickedColor = i; lsSet(LS_COLOR, String(i)); markColor(); });
     sw.appendChild(b);
   });
   markColor();
@@ -1564,7 +1564,19 @@ function setupLobby() {
     out.textContent = id ? `report id ${id}` : 'could not send';
   });
 }
-function markColor() { for (const b of document.querySelectorAll('#lColors .sw')) b.classList.toggle('on', +b.dataset.i === pickedColor); }
+// Colours already worn by fighters can't be picked (the server would hand out another anyway).
+function takenColors() { return new Set(net ? (net.lobby.players || []).filter(p => p.id !== net.id).map(p => p.color) : []); }
+function markColor() {
+  const taken = takenColors();
+  if (lobbyOpen && taken.has(pickedColor)) {   // our remembered colour is in use: move to the next free one
+    for (let k = 1; k < COLORS.length; k++) { const c = (pickedColor + k) % COLORS.length; if (!taken.has(c)) { pickedColor = c; break; } }
+  }
+  for (const b of document.querySelectorAll('#lColors .sw')) {
+    const i = +b.dataset.i;
+    b.classList.toggle('on', i === pickedColor); b.classList.toggle('taken', taken.has(i));
+    b.title = taken.has(i) ? 'taken' : `colour ${i + 1}`;
+  }
+}
 
 function fight() {
   if (!lobbyOpen) return;
@@ -1586,6 +1598,7 @@ function fight() {
 
 function renderLobby() {
   if (!ONLINE) return;
+  markColor();
   const { players, queue, cap } = net.lobby;
   const list = document.getElementById('lPlayers');
   list.textContent = '';

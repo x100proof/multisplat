@@ -27,7 +27,7 @@
   #stage { --sh: clamp(22px, 3.4vw, 31px); --hf: clamp(11px, 2.2vw, 20px); --top: calc(var(--sh) + var(--hf) * 1.3 + 10px); }
   /* scores for everyone along the top (SPEC §9): colour dot, name, score; ordered by score. Chips
      share the width equally (up to a cap), so a short name is never cut for a long one's sake. */
-  #strip { position: absolute; left: 0; right: calc(var(--fsw) + var(--mbw)); top: 0; height: var(--sh); display: none; justify-content: center; gap: 3px;
+  #strip { position: absolute; left: 0; right: calc(var(--fsw) + 2 * var(--mbw)); top: 0; height: var(--sh); display: none; justify-content: center; gap: 3px;
            padding: 2px 4px 0; box-sizing: border-box; pointer-events: none; font-weight: 700; z-index: 2;
            font-size: clamp(12.5px, 1.8vw, 18px); text-shadow: 1px 1px 0 #000; }
   body:not(.inlobby) #strip:not(:empty) { display: flex; }
@@ -90,18 +90,21 @@
      --fsw is the room it takes (0 where the browser has no full screen). The icon follows the state. */
   :root { --fsw: calc(clamp(17px, 2.6vw, 24px) + 12px); --mbw: calc(clamp(17px, 2.6vw, 24px) + 8px); }
   body.nofs { --fsw: 0px; }
-  /* the mute button sits just left of the full screen button (where that is hidden, in its place);
-     --mbw is the room it takes. A ♪; lit up while the sound is off. */
+  /* left of the full screen button (where that is hidden, from its place): the speaker mutes all
+     sound, the ♪ left of it only the music; --mbw is the room each takes. Lit up while off. */
   #muteBtn { right: var(--fsw); }
-  #muteBtn { font: 700 clamp(13px, 2vw, 18px)/1 system-ui, sans-serif; }
-  body.touchui #muteBtn { font-size: 19px; }
-  #muteBtn.on { border-color: #ff2a6d; color: #ff2a6d; box-shadow: 0 0 10px rgba(255,42,109,.75); }
+  #musicBtn { right: calc(var(--fsw) + var(--mbw)); font: 700 clamp(13px, 2vw, 18px)/1 system-ui, sans-serif; }
+  body.touchui #musicBtn { font-size: 19px; }
+  /* off: a slash from lower left to upper right across the icon */
+  #muteBtn.on::before, #musicBtn.on::before { content: ''; position: absolute; left: 12%; right: 12%; top: calc(50% - 1px); height: 2px;
+                                              background: currentColor; border-radius: 1px; transform: rotate(-45deg); pointer-events: none; }
+  #muteBtn.on, #musicBtn.on, #muteBtn.on:hover, #musicBtn.on:hover { border-color: #ff2a6d; color: #ff2a6d; box-shadow: 0 0 10px rgba(255,42,109,.75); }
   #fsBtn { right: 4px; }
-  #fsBtn, #muteBtn { position: fixed; top: 2px; z-index: 7; width: calc(clamp(17px, 2.6vw, 24px) + 4px); height: calc(clamp(17px, 2.6vw, 24px) + 2px);
+  #fsBtn, #muteBtn, #musicBtn { position: fixed; top: 2px; z-index: 7; width: calc(clamp(17px, 2.6vw, 24px) + 4px); height: calc(clamp(17px, 2.6vw, 24px) + 2px);
            padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; touch-action: none;
            border: 1px solid rgba(5,217,232,.55); border-radius: 5px; background: rgba(5,3,10,.6); color: #d1f7ff;
            box-shadow: 0 0 6px rgba(5,217,232,.35); }
-  #fsBtn:hover, #fsBtn:focus-visible, #muteBtn:hover, #muteBtn:focus-visible { border-color: #05d9e8; box-shadow: 0 0 10px rgba(5,217,232,.7); outline: none; }
+  #fsBtn:hover, #fsBtn:focus-visible, #muteBtn:hover, #muteBtn:focus-visible, #musicBtn:hover, #musicBtn:focus-visible { border-color: #05d9e8; box-shadow: 0 0 10px rgba(5,217,232,.7); outline: none; }
   #fsBtn svg, #muteBtn svg { width: 72%; height: 72%; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
   #fsBtn .out, #fsBtn.on .in { display: none; }
   #fsBtn.on .out { display: block; }
@@ -109,13 +112,16 @@
   /* a bigger target for thumbs: a 36x30 button with a 52x46 hit area, clear of the notch */
   body.touchui { --fsw: 44px; --mbw: 40px; }
   body.touchui.nofs { --fsw: 0px; }
-  body.touchui #fsBtn, body.touchui #muteBtn { width: 36px; height: 30px; top: max(2px, env(safe-area-inset-top)); }
+  body.touchui #fsBtn, body.touchui #muteBtn, body.touchui #musicBtn { width: 36px; height: 30px; top: max(2px, env(safe-area-inset-top)); }
   body.touchui #fsBtn { right: max(4px, env(safe-area-inset-right)); }
   body.touchui #muteBtn { right: calc(var(--fsw) + env(safe-area-inset-right)); }
-  body.touchui #fsBtn::after, body.touchui #muteBtn::after { content: ''; position: absolute; inset: -8px; }
+  body.touchui #musicBtn { right: calc(var(--fsw) + var(--mbw) + env(safe-area-inset-right)); }
+  body.touchui #fsBtn::after { content: ''; position: absolute; inset: -8px; }
+  body.touchui #muteBtn::after, body.touchui #musicBtn::after { content: ''; position: absolute; inset: -8px -2px; }   /* side by side: no overlap */
   /* a phone held upright: the stage is turned 90 degrees, so the game's top right is the screen's bottom right */
   body.rot #fsBtn, body.touchui.rot #fsBtn { top: auto; right: 4px; bottom: max(4px, env(safe-area-inset-bottom)); transform: rotate(90deg); }
   body.rot #muteBtn, body.touchui.rot #muteBtn { top: auto; right: 4px; bottom: calc(max(4px, env(safe-area-inset-bottom)) + var(--fsw)); transform: rotate(90deg); }
+  body.rot #musicBtn, body.touchui.rot #musicBtn { top: auto; right: 4px; bottom: calc(max(4px, env(safe-area-inset-bottom)) + var(--fsw) + var(--mbw)); transform: rotate(90deg); }
   #tbar button { width: 46px; height: 46px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
                  background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
   #tbar button.off { opacity: .45; }
@@ -298,7 +304,8 @@
   <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tT" aria-label="Throw a ninja star">✦</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
-<button id="muteBtn" aria-label="Mute (M)" title="Mute (M)" aria-pressed="false">♪</button>
+<button id="musicBtn" aria-label="Music off (N)" title="Music off (N)" aria-pressed="false">♪</button>
+<button id="muteBtn" aria-label="Mute all sound (M)" title="Mute all sound (M)" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h4l5-4v14l-5-4H3z" stroke-linejoin="round"/><path d="M16 8.5a5 5 0 0 1 0 7M19 5.5a9 9 0 0 1 0 13"/></svg></button>
 <button id="fsBtn" aria-label="Full screen (F)" title="Full screen (F)" aria-pressed="false"><svg class="in" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><svg class="out" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>
 <div id="howto" class="hidden" role="dialog" aria-modal="true" aria-labelledby="hwTitle">
   <div class="box">
@@ -312,7 +319,7 @@
       <tr class="keysonly"><td>X</td><td>Throw a ninja star, if you have any.</td></tr>
       <tr class="keysonly"><td>C</td><td>Chat: type a line, Enter sends it, Esc cancels. Everyone sees it above your head for a few seconds.</td></tr>
       <tr class="keysonly"><td>Tab</td><td>Hold for the full scoreboard.</td></tr>
-      <tr class="keysonly"><td>F · M</td><td>Full screen · mute.</td></tr>
+      <tr class="keysonly"><td>F · M · N</td><td>Full screen · mute all sound · music on or off (also the buttons at the top right).</td></tr>
       <tr class="keysonly"><td>Esc</td><td>Leave the fight (it asks first).</td></tr>
       <tr class="keysonly"><td>H</td><td>This screen.</td></tr>
       <tr class="keysonly"><td>Gamepad</td><td>Stick or d-pad to move, A jump, X or B slash, Y throw, bumpers run.</td></tr>
@@ -321,7 +328,7 @@
       <tr class="touchonly"><td>⚔</td><td>Slash. Tap again right after a chop for a sweep.</td></tr>
       <tr class="touchonly"><td>✦</td><td>Throw a ninja star, if you have any.</td></tr>
       <tr class="touchonly"><td>💬</td><td>Chat: type a line and send it; everyone sees it above your head.</td></tr>
-      <tr class="touchonly"><td>♪ · ? · ✕</td><td>Mute (top right, lit up while muted) · this screen · leave the fight.</td></tr>
+      <tr class="touchonly"><td>? · ✕</td><td>This screen · leave the fight. At the top right: ♪ turns the music on or off, the speaker mutes all sound (each crossed out and lit up while off).</td></tr>
     </table>
     <h3>Fighting</h3>
     <p>You have 100 HP. A chop does 34 damage and a sweep 25. For a moment after respawning you flash and can't be hurt, until you attack.</p>

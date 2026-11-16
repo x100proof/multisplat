@@ -284,7 +284,7 @@ addEventListener('orientationchange', () => { clearTimeout(resizeTimer); resizeT
 resize();
 
 // ---------- audio: NinjaRunner's synthesised SFX, and the music (music.js) ----------
-let AC = null, muted = false;
+let AC = null, muted = false, musicOff = false;   // muted: all sound; musicOff: just the music
 // Touch devices get a bigger audio buffer ('playback' latency), as in NinjaRunner.
 // ?full forces the desktop version, ?lite the phone version, ?latency= overrides the buffer.
 const LITE_AUDIO = QS.has('lite') || (!QS.has('full') && matchMedia('(pointer: coarse)').matches);
@@ -302,16 +302,23 @@ function initAudio() {
   if (AC && AC.state === 'suspended') AC.resume();
   if (AC && !music && !QS.has('nomusic')) {
     music = createMusic({ ac: AC, out: audioOut(), lite: LITE_AUDIO, log: (m, d) => dbg('audio', m, d) });
-    music.target = CFG.musicVol; music.muted = muted;
+    music.target = CFG.musicVol; music.muted = muted || musicOff;
     music.start();   // renders in the background; plays when ready
   }
 }
 let music = null;
 function setMuted(m) {
-  muted = m; if (music) { music.muted = m; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted');
-  // the ♪ button by full screen shows the state (M toggles it too)
-  const b = document.getElementById('muteBtn');
-  if (b) { b.classList.toggle('on', m); b.setAttribute('aria-pressed', String(m)); const l = m ? 'Sound on (M)' : 'Mute (M)'; b.title = l; b.setAttribute('aria-label', l); }
+  muted = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted');
+  soundBtn('muteBtn', m, m ? 'Sound on (M)' : 'Mute all sound (M)');
+}
+// The ♪ button and N: the music alone (sound effects carry on).
+function setMusicOff(m) {
+  musicOff = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'music off' : 'music on');
+  soundBtn('musicBtn', m, m ? 'Music on (N)' : 'Music off (N)');
+}
+function soundBtn(id, on, label) {
+  const b = document.getElementById(id);
+  if (b) { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.title = label; b.setAttribute('aria-label', label); }
 }
 document.addEventListener('visibilitychange', () => { if (AC) { if (document.hidden) AC.suspend(); else AC.resume(); } });
 // Everything plays through one master gain.
@@ -433,6 +440,7 @@ addEventListener('keydown', e => {
   if (!keys[e.code] && KEYMAP[e.code]) latch |= KEYMAP[e.code];
   keys[e.code] = true;
   if (e.code === 'KeyM' && !e.repeat) setMuted(!muted);
+  if (e.code === 'KeyN' && !e.repeat) setMusicOff(!musicOff);
   if (e.code === 'Tab') { e.preventDefault(); board(true); }
 });
 addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Tab') board(false); });
@@ -531,6 +539,9 @@ fsBtn.addEventListener('pointerdown', e => e.stopPropagation());
 const muteBtn = document.getElementById('muteBtn');
 muteBtn.addEventListener('click', e => { e.preventDefault(); initAudio(); setMuted(!muted); muteBtn.blur(); });
 muteBtn.addEventListener('pointerdown', e => e.stopPropagation());
+const musicBtn = document.getElementById('musicBtn');
+musicBtn.addEventListener('click', e => { e.preventDefault(); initAudio(); setMusicOff(!musicOff); musicBtn.blur(); });
+musicBtn.addEventListener('pointerdown', e => e.stopPropagation());
 // Escape that only took us out of full screen must not also open the leave menu
 const escLeavesFullscreen = () => !!fsEl() || performance.now() - fsLeftAt < 500;
 syncFullscreen();
@@ -1971,7 +1982,7 @@ setReportSource(() => {
     env: { build: BUILD, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
       touch: TOUCH_UI, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
       online: ONLINE, cfg: changed, page: location.pathname,
-      music: music ? { state: music.state, ...music.rendered, muted } : null,
+      music: music ? { state: music.state, ...music.rendered, muted, musicOff } : null,
       gore: { on: CFG.gore, style: bloodStyleName(), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
     net: ONLINE ? { state: net.state, mode: net.mode, id: net.id, rttAvg: net.stats.rttAvg, rttMax: net.stats.rttMax,
       jitterMs: net.stats.jitter, predErrRms: net.predErrRms(), reconnects: net.stats.reconnects, snaps: net.stats.snaps,

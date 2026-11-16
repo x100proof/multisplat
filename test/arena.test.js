@@ -71,7 +71,7 @@ test('names are validated and duplicates get #2', () => {
   assert.equal(b.last('welcome').name, 'kit#2');
   c.say({ t: 'hello', name: '<script>', color: 1 });
   assert.equal(c.last('kick').reason, 'bad hello'); assert.equal(c.closed.code, KICK['bad hello']);
-  for (const bad of [{ name: '', color: 0 }, { name: 'x'.repeat(17), color: 0 }, { name: 'ok', color: 8 }, { name: 'ok', color: '1' }, { name: 'ok', color: 0, token: 'zz' }]) {
+  for (const bad of [{ name: '', color: 0 }, { name: 'x'.repeat(17), color: 0 }, { name: 'ok', color: 12 }, { name: 'ok', color: '1' }, { name: 'ok', color: 0, token: 'zz' }]) {
     const d = conn(); d.say({ t: 'hello', ...bad }); assert.equal(d.last('kick')?.reason, 'bad hello', JSON.stringify(bad));
   }
 });

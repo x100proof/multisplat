@@ -1,18 +1,17 @@
 # multisplat: architecture (as implemented)
 
-Status: **M3**. This covers:
+Status: **M5**. This covers:
 - the shared simulation and the arena (M1),
 - the authoritative WebSocket server, with lobby, queue, resume and lag compensation,
 - the online client, with prediction and interpolation,
 - the remote-debugging pipeline (M2),
-- client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3).
-
-M3 changed nothing in the protocol, the server or `shared/`.
+- client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3),
+- long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX.
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
-shared/level.js       the 26x18 arena, tile queries, spawn points, spawn picker
-shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, respawn)
+shared/level.js       the 26x18 arena, tile queries, spawn points, long-sword item points, spawn picker
+shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, respawn, pickups)
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
@@ -23,8 +22,8 @@ public/music.js       the combat score as data, its offline pre-render into two 
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
 public/debug.js       client log ring (dbg), debug report builder and sender
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, level, server, arena, gore, music, hygiene)
-test/multiclient.js   headless Chromium: 3 players, fight, kill feed, gore fingerprint, resume, debug report, NET_SIM prediction
+test/*.test.js        node:test unit tests (sim, items, level, server, arena, gore, music, hygiene)
+test/multiclient.js   headless Chromium: 3 players, fight, kill feed, gore fingerprint, resume, debug report, NET_SIM prediction, long sword
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
 test/lib.js, bot.js   test helpers (spare ports, server process, Chromium lookup) and the scripted player
@@ -44,7 +43,11 @@ from `/shared/*.js`.
 - `DEFAULTS` holds every tunable the sim reads: NinjaRunner movement, `pushDamp`, and the SPEC §5
   combat values (`maxHp 100`, `chopDmg 34`, `sweepDmg 25`, `knockX 3.5`, `knockY -3`, `killKnockMul 1.4`,
   `hitStun 10`, `stunMoveMul .25`, `spawnIframes 90`, `respawnTicks 120`, `creditTicks 300`,
-  `spawnMinDist 64`).
+  `spawnMinDist 64`) and the pickup tunables `itemMinTicks 1200`, `itemMaxTicks 2400` (20–40 s),
+  `itemMax 2`, `itemClear 32`.
+- `LONG_REACH = 1.6` (the holder's sword-box length factor) is a separate constant, not in `DEFAULTS`,
+  because the offline debug panel edits `cfg` and reach must always match the server.
+  `ITEM_W 8`, `ITEM_H 14` is a pickup's body.
 - `NET` holds the netcode values:
   - `historyMs 200`, `rewindCapMs 150`,
   - `snapshotHz 30`, `maxInputBatch 3`,
@@ -67,6 +70,10 @@ and one on top of the centre block. There are 14 spawn points. Each one is given
 x is the centre and y is the top of the tile stood on.
 
 - `isSolid(L, tx, ty)` and `isPlat` are NinjaRunner's tile tests. `tileAt` returns the tile code.
+- `LEVEL.items`: 10 long-sword item points, given like spawns (x centre, y the surface top), two per
+  surface level (floor and the four tiers), none in the spike columns 12–13. Each lies on the same
+  walkable surface as a spawn point (a test checks footing, headroom, no spikes in the column and the
+  walk from that spawn).
 - `spawnPos(s)` gives the top-left of a body standing on spawn point `s`.
 - `pickSpawn(L, living, rand, minDist)` skips points within `minDist` of a living player. It weights
   the remaining points by the squared distance to the nearest living player. If every point is too
@@ -78,15 +85,19 @@ The sim is pure. It uses no DOM, clock or `Math.random`, and a test enforces tha
 plain JSON:
 
 ```js
-state = { tick, rng, players: [player…] }   // players kept sorted by numeric id
+state = { tick, rng, players: [player…],   // players kept sorted by numeric id
+          items: [{id, x, y}…],  // long-sword pickups lying in the arena (x, y = their item point)
+          itemT,                 // ticks until the next may appear (-1: drawn on the first step)
+          itemSeq }              // last pickup id used
 player = { id, x, y, w, h, vx, vy, px, py, face, onGround, coyote, buf, walk,
            atk, atkCd, atkType: 'chop'|'sweep', combo, swing, hitSet: [ids],
            hp, alive, iframes, stun, respawn, lastHitBy, lastHitTick, score, deaths,
-           keys /* previous tick's bitmask */, fx, standOn }
+           keys /* previous tick's bitmask */, fx, standOn, long /* holds a long sword */ }
 ```
 
 Randomness comes from NinjaRunner's Park–Miller generator, with its seed stored in `state.rng`.
-`nextRand(state)` advances it. The sim uses it only to pick spawns and to make kill seeds.
+`nextRand(state)` advances it. The sim uses it to pick spawns, to make kill seeds, and to draw the
+pickup countdown and point.
 
 ### API
 
@@ -99,11 +110,13 @@ Randomness comes from NinjaRunner's Park–Miller generator, with its seed store
 | `predictStep(state, id, keys, {cfg, level})` → inSpikes | Moves one player only and collides it against the others, which stay fixed. It does not advance `tick`, run combat or kill. Meant for client prediction. |
 | `movePlayer(p, keys, cfg, level)` → inSpikes | The per-player NinjaRunner update: run/walk, coyote time, jump buffer, variable jump, sword timers, tile collision. |
 | `resolvePlayers(players, cfg, level, fixedIds?)` | Player–player collision. |
-| `slashHits(attacker, targets)` → ids | Lag-compensation helper. It tests the attacker's live sword box against supplied `{id, x, y, w?, h?}` positions. It skips the attacker and ids already in `hitSet`, and changes no state. |
+| `slashHits(attacker, targets)` → ids | Lag-compensation helper. It tests the attacker's live sword box (`swordBoxOf`, so a holder's longer box) against supplied `{id, x, y, w?, h?}` positions. It skips the attacker and ids already in `hitSet`, and changes no state. |
+| `swordBoxOf(p)` | NinjaRunner's box. With `p.long` its length is ×`LONG_REACH` (chop 18 → 28.8, sweep 22 → 35.2); height, y and the near edge (2 units inside the body on the facing side) stay, so it grows outward in the facing direction only. |
+| `itemBox(it)`, `freeItemPoints(state, cfg, level)` | A pickup's body (centred on x, resting on y); the item points with no pickup and no living player's feet within `itemClear`. |
 | `createHistory()`, `recordHistory(hist, state)`, `positionsAt(hist, tick)` | A position ring of 200 ms (12 ticks). `positionsAt` interpolates for fractional ticks and clamps to the oldest or newest frame. |
 | `killPlayer(state, id, cause)` → events | Kills a player from outside the rules (for example on disconnect). Last-hitter credit still applies. |
 | `serialize`, `deserialize`, `cloneState` | JSON. |
-| `swordBoxOf`, `swordLive`, `overlap`, `moveBody`, `inSpikes`, `nextRand` | Building blocks. |
+| `swordLive`, `overlap`, `moveBody`, `inSpikes`, `nextRand` | Building blocks. |
 
 ### Order of a tick (`step`)
 
@@ -131,6 +144,16 @@ Randomness comes from NinjaRunner's Park–Miller generator, with its seed store
 While stunned, a player's movement acceleration is ×0.25, it cannot start a jump or a swing, and
 gravity does not cut the knock-up short. Starting a swing clears `iframes`.
 
+5. **Pickups** (`stepItems`). Each lying pickup, in list order, goes to the first living player in id
+   order whose body overlaps it and who has no long sword (so a tie goes to the lower id and a holder
+   leaves a second one where it is): `long = true`, `pickup` event. Then the spawn countdown: drawn
+   (`itemMinTicks + floor(rand × (max − min + 1))`) on the first step and whenever a pickup appears, it
+   counts down only while fewer than `itemMax` lie. When it is due, a point is chosen uniformly among
+   `freeItemPoints`; if none is free it retries every tick without using the RNG. `item` event.
+
+**Long sword lost.** `kill()` clears `long` for every death cause (sword, spikes, `killPlayer`), and
+`spawnPlayer` clears it too; a removed player takes it along. It is never dropped.
+
 **Credit.** The killer scores +1. For spikes or a `killPlayer` call, the last hitter within 300 ticks
 (5 s) scores. If there is no such hitter, nobody scores, but `deaths` still goes up.
 
@@ -140,7 +163,11 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
 { type: 'spawn', tick, id, x, y }
 { type: 'hit',   tick, attacker, victim, move: 'chop'|'sweep', dmg, hp, x, y }
 { type: 'kill',  tick, killer /* credited id or null */, victim, move: 'chop'|'sweep'|'spikes'|<cause>,
-                 seed /* uint31 from the state RNG, for identical gore everywhere */, x, y, vx, vy, face }
+                 seed /* uint31 from the state RNG, for identical gore everywhere */, x, y, vx, vy, face,
+                 long? /* true: the killing blow was a holder's chop or sweep */,
+                 held? /* true: the victim held a long sword (lost now) */ }
+{ type: 'item',   tick, id /* pickup id */, x, y }          // a pickup appeared
+{ type: 'pickup', tick, id /* player */, item, x, y }       // who took which
 ```
 
 ### Notes for M2
@@ -180,8 +207,10 @@ Server → client:
 { t: 'welcome', v: 1, id, token, resumed, state: 'play'|'queue', name /* maybe 'Kit#2' */, color,
   tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
-  player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx], …] }
-     // 30 Hz; positions rounded to 0.01; flags = alive 1 | onGround 2 | sweep 4;
+  player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx], …], it: [[id, x, y], …] }
+     // 30 Hz; positions rounded to 0.01; flags = alive 1 | onGround 2 | sweep 4 | long sword 8;
+     // it = the long-sword pickups lying in the arena (so a joiner or resumer learns them, and the
+     // holders from the flags, from one snapshot); `me` carries `long` for the local player;
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
 { t: 'lobby', players: [roster], queue: [...], cap }   // on connect and on roster/score change (≤ 2/s)
@@ -191,7 +220,7 @@ Server → client:
 roster = { id, name, color, score, deaths, away /* disconnected, inside the grace period */ }
 ```
 
-Events are the sim's `spawn`, `hit` and `kill` (shapes above). `kill.seed` lets every client
+Events are the sim's `spawn`, `hit`, `kill`, `item` and `pickup` (shapes above), relayed unchanged. `kill.seed` lets every client
 render identical gore. There are also:
 
 ```js
@@ -206,8 +235,10 @@ the hitter gets the point.
 ## server/server.js
 
 - `loadConfig(vars)` reads `HOST`, `PORT`, `ALLOWED_ORIGINS`, `TRUST_PROXY`, `MAX_PER_IP`,
-  `MAX_CONN`, `DEBUG_DIR`, `DEBUG_PORT` and `NET_SIM` (SPEC §10). It throws on `NET_SIM` with
-  `NODE_ENV=production`, and the entry point then exits 2.
+  `MAX_CONN`, `DEBUG_DIR`, `DEBUG_PORT`, `NET_SIM` (SPEC §10) and two more test-only knobs:
+  `ITEM_SECS=min,max` (the pickup countdown in seconds, passed to the arena as a `cfg` copy) and
+  `ITEM_POINTS=i,j,…` (pickups only at those `LEVEL.items` indexes, passed as a `level` copy). It
+  throws on any of the three with `NODE_ENV=production`, and the entry point then exits 2.
 - `handler` / `resolvePath` are the M1 static server for `public/` and `/shared/`: GET/HEAD only,
   traversal-safe. `POST /debug/report` goes to `server/debug.js`.
 - **Upgrades** are accepted only on `/ws`. Refusals:
@@ -227,7 +258,7 @@ the hitter gets the point.
 
 ## server/arena.js
 
-`new Arena({cfg, now, log, event, maxPlayers, graceMs, idleMs, maxPerIp, seed})`. It has no sockets: tests
+`new Arena({cfg, level, now, log, event, maxPlayers, graceMs, idleMs, maxPerIp, seed})`. It has no sockets: tests
 drive it with fake connections and call `tick()` themselves, and `start()` runs the real loop.
 
 - **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
@@ -269,7 +300,9 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   `d = min(150 ms, interpMs 100 + attacker RTT/2)` in ticks. It uses the server-measured RTT.
 - **Loop.** A `setTimeout` scheduler on a fixed 16.67 ms grid. It catches up at most 5 ticks at
   once and resets the grid if it falls more than 100 ms behind.
-- **Debug views.** `adminState()` returns players, queue, tick time and connections.
+- **Debug views.** `adminState()` returns players (with `long`), the lying pickups (`items`), the
+  seconds until the next may appear (`itemInS`), queue, tick time and connections. `tools/debug.js
+  state` prints a `long-sword pickups` line and marks holders `LONG`.
   `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
   a token.
 
@@ -351,12 +384,18 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
     positions, which stay fixed. Then it queues the input for `flush()`, which sends at most 3
     per message.
   - On a snapshot with `me`, inputs ≤ `seq` are dropped, `me` is reset to the server's object, and
-    the remaining inputs are replayed.
+    the remaining inputs are replayed. `me.long` therefore only ever comes from the server: the
+    longer swing (drawn arc, hitbox view) is predicted only after the server confirms the pickup,
+    and the pickup itself is never predicted (`predictStep` runs no items).
   - The distance between the old and new prediction is the prediction error (`predErrRms()`,
     `resetPredErr()`). Under 2 units, the drawn position eases from the old one over 6 frames.
     Otherwise it snaps and logs to `sync`.
   - Physics always use `DEFAULTS`.
-- **Interpolation (§6.3).** `view(now)` gives `{tick, players, fx}`.
+- **Interpolation (§6.3).** `view(now)` gives `{tick, players, fx, items}`. Snapshots are unpacked
+  with `long` (flag bit 8) and `items` (from `it`; a snapshot without it, e.g. from a pre-M5 server,
+  means none). `items` are those of the newest snapshot at or before the render tick, minus pickups
+  we took ourselves (our `pickup` event is released at once and hides it before the timeline
+  catches up).
   - Remote players are drawn at `renderTick = arrival clock − 6 ticks` (100 ms), interpolated
     between the two snapshots around it. Discrete fields switch at the midpoint. There is no
     blending across teleports (respawns) or deaths.
@@ -365,7 +404,7 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
   - `fx` lists the remote FX bits from snapshots the timeline has just passed.
   - Our own player is the predicted `me` plus the smoothing offset.
 - **Events.** `dueEvents()` returns events in order once the render timeline reaches their tick.
-  Events about us (we hit, are hit or spawn) and events without a position (`join`, `leave`,
+  Events about us (we hit, are hit, spawn or pick up) and events without a position (`join`, `leave`,
   `score`) are released at once.
 
 ## public/gore.js (SPEC §7)
@@ -478,6 +517,26 @@ editable physics.
   - `drawPip` (here `drawKanbei`), `drawTails`, `drawSword` and the `iframes` flashing,
   - the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`),
   - the debug panel (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
+- **Long swords (§5.1).**
+  - `drawItem` draws a pickup: a cyan blade standing point-up over a light pool, with a halo, slowly
+    bobbing and tilting, its glow pulsing and a glint running up the blade. Pickups are drawn before
+    the players, from `state.items` (online: the view; offline: the sim state).
+  - Kanbei still holds no sword between swings. `drawKanbei` draws a holder's scabbard with
+    `drawLongScabbard`: the same line over the back but ×1.6 long (the gold hilt rides well above the
+    head, the tip past the heel), lacquered dark blue with a pulsing cyan glow and seam: the holder
+    marker (there is no name-tag icon).
+  - `drawSword` with `P.long` adds the hitbox's extra length (`18 or 22 × 0.6`) to the blade and to
+    the trail's radius, so the blade ends about where the longer box does (a few units short at full
+    stretch, as the standard blade is), with a thicker, brighter trail with a white core.
+  - SFX: `sfx.pickup(v)` (a bright noise sweep plus a rising triangle arpeggio) at full volume for
+    the taker, quieter with distance within 160 units; `sfx.item(v)` (a soft sine shimmer) when one
+    appears within 240 units.
+  - The kill feed shows `A ⚔ B` (glowing cyan) for a kill with `kill.long`.
+  - Gore: for a kill with `kill.held`, the new `S` piece gets `g.long` and is drawn 1.6× long. Only the
+    drawing changes, so gore physics and fingerprints stay the same on every page.
+  - Debug: `life` entries `long sword taken` and `long sword lost` (online in net.js, offline in
+    game.js); the hitbox view adds item points (cyan diamonds) and the pickups' boxes; the sword box
+    shown is the real (longer) one.
 - **Per-player colour.** `drawKanbei(P, x, y, face, opt, col)` tints the headband, belt, knot, tails
   and rim glow. Online, `colorOf(id)` is the player's chosen colour. Offline, the local player is
   pink and the dummy orange.
@@ -594,7 +653,17 @@ editable physics.
   and 4, offbeat hats; every pitched note in E minor (D# only over B); the riff varies; the
   intensity layer's extra percussion; `analyze` on a synthetic click loop (tempo, seam).
 - `level.test.js`: size and tile codes, closed border, 3–4 tiers, two short spike strips, ≥10
-  spawns with footing and no spikes below or beside them, and `pickSpawn` distance and weighting.
+  spawns with footing and no spikes below or beside them, `pickSpawn` distance and weighting, and the
+  item points (≥6, every surface level, footing, headroom, no spikes in their columns, walkable from a
+  spawn).
+- `items.test.js`: the spawn window (40 seeds, gaps within 20–40 s and spread over it) and the max-2
+  rule; the countdown holding while full; free-point selection away from players and pickups (and
+  retrying when none is free); determinism with pickups (6 players, serialized state and events, and
+  resuming from a deserialized state); pickup on contact, the lower-id tie, a holder leaving a second
+  one, dead players; reach (a target just past standard reach is hit only by a holder, chop and sweep,
+  both facings), the box anchoring, unchanged damage, knockback and timing; `slashHits` and a rewound
+  `step` using the longer box; loss on a sword kill, spikes and leave, standard reach after respawn,
+  and the `long`/`held` kill flags.
 - `server.test.js`: traversal, MIME types, HEAD, 404, 405.
 - `arena.test.js` (no sockets, fake clock):
   - welcome/hello/join/spawn/snapshot,
@@ -605,10 +674,12 @@ editable physics.
   - slots, queue and promotion,
   - resume inside and after the grace period, and `replaced`,
   - idle kick, input flood,
-  - lag-compensated hits through rewound history,
+  - lag-compensated hits through rewound history, and with a long sword (hit only by a holder),
+  - long swords: `item`/`pickup` relayed to players and viewers, `it` and the flag bit in snapshots,
+    `me.long`, a mid-game joiner's first snapshot, admin state, the flag gone after death,
   - leave credit and `score` events,
   - `viewByToken` / admin state without tokens,
-  - `loadConfig` (defaults, `NET_SIM` refused in production),
+  - `loadConfig` (defaults, `NET_SIM`, `ITEM_SECS` and `ITEM_POINTS` refused in production),
   - report validation,
   - the admin listener's loopback bind and read-only routes.
 
@@ -625,7 +696,7 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - reports: stored with server metadata, 413, 403, forged metadata keys 400, wrong type/method,
     flood 429, token view and the token never stored,
   - the event ring contents, no bodies in the logs,
-  - `NET_SIM` refused in production,
+  - `NET_SIM`, `ITEM_SECS` and `ITEM_POINTS` refused in production,
   - `test/smoke.js` against the server.
 - `npm run test:multi` (`test/multiclient.js`) uses headless Chromium through playwright-core.
   Chromium comes from `PLAYWRIGHT_CHROMIUM`, playwright's own lookup, or the newest build in its
@@ -633,7 +704,8 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - joins 3 players (Ash, Bea, Cy),
   - drives Ash and Bea with `test/bot.js` (down to the floor, meet on the left half, slash) until
     one kills the other; Cy parks on the right,
-  - asserts the kill feed shows `killer ✂ victim` on all pages,
+  - asserts the kill feed shows `killer ✂ victim` on all pages (`⚔` if a fighter had picked up a long
+    sword on the way),
   - asserts the kill (same seed), the score and the respawn on all pages,
   - waits until the kill's gore has settled on every page and asserts the same gore fingerprint
     everywhere (and that over 100 landings went into it),
@@ -643,6 +715,12 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - runs `tools/debug.js state`,
   - on a second server with `NET_SIM=120,2`, has two players pace for 8 s and asserts a
     prediction-error RMS under 3 units,
+  - on a third server with `ITEM_SECS=1,2 ITEM_POINTS=0,1` (floor pickups only), with two players and
+    a lobby viewer: a `fetch` bot walks onto a pickup; every page sees the `pickup` event and the
+    holder's flag (and draws its reach ×1.6); the other player is parked by the left wall and a `spar`
+    bot slashes only from 31 units (beyond standard reach) and hits, then kills, and every feed shows
+    `Hold ⚔ Opp`; the holder walks into the spikes (`kill.held`), and after the respawn every page has
+    it back to the standard sword; `tools/debug.js state` lists the pickups,
   - asserts no page errors.
 - `npm run test:all` runs everything.
 - `hygiene.js` (also run through `hygiene.test.js`) scans `git ls-files` plus untracked,

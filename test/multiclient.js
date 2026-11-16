@@ -479,6 +479,108 @@ async function heartbeatTest() {
   await srv.stop();
 }
 
+// Full screen (SPEC §9): the button top right shows in the lobby and in the game, toggles full screen
+// (a stubbed Fullscreen API: headless Chromium cannot really go full screen), reacts to F (not while
+// typing a name), follows a change made elsewhere (Escape), and that Escape does not also open the
+// leave menu. The score strip stops short of the button.
+async function fullscreenTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push(`fs: ${e.message}`));
+  // stub: requestFullscreen / exitFullscreen set a fake fullscreenElement and fire fullscreenchange
+  await page.addInitScript(() => {
+    let el = null;
+    window.__fsCalls = [];
+    Object.defineProperty(Document.prototype, 'fullscreenElement', { configurable: true, get: () => el });
+    Object.defineProperty(Document.prototype, 'fullscreenEnabled', { configurable: true, get: () => true });
+    const fire = () => document.dispatchEvent(new Event('fullscreenchange'));
+    Element.prototype.requestFullscreen = function () { window.__fsCalls.push('request'); el = this; setTimeout(fire, 0); return Promise.resolve(); };
+    Document.prototype.exitFullscreen = function () { window.__fsCalls.push('exit'); el = null; setTimeout(fire, 0); return Promise.resolve(); };
+    window.__fsBrowserExit = () => { el = null; fire(); };     // what the browser does on Escape
+  });
+  await page.goto(srv.url);
+  await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const fs = () => page.evaluate(() => {
+    const b = document.getElementById('fsBtn'), r = b.getBoundingClientRect(), s = document.getElementById('strip').getBoundingClientRect();
+    return { shown: getComputedStyle(b).display !== 'none' && r.width > 0, on: b.classList.contains('on'), pressed: b.getAttribute('aria-pressed'),
+      calls: [...window.__fsCalls], right: innerWidth - r.right, top: r.top, btnLeft: r.left, stripRight: s.right, menu: __mp.leaveOpen };
+  });
+  let f = await fs();
+  assert.ok(f.shown && f.right < 10 && f.top < 10, 'the button sits top right in the lobby: ' + JSON.stringify(f));
+  assert.equal(f.on, false);
+  // F while typing a name does nothing
+  await page.click('#lName'); await page.keyboard.press('KeyF');
+  assert.deepEqual((await fs()).calls, [], 'F in the name field types');
+  // the button toggles, and its state follows
+  await page.click('#fsBtn');
+  await waitFor(async () => (await fs()).on, { what: 'full screen on' });
+  f = await fs();
+  assert.deepEqual(f.calls, ['request']); assert.equal(f.pressed, 'true');
+  await page.click('#fsBtn');
+  await waitFor(async () => !(await fs()).on, { what: 'full screen off' });
+  // join; in the game the button is still there and the strip stops short of it
+  await page.fill('#lName', 'Full'); await page.click('#lFight');
+  await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive);
+  await waitFor(async () => (await fs()).stripRight > 0, { what: 'the strip' });
+  f = await fs();
+  assert.ok(f.shown, 'visible in the game');
+  assert.ok(f.stripRight <= f.btnLeft + .5, `the strip ends before the button (${f.stripRight} vs ${f.btnLeft})`);
+  // F toggles it in the game
+  await page.keyboard.press('KeyF');
+  await waitFor(async () => (await fs()).on, { what: 'F: full screen on' });
+  // leaving full screen elsewhere (the browser on Escape) updates the button, and that Escape does
+  // not also open the leave menu; the next Escape does
+  await page.evaluate(() => window.__fsBrowserExit());
+  await page.keyboard.press('Escape');
+  f = await fs();
+  assert.equal(f.on, false, 'the icon follows a change made outside the button');
+  assert.equal(f.menu, false, 'the Escape that left full screen does not open the leave menu');
+  await sleep(600);
+  await page.keyboard.press('Escape');
+  assert.equal((await fs()).menu, true, 'the next Escape opens the leave menu');
+  await page.keyboard.press('Escape');
+  assert.deepEqual((await fs()).calls, ['request', 'exit', 'request']);
+  // no full-screen support: no button, and the strip takes the full width
+  const ctx2 = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const p2 = await ctx2.newPage();
+  await p2.addInitScript(() => {
+    Object.defineProperty(Document.prototype, 'fullscreenEnabled', { configurable: true, get: () => false });
+    Object.defineProperty(Document.prototype, 'webkitFullscreenEnabled', { configurable: true, get: () => false });
+  });
+  await p2.goto(srv.url);
+  await p2.waitForFunction(() => window.__mp && window.__mp.net);
+  assert.equal(await p2.evaluate(() => getComputedStyle(document.getElementById('fsBtn')).display), 'none', 'hidden without support');
+  log('full screen: button in lobby and game, toggles, F (not in the name field), follows Escape, which does not open the leave menu');
+  for (const c of [ctx, ctx2]) await c.close();
+  await srv.stop();
+}
+
+// A page from an older build (SPEC §10) reloads itself when the server's welcome names a newer one,
+// and only once per build.
+async function staleBuildTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const page = await ctx.newPage();
+  page.on('pageerror', e => errors.push(`Stale: ${e.message}`));
+  // serve this page an index.html stamped with an old build id, once
+  let faked = 0;
+  await page.route(u => new URL(u).pathname === '/', async route => {
+    const r = await route.fetch(); let body = await r.text();
+    if (faked++ === 0) body = body.replace(/(<meta name="build" content=")[0-9a-f]+/, '$1deadbeef00');
+    await route.fulfill({ response: r, body });
+  });
+  await page.goto(srv.url);
+  await page.waitForFunction(() => window.__mp && __mp.net && __mp.net.build && __mp.net.build === __mp.net.serverBuild, null, { timeout: 10000 });
+  assert.equal(faked, 2, 'the stale page reloaded itself exactly once');
+  await sleep(1500);
+  assert.equal(faked, 2, 'and does not loop');
+  log('stale build: the page reloaded itself once and now matches the server');
+  await ctx.close(); await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -488,6 +590,8 @@ async function main() {
     await leaveTest();
     await starTest();
     await heartbeatTest();
+    await fullscreenTest();
+    await staleBuildTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

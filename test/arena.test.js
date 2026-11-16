@@ -46,8 +46,9 @@ function setup(opts = {}) {
 }
 
 test('connect gets a server welcome and the lobby; hello joins the arena', () => {
-  const { conn, tick, arena } = setup();
+  const { conn, tick, arena } = setup({ build: 'abc123' });
   const a = conn();
+  assert.equal(a.msgs[0].b, 'abc123', 'every welcome carries the build id');
   assert.equal(a.msgs[0].t, 'welcome'); assert.equal(a.msgs[0].id, undefined);
   assert.equal(a.msgs[1].t, 'lobby');
   a.say({ t: 'hello', name: '  Ann  ', color: 3 });

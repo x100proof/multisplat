@@ -33,3 +33,25 @@ test('serves files with the right MIME type and refuses other methods', async ()
     assert.equal(r.status, 404);
   } finally { srv.close(); }
 });
+
+test('build id: stamped into index.html; ETag revalidation gives 304', async () => {
+  const { BUILD } = await import('../server/server.js');
+  assert.match(BUILD, /^[0-9a-f]{10}$/);
+  const srv = createServer(handler);
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    let r = await fetch(base + '/');
+    const html = await r.text();
+    assert.ok(html.includes(`<meta name="build" content="${BUILD}">`)); assert.ok(html.includes(`game.js?v=${BUILD}`));
+    assert.equal(r.headers.get('cache-control'), 'no-cache');
+    for (const path of ['/', '/game.js', '/shared/sim.js']) {
+      r = await fetch(base + path); await r.arrayBuffer();
+      const etag = r.headers.get('etag'); assert.ok(etag, path);
+      const r2 = await fetch(base + path, { headers: { 'If-None-Match': etag } });
+      assert.equal(r2.status, 304, path); assert.equal((await r2.arrayBuffer()).byteLength, 0);
+      const r3 = await fetch(base + path, { headers: { 'If-None-Match': '"other"' } });
+      assert.equal(r3.status, 200, path); await r3.arrayBuffer();
+    }
+  } finally { srv.close(); }
+});

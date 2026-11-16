@@ -123,6 +123,12 @@ ARCHITECTURE.md    the code as implemented
   where it is. An unclaimed pickup stays until taken.
 - **Effect:** the holder's sword reach is **×1.6** (`swordBoxOf` length, both chop and sweep).
   Damage, timing and knockback are unchanged. Lag compensation uses the longer box.
+- **Breaking it:** a sword swing that passes through a long sword still lying in the arena
+  breaks it. The pickup is destroyed and nobody gets it (event `break`), with a glass-smash
+  sound and a burst of shards. Ninja-star pickups can't be broken.
+- **Breaking it:** a sword swing that passes through a long sword still lying in the arena
+  breaks it. The pickup is destroyed and nobody gets it (event `break`), with a glass-smash
+  sound and a burst of shards. Ninja-star pickups can't be broken.
 - **Losing it:** the holder keeps the long sword until they die, by any cause. It is not
   dropped. They respawn with the standard sword. Leaving the arena also discards it.
 - **Protocol:** snapshots carry a `long` flag per player and the list of pickups (id, x, y).
@@ -456,7 +462,7 @@ tests passing and a commit.
 6. **M6: Later changes**, one commit each: leaving with Escape (§6.4), no spike traps (§3), the
    5 s heartbeat (§6.4), scores for everyone along the top (§9), neon blood by default with a
    real-gore option (§7), ninja stars (§5.2), the full-screen button (§9), and cache
-   validation with a build id (§10).
+   validation with a build id (§10). Also: slashing a lying long sword breaks it (§5.1).
 
 **Repo conventions:**
 - `ARCHITECTURE.md` describes the code as it actually is and is updated in the same commit as

@@ -29,7 +29,8 @@ const r2 = v => Math.round(v * 100) / 100;
 export class Arena {
   constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
     maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, heartbeatMs = NET.heartbeatMs,
-    maxPerIp = Infinity, seed } = {}) {
+    maxPerIp = Infinity, seed, build = '' } = {}) {
+    this.build = build;   // the server's build id, sent in every welcome (SPEC §10)
     this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
     this.heartbeatMs = heartbeatMs;   // 0 or Infinity: no heartbeat (never used by the server itself)
@@ -52,7 +53,7 @@ export class Arena {
       bucket: NET.inputRate, pingBucket: PING_RATE, bucketAt: this.now(), drops: [], dropCount: 0,
       inCount: 0, inRate: 0, rateAt: this.now(), heardAt: this.now(), closed: false };
     this.conns.add(conn);
-    this.send(conn, { t: 'welcome', v: PROTOCOL, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS });
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS });
     this.send(conn, this.lobbyMsg());
     return conn;
   }
@@ -177,7 +178,7 @@ export class Arena {
     // An automatic reconnect asks to resume only: with the token gone (the grace period ran out),
     // it is told so and stays a lobby viewer instead of silently joining as a new player.
     if (m.token && m.resume === true) {
-      this.send(conn, { t: 'welcome', v: PROTOCOL, tick: this.state.tick, cap: this.maxPlayers, resumed: false, expired: true });
+      this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, resumed: false, expired: true });
       return;
     }
 
@@ -206,7 +207,7 @@ export class Arena {
   }
 
   welcome(conn, rec, resumed) {
-    this.send(conn, { t: 'welcome', v: PROTOCOL, id: rec.id, token: rec.token, resumed, state: rec.state,
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, id: rec.id, token: rec.token, resumed, state: rec.state,
       name: rec.name, color: rec.color, tick: this.state.tick, queuePos: this.queuePos(rec),
       players: this.roster(), queue: this.queueList(), cap: this.maxPlayers });
   }

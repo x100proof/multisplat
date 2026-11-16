@@ -187,6 +187,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
 
   function onWelcome(m) {
     if (m.cap) net.cap = m.cap;
+    if (m.b) net.serverBuild = m.b;
+    if (m.b && net.build && m.b !== net.build && net.onStale) net.onStale(m.b);
     if (m.expired) {                                    // our resume came too late: the slot is gone
       dbg('net', 'resume refused: grace period over');
       sendReport('auto', 'resume expired');

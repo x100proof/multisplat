@@ -906,3 +906,37 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
 
   Its pattern literals are assembled from pieces, so the file does not match itself. There is one
   exact-text exemption: the SPEC sentence that states the home-path rule.
+
+## Later additions
+
+- **Full-screen button** (`#fsBtn`, `toggleFullscreen`/`syncFullscreen` in `game.js`): top right, in
+  the lobby and the game; F toggles it; it follows `fullscreenchange`; on touch it also asks for
+  landscape and replaces the old ⛶ button. The score strip leaves room for it (`--fsw`). An Escape
+  pressed in full screen, or within 500 ms of leaving it, does not open the leave menu.
+- **Build id and caching** (`BUILD`, `hashTree`, `stampIndex` in `server/server.js`): a 10-hex hash
+  of everything under `public/` and `shared/`, taken at start. The served `index.html` gets a
+  `<meta name="build">` and `game.js?v=<id>`. Every static response has `Cache-Control: no-cache`
+  and an `ETag`, and a matching `If-None-Match` gets a 304. Every `welcome` carries `b` (the
+  `Arena` `build` option). The client (`net.onStale` in `game.js`) reloads once per build id
+  (remembered in `sessionStorage`) when its own id differs. The id is in the debug panel and in
+  debug reports (`env.build`).
+- **Breaking a long sword** (`shared/sim.js`, step 4b): a live sword box overlapping a lying long-sword
+  pickup removes it and emits `{type:'break', tick, id, item, x, y}`. The client plays `sfx.smash`
+  and a few sparks. Star pickups are not affected.
+
+## Later additions
+
+- **Full-screen button** (`#fsBtn`, `toggleFullscreen`/`syncFullscreen` in `game.js`): top right, in
+  the lobby and the game; F toggles it; it follows `fullscreenchange`; on touch it also asks for
+  landscape and replaces the old ⛶ button. The score strip leaves room for it (`--fsw`). An Escape
+  pressed in full screen, or within 500 ms of leaving it, does not open the leave menu.
+- **Build id and caching** (`BUILD`, `hashTree`, `stampIndex` in `server/server.js`): a 10-hex hash
+  of everything under `public/` and `shared/`, taken at start. The served `index.html` gets a
+  `<meta name="build">` and `game.js?v=<id>`. Every static response has `Cache-Control: no-cache`
+  and an `ETag`, and a matching `If-None-Match` gets a 304. Every `welcome` carries `b` (the
+  `Arena` `build` option). The client (`net.onStale` in `game.js`) reloads once per build id
+  (remembered in `sessionStorage`) when its own id differs. The id is in the debug panel and in
+  debug reports (`env.build`).
+- **Breaking a long sword** (`shared/sim.js`, step 4b): a live sword box overlapping a lying long-sword
+  pickup removes it and emits `{type:'break', tick, id, item, x, y}`. The client plays `sfx.smash`
+  and a few sparks. Star pickups are not affected.

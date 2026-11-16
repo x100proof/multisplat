@@ -5,6 +5,8 @@
 // TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM, ITEM_SECS, STAR_SECS and ITEM_POINTS (the last four
 // for tests only, refused when NODE_ENV=production).
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, sep, extname, resolve } from 'node:path';
@@ -88,6 +90,26 @@ export function resolvePath(urlPath) {
   return full;
 }
 
+// Build id (SPEC §10): a short hash of everything under public/ and shared/, taken at start. It is
+// stamped into the served index.html and sent in every welcome, so a page left open across a deploy
+// can tell it is stale and reload itself.
+function hashTree(dirs) {
+  const h = createHash('sha256');
+  const walk = d => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const f = join(d, e.name);
+      if (e.isDirectory()) walk(f); else if (e.isFile()) { h.update(e.name); h.update(readFileSync(f)); }
+    }
+  };
+  for (const d of dirs) walk(d);
+  return h.digest('hex').slice(0, 10);
+}
+export const BUILD = hashTree([PUBLIC, SHARED]);
+const INDEX = join(PUBLIC, 'index.html');
+const stampIndex = buf => Buffer.from(buf.toString('utf8')
+  .replace('<head>', `<head>\n<meta name="build" content="${BUILD}">`)
+  .replace('src="game.js"', `src="game.js?v=${BUILD}"`));
+
 const HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-cache' };
 
 // Static GET/HEAD for public/ and shared/.
@@ -102,7 +124,11 @@ export function handler(req, res) {
   stat(file)
     .then(s => { if (!s.isFile()) throw new Error('not a file'); return readFile(file); })
     .then(buf => {
-      res.writeHead(200, { ...HEADERS, 'Content-Type': MIME[extname(file).toLowerCase()] || 'application/octet-stream', 'Content-Length': buf.length });
+      if (file === INDEX) buf = stampIndex(buf);
+      // no-cache + ETag: the browser asks every time and gets the new file or a 304
+      const etag = '"' + createHash('sha1').update(buf).digest('base64url').slice(0, 20) + '"';
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ...HEADERS, ETag: etag }); return res.end(); }
+      res.writeHead(200, { ...HEADERS, ETag: etag, 'Content-Type': MIME[extname(file).toLowerCase()] || 'application/octet-stream', 'Content-Length': buf.length });
       res.end(req.method === 'HEAD' ? undefined : buf);
     })
     .catch(() => send(404, 'not found\n'));
@@ -137,7 +163,7 @@ export async function startServer(cfg = loadConfig(), { log = console.log } = {}
     ...(cfg.starSecs ? { starMinTicks: Math.round(cfg.starSecs.min * TICK_HZ), starMaxTicks: Math.round(cfg.starSecs.max * TICK_HZ) } : {}),
   } : DEFAULTS;
   const level = cfg.itemPoints ? { ...LEVEL, items: cfg.itemPoints.map(i => LEVEL.items[i]) } : LEVEL;
-  const arena = new Arena({ log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
+  const arena = new Arena({ build: BUILD, log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
   const clientIp = req => clientIpOf(req, cfg.trustProxy);
   const debug = createDebug({ dir: cfg.debugDir, allowedOrigins: cfg.allowedOrigins, clientIp, arena, events, log });
 

@@ -321,6 +321,11 @@ function noise(d, v = .15, delay = 0, freq = 1200) {
   src.connect(f).connect(gn).connect(audioOut()); src.start(t);
 }
 const sfx = {
+  // glass smash: a bright crack, a burst of high noise, then tinkling shards
+  smash: (v = 1) => {
+    noise(.05, .5 * v, 0, 9000); noise(.28, .3 * v, .01, 6500); noise(.5, .1 * v, .08, 11000);
+    [2900, 4100, 3400, 5200, 2500, 4700, 3800].forEach((f, i) => tone(f, .07 + (i % 3) * .03, 'triangle', f * .82, .035 * v, .03 + i * .045));
+  },
   slash: () => { noise(.12, .12, 0, 5000); tone(1200, .09, 'sawtooth', 300, .02); },
   slice: () => { noise(.15, .25, 0, 3000); tone(300, .15, 'square', 70, .07); },
   gush: () => { noise(1.2, .12, .05, 700); noise(.6, .08, .3, 400); },
@@ -580,6 +585,12 @@ function onEvents(evs) {
     } else if (e.type === 'starEnd') {
       const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
       if (e.wall && d < 200) { sfx.starWall(.3 + .7 * (1 - d / 200)); sparks.push({ x: e.x, y: e.y, t: 10 }); }
+    } else if (e.type === 'break') {
+      // a lying long sword was slashed: it shatters like glass
+      const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
+      if (d < 260) sfx.smash(.35 + .65 * (1 - d / 260));
+      for (let i = 0; i < 5; i++) sparks.push({ x: e.x - 6 + i * 3, y: e.y - 3 - (i * 5) % 11, t: 10 + i * 2 });
+      if (e.id === ME) dbg('life', 'long sword smashed', { item: e.item });
     } else if (e.type === 'item') {
       const f = focus(), d = Math.hypot(f.x + 5 - e.x, f.y + 13 - e.y);
       if (d < 240) sfx.item(.4 + .6 * (1 - d / 240));
@@ -1306,7 +1317,8 @@ function hudOnline() {
   document.getElementById('hHp').classList.toggle('low', !!me && me.alive && me.hp <= 34);
   setText('hScore', m && !lobbyOpen ? `SCORE ${m.score}` : '');
   let msg = '', sub = '';
-  if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
+  if (staleBuild) msg = 'NEW VERSION · RELOADING…';
+  else if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
   else if (!lobbyOpen && net.mode === 'queue') {
     msg = `ARENA FULL · QUEUE #${net.queuePos}`;
     sub = `you are #${net.queuePos} of ${(net.lobby.queue || []).length || net.queuePos} waiting · you join as soon as a slot frees`;
@@ -1469,7 +1481,7 @@ function buildDebug() {
 function refreshNetDebug() {
   if (!netEl) return;
   const st = net.stats;
-  netEl.textContent = `RTT ${st.rtt.toFixed(0)} ms (avg ${st.rttAvg.toFixed(0)}, max ${st.rttMax.toFixed(0)}) · ${net.state}\n` +
+  netEl.textContent = `build ${BUILD || '?'}${net.serverBuild && net.serverBuild !== BUILD ? ' (server ' + net.serverBuild + ')' : ''}\n` + `RTT ${st.rtt.toFixed(0)} ms (avg ${st.rttAvg.toFixed(0)}, max ${st.rttMax.toFixed(0)}) · ${net.state}\n` +
     `snapshot jitter ${st.jitter.toFixed(1)} ms · id ${net.id ?? '-'} · ${net.mode}\n` +
     `pred err RMS ${net.predErrRms().toFixed(2)} · snaps ${st.snapsSnapped} · reconnects ${st.reconnects}`;
   const g = errCv.getContext('2d'), W = errCv.width, H = errCv.height, max = 4;
@@ -1635,6 +1647,21 @@ function backToLobby(message) {
 document.getElementById('lvYes').addEventListener('click', leaveGame);
 document.getElementById('lvNo').addEventListener('click', () => leaveMenu(false));
 
+// ---------- versions (SPEC §10): a page older than the server reloads itself, once per build ----------
+const BUILD = (document.querySelector('meta[name="build"]') || {}).content || '';
+let staleBuild = false;
+if (net) net.build = BUILD;
+if (net) net.onStale = serverBuild => {
+  dbg('net', 'stale build', { page: BUILD, server: serverBuild });
+  let done = null;
+  try { done = sessionStorage.getItem('mp.reloadedFor'); sessionStorage.setItem('mp.reloadedFor', serverBuild); } catch { /* no storage: reload anyway, once per page life */ }
+  if (done === serverBuild || net.onStale.fired) return;   // already tried for this build: never loop
+  net.onStale.fired = true;
+  document.getElementById('lStatus').textContent = 'New version, reloading…';
+  staleBuild = true;
+  setTimeout(() => location.reload(), 600);
+};
+
 function onNetStatus(s) {
   if (s === 'kicked') {
     dbg('life', 'back to lobby', { reason: net.kickReason });
@@ -1656,7 +1683,7 @@ setReportSource(() => {
   const me = ONLINE ? net.me : Sim.getPlayer(state, ME);
   return {
     token: ONLINE ? net.token : null,
-    env: { ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
+    env: { build: BUILD, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
       touch: matchMedia('(pointer: coarse)').matches, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
       online: ONLINE, cfg: changed, page: location.pathname,
       music: music ? { state: music.state, ...music.rendered, muted } : null,

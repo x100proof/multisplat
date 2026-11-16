@@ -129,7 +129,11 @@ ARCHITECTURE.md    the code as implemented
 - **Breaking it:** a sword swing that passes through a long sword still lying in the arena
   breaks it. The pickup is destroyed and nobody gets it (event `break`), with a glass-smash
   sound and a burst of shards. Ninja-star pickups can't be broken.
-- **Losing it:** the holder keeps the long sword until they die, by any cause. It is not
+- **Dropping it:** when a holder is killed, the long sword falls where they died and lies on
+  the ground or plank below as a pickup anyone can take, the killer included. For half a second
+  it can't be broken, so the killing swing doesn't smash it. A dropped sword counts toward the
+  2 that may lie in the arena. A holder who leaves the arena takes the sword with them.
+- **Losing it:** the holder keeps the long sword until they die, by any cause. It is then
   dropped. They respawn with the standard sword. Leaving the arena also discards it.
 - **Protocol:** snapshots carry a `long` flag per player and the list of pickups (id, x, y).
   New events: `item` (a pickup appeared) and `pickup` (who took which).

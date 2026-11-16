@@ -940,3 +940,7 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
 - **Breaking a long sword** (`shared/sim.js`, step 4b): a live sword box overlapping a lying long-sword
   pickup removes it and emits `{type:'break', tick, id, item, x, y}`. The client plays `sfx.smash`
   and a few sparks. Star pickups are not affected.
+- **Dropping a long sword** (`kill` and `stepItems` in `shared/sim.js`): a killed holder (any cause
+  but `leave`) queues a drop in `state.drops`; `stepItems` lays it on the first ground or plank
+  below as a `long` pickup and emits `item` with `drop: true`. `it.safe` (30 ticks) stops the
+  killing swing from breaking it.

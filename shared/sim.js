@@ -248,7 +248,10 @@ function kill(state, v, killerId, move, cfg, events) {
   const held = v.long, killer = killerId != null ? getPlayer(state, killerId) : null;
   const longKill = !!(killer && killer.long && (move === 'chop' || move === 'sweep'));
   const lostStars = v.stars | 0;
-  v.long = false;                               // a long sword is lost on death, never dropped
+  // A fallen holder drops the long sword where they died (not when they leave the arena): it is
+  // queued here and laid on the ground below by stepItems, which knows the level.
+  if (held && move !== 'leave') (state.drops || (state.drops = [])).push({ x: v.x + v.w / 2, y: v.y + v.h });
+  v.long = false;
   v.stars = 0;                                  // so are unthrown ninja stars
   v.alive = false; v.hp = 0; v.deaths++; v.respawn = cfg.respawnTicks;
   v.atk = 0; v.stun = 0; v.iframes = 0; v.buf = 0;
@@ -328,7 +331,7 @@ export function step(state, inputs = {}, { cfg = DEFAULTS, level: L = LEVEL, rew
     const sb = swordBoxOf(a);
     for (let i = 0; i < state.items.length; i++) {
       const it = state.items[i], b = itemBox(it);
-      if (itemKind(it) !== 'long' || !(sb.x < b.x + b.w && sb.x + sb.w > b.x && sb.y < b.y + b.h && sb.y + sb.h > b.y)) continue;
+      if (itemKind(it) !== 'long' || (it.safe && state.tick < it.safe) || !(sb.x < b.x + b.w && sb.x + sb.w > b.x && sb.y < b.y + b.h && sb.y + sb.h > b.y)) continue;
       state.items.splice(i--, 1);
       events.push({ type: 'break', tick: state.tick, id: a.id, item: it.id, x: it.x, y: it.y });
     }
@@ -405,6 +408,7 @@ function starHit(state, st, v, cfg, events) {
 }
 
 // ---------- long-sword pickups (SPEC §5.1) ----------
+const DROP_SAFE = 30;   // ticks a dropped long sword can't be broken
 export const itemBox = it => ({ x: it.x - ITEM_W / 2, y: it.y - ITEM_H, w: ITEM_W, h: ITEM_H });
 
 // Item points that may take a new pickup: no pickup on them and no living player's feet within
@@ -423,6 +427,19 @@ const drawStarT = (state, cfg) => cfg.starMinTicks + Math.floor(nextRand(state) 
 function stepItems(state, cfg, L, events) {
   if (!state.items) { state.items = []; state.itemT = -1; state.itemSeq = 0; }   // a pre-M5 state
   if (state.starT == null) state.starT = -1;
+  // swords dropped by fallen holders land on the first ground or plank below where they died. For
+  // DROP_SAFE ticks a dropped sword can't be broken, or the killing swing itself would smash it.
+  if (state.drops && state.drops.length) {
+    for (const d of state.drops) {
+      const tx = Math.max(1, Math.min(L.w - 2, Math.floor(d.x / T)));
+      let ty = Math.max(0, Math.floor(d.y / T));
+      while (ty < L.h - 1 && !isSolid(L, tx, ty) && !isPlat(L, tx, ty)) ty++;
+      const it = { id: ++state.itemSeq, x: Math.max(T + ITEM_W / 2, Math.min((L.w - 1) * T - ITEM_W / 2, Math.round(d.x))), y: ty * T, kind: 'long', safe: state.tick + DROP_SAFE };
+      state.items.push(it);
+      events.push({ type: 'item', tick: state.tick, id: it.id, kind: 'long', x: it.x, y: it.y, drop: true });
+    }
+    state.drops = [];
+  }
   // pickups: each lying item, in list order, goes to the lowest-id living toucher who can take it:
   // a long sword to one without one; stars (+starGive, up to starCarry) to one below starCarry
   for (let i = 0; i < state.items.length; i++) {

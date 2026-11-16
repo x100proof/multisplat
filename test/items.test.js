@@ -244,3 +244,28 @@ test('slashing a lying long sword breaks it: it is destroyed, nobody gets it; st
   assert.equal(S.getPlayer(w, 1).long, false, 'the breaker does not get the sword');
   assert.ok(!ev.some(e => e.type === 'pickup'));
 });
+
+test('a killed holder drops the long sword where they fell; the killing swing does not smash it; anyone can take it', () => {
+  const w = world(2);
+  const a = place(w, 1, 100, FLOOR_Y, 1), v = place(w, 2, 118, FLOOR_Y, -1);
+  v.long = true; v.hp = 10;
+  let ev = run(w, 14, i => ({ 1: i === 0 ? KEY.SLASH : 0 }));
+  assert.ok(ev.some(e => e.type === 'kill' && e.victim === 2 && e.held));
+  const drop = ev.find(e => e.type === 'item' && e.drop);
+  assert.ok(drop, 'the sword is dropped'); assert.equal(drop.kind, 'long'); assert.equal(drop.y, 272, 'it lies on the floor');
+  assert.ok(!ev.some(e => e.type === 'break'), 'the killing swing does not break it');
+  assert.equal(w.items.length, 1);
+  assert.equal(S.getPlayer(w, 2).long, false);
+  // the killer walks onto it and takes it
+  ev = run(w, 90, () => ({ 1: KEY.RIGHT }));
+  assert.ok(ev.some(e => e.type === 'pickup' && e.id === 1 && e.item === drop.id));
+  assert.equal(a.long, true);
+});
+
+test('a holder who leaves the arena does not drop the sword', () => {
+  const w = world(2);
+  place(w, 1, 100, FLOOR_Y, 1).long = true;
+  S.killPlayer(w, 1, 'leave', CFG);
+  run(w, 5);
+  assert.equal(w.items.length, 0);
+});

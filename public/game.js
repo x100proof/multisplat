@@ -253,9 +253,19 @@ const CARS = [{ y: 34, v: .5, o: 0 }, { y: 58, v: -.35, o: 400 }, { y: 22, v: .8
 
 // ---------- sizing: canvas matches the screen's real pixels ----------
 const stage = document.getElementById('stage');
+// Touch UI: on when the browser says its main pointer is coarse (or ?touch), and also the moment a
+// finger really touches the page (tablets with a mouse, Android "desktop site" mode, some browsers
+// that report a fine pointer). It only adds buttons; keys and gamepad keep working.
+let TOUCH_UI = matchMedia('(pointer: coarse)').matches || QS.has('touch');
+function enableTouchUI() {
+  if (TOUCH_UI) return;
+  TOUCH_UI = true;
+  document.body.classList.add('touchui');
+  noteDevice('touch'); resize();
+}
 function resize() {
   // Phones held upright get the whole game turned sideways, so it is always played in landscape.
-  const rot = matchMedia('(pointer: coarse)').matches && innerHeight > innerWidth;
+  const rot = TOUCH_UI && innerHeight > innerWidth;
   const W = rot ? innerHeight : innerWidth, H = rot ? innerWidth : innerHeight;
   stage.classList.toggle('rot', rot);
   document.body.classList.toggle('rot', rot);
@@ -418,6 +428,9 @@ addEventListener('keydown', e => {
 addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Tab') board(false); });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; board(false); fingers.clear(); syncTouch(); });
 addEventListener('pointerdown', () => initAudio());
+// iOS Safari only unlocks audio from a finished touch or a click, not from pointerdown
+addEventListener('touchend', () => initAudio(), { capture: true, passive: true });
+addEventListener('click', () => initAudio(), true);
 
 // ---------- touch (NinjaRunner): big round buttons, every finger tracked on its own ----------
 // A finger can slide from button to button (◀ to ▶, or ▶ onto ⤒ to jump mid-run). Run (») is an
@@ -428,8 +441,9 @@ const THROW_SYMBOL = '✦';     // the touch throw button's label, also used in 
 const fingers = new Map();   // pointerId -> id of the button under that finger (or null)
 let touchRun = false, touchHeld = 0;
 const pad = document.getElementById('touch');
-const TOUCH_UI = matchMedia('(pointer: coarse)').matches || QS.has('touch');
 if (TOUCH_UI) document.body.classList.add('touchui');
+addEventListener('pointerdown', e => { if (e.pointerType === 'touch') enableTouchUI(); }, true);
+addEventListener('touchstart', enableTouchUI, { capture: true, passive: true });
 function btnAt(x, y) {
   const b = document.elementFromPoint(x, y)?.closest?.('#touch button');
   return b && TOUCH_BTN[b.id] ? b.id : null;
@@ -506,7 +520,7 @@ const escLeavesFullscreen = () => !!fsEl() || performance.now() - fsLeftAt < 500
 syncFullscreen();
 
 function goLandscape(force) {
-  if (triedLandscape || (!force && !matchMedia('(pointer: coarse)').matches)) return;
+  if (triedLandscape || (!force && !TOUCH_UI)) return;
   triedLandscape = true;
   const el = document.documentElement, req = el.requestFullscreen || el.webkitRequestFullscreen;
   if (!req || document.fullscreenElement) return;
@@ -1737,7 +1751,7 @@ setReportSource(() => {
   return {
     token: ONLINE ? net.token : null,
     env: { build: BUILD, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
-      touch: matchMedia('(pointer: coarse)').matches, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
+      touch: TOUCH_UI, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
       online: ONLINE, cfg: changed, page: location.pathname,
       music: music ? { state: music.state, ...music.rendered, muted } : null,
       gore: { on: CFG.gore, style: bloodStyleName(), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },

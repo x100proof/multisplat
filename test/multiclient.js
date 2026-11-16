@@ -559,6 +559,111 @@ async function fullscreenTest() {
 
 // A page from an older build (SPEC §10) reloads itself when the server's welcome names a newer one,
 // and only once per build.
+// Phone emulation (real touch input through CDP, mobile contexts): the lobby works with the on-screen
+// keyboard's typing and a tap on FIGHT, every touch button is on screen and big enough, holding
+// a direction moves, jump and slash fire, a second finger works while the first holds, a finger
+// can slide from one button to another, and the touch UI also appears when the browser claims a fine
+// pointer but a finger touches.
+async function phoneTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36';
+  const variants = [
+    { name: 'phone portrait 390x844', w: 390, h: 844, fine: false },
+    { name: 'phone landscape 844x390', w: 844, h: 390, fine: false },
+    { name: 'phone landscape, fine pointer reported', w: 844, h: 390, fine: true },
+  ];
+  for (const v of variants) {
+    const ctx = await browser.newContext({ viewport: { width: v.w, height: v.h }, deviceScaleFactor: 2.5, isMobile: true, hasTouch: true, userAgent: UA });
+    if (v.fine) await ctx.addInitScript(() => {
+      const mm = window.matchMedia.bind(window);
+      window.matchMedia = q => /pointer:\s*coarse/.test(q) ? { matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} } : mm(q);
+    });
+    const page = await ctx.newPage();
+    page.on('pageerror', e => errors.push(`${v.name}: ${e.message}`));
+    page.on('console', m => { if (m.type() === 'error') errors.push(`${v.name}: console: ${m.text()}`); });
+    await page.goto(srv.url);
+    await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+    const cdp = await ctx.newCDPSession(page);
+    const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts });
+    const centre = id => page.evaluate(id => { const r = document.getElementById(id).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, r: r.right, b: r.bottom, l: r.left, t: r.top }; }, id);
+    // lobby: type a name, tap FIGHT (not clicks)
+    await page.tap('#lName'); await page.keyboard.type('Phone');
+    const f = await centre('lFight');
+    assert.ok(f.y > 0 && f.b <= v.h, `${v.name}: FIGHT is on screen`);
+    await page.touchscreen.tap(f.x, f.y);
+    await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
+    await sleep(400);
+    assert.equal(await page.evaluate(() => document.body.classList.contains('touchui')), true, `${v.name}: touch UI is on`);
+    // every button is on screen, at least 44 px each way (hit area), and none overlap
+    const ids = ['tL', 'tR', 'tRun', 'tT', 'tS', 'tJ', 'tMute', 'tHelp', 'tLeave'];
+    const rects = {};
+    for (const id of ids) {
+      const r = rects[id] = await centre(id);
+      assert.ok(r.w >= 44 && r.h >= 44, `${v.name}: ${id} is ${r.w}x${r.h}`);
+      assert.ok(r.l >= 0 && r.t >= 0 && r.r <= v.w && r.b <= v.h, `${v.name}: ${id} is inside the screen`);
+    }
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+      const a = rects[ids[i]], b = rects[ids[j]];
+      assert.ok(a.r <= b.l + 0.5 || b.r <= a.l + 0.5 || a.b <= b.t + 0.5 || b.b <= a.t + 0.5, `${v.name}: ${ids[i]} and ${ids[j]} do not overlap`);
+    }
+    // sample the local player every frame: did it jump, did it swing
+    await page.evaluate(() => {
+      window.__ph = { jump: false, slash: false };
+      const loop = () => {
+        const p = __mp.state.players.find(q => q.id === __mp.net.id);
+        if (p) { if (!p.onGround) __ph.jump = true; if (p.atk > 0) __ph.slash = true; }
+        requestAnimationFrame(loop);
+      };
+      loop();
+    });
+    const X = () => page.evaluate(() => __mp.net.me.x);
+    const grounded = () => waitFor(() => page.evaluate(() => __mp.net.me.onGround), { timeout: 5000, every: 50, what: 'on the ground' });
+    await grounded();
+    // hold ▶, the player moves right; release, it stops
+    const x0 = await X();
+    await touch('touchStart', [{ x: rects.tR.x, y: rects.tR.y, id: 1 }]);
+    await sleep(500);
+    const x1 = await X();
+    assert.ok(x1 > x0 + 15, `${v.name}: holding ▶ moved the player (${x0} to ${x1})`);
+    // second finger: ⤒ while ▶ is still held
+    await touch('touchStart', [{ x: rects.tR.x, y: rects.tR.y, id: 1 }, { x: rects.tJ.x, y: rects.tJ.y, id: 2 }]);
+    await waitFor(() => page.evaluate(() => __ph.jump), { timeout: 3000, every: 30, what: 'jump with a second finger' });
+    const x2 = await X();
+    await sleep(300);
+    assert.ok(await X() > x2, `${v.name}: still moving right after the jump tap`);
+    await touch('touchEnd', []);
+    await grounded();
+    // a finger sliding from ▶ onto ◀ turns around
+    await touch('touchStart', [{ x: rects.tR.x, y: rects.tR.y, id: 1 }]);
+    await sleep(250);
+    const xs = await X();
+    for (let i = 1; i <= 8; i++) { await touch('touchMove', [{ x: rects.tR.x + (rects.tL.x - rects.tR.x) * i / 8, y: rects.tR.y + (rects.tL.y - rects.tR.y) * i / 8, id: 1 }]); await sleep(20); }
+    await sleep(500);
+    assert.ok(await X() < xs, `${v.name}: sliding ▶ to ◀ turned the player round`);
+    // touchcancel lets go of everything
+    await touch('touchCancel', []);
+    await sleep(300);
+    const xc = await X(); await sleep(300);
+    assert.ok(Math.abs(await X() - xc) < 2, `${v.name}: touchcancel stopped the player`);
+    // slash
+    await touch('touchStart', [{ x: rects.tS.x, y: rects.tS.y, id: 3 }]); await sleep(80); await touch('touchEnd', []);
+    await waitFor(() => page.evaluate(() => __ph.slash), { timeout: 3000, every: 30, what: 'slash from the ⚔ button' });
+    // ? opens the how-to-play card (a real tap), ✕ opens the leave menu, both close again
+    await page.touchscreen.tap(rects.tHelp.x, rects.tHelp.y);
+    await waitFor(() => page.evaluate(() => __mp.helpOpen), { timeout: 2000, what: 'help opens' });
+    await page.tap('#hwClose');
+    await waitFor(() => page.evaluate(() => !__mp.helpOpen), { timeout: 2000, what: 'help closes' });
+    await page.touchscreen.tap(rects.tLeave.x, rects.tLeave.y);
+    await waitFor(() => page.evaluate(() => __mp.leaveOpen), { timeout: 2000, what: 'leave menu opens' });
+    await page.tap('#lvNo');
+    await waitFor(() => page.evaluate(() => !__mp.leaveOpen), { timeout: 2000, what: 'leave menu closes' });
+    assert.equal(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), !v.fine, `${v.name}: pointer media as set up`);
+    log(`phone: ${v.name}: buttons in view and >= 44 px, hold, jump, second finger, slide, cancel, slash, ?, x all work`);
+    await ctx.close();
+  }
+}
+
 async function staleBuildTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
@@ -592,6 +697,7 @@ async function main() {
     await starTest();
     await heartbeatTest();
     await fullscreenTest();
+    await phoneTest();
     await staleBuildTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');

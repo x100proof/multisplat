@@ -99,10 +99,14 @@
   #fsBtn .out, #fsBtn.on .in { display: none; }
   #fsBtn.on .out { display: block; }
   body.nofs #fsBtn { display: none; }
-  body.touchui #fsBtn::after { content: ''; position: absolute; inset: -8px -6px -10px -10px; }   /* a bigger target for thumbs */
+  /* a bigger target for thumbs: a 36x30 button with a 52x46 hit area, clear of the notch */
+  body.touchui { --fsw: 44px; }
+  body.touchui.nofs { --fsw: 0px; }
+  body.touchui #fsBtn { width: 36px; height: 30px; top: max(2px, env(safe-area-inset-top)); right: max(4px, env(safe-area-inset-right)); }
+  body.touchui #fsBtn::after { content: ''; position: absolute; inset: -8px; }
   /* a phone held upright: the stage is turned 90 degrees, so the game's top right is the screen's bottom right */
-  body.rot #fsBtn { top: auto; bottom: 4px; transform: rotate(90deg); }
-  #tbar button { width: 38px; height: 38px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
+  body.rot #fsBtn, body.touchui.rot #fsBtn { top: auto; right: 4px; bottom: max(4px, env(safe-area-inset-bottom)); transform: rotate(90deg); }
+  #tbar button { width: 46px; height: 46px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
                  background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
   #tbar button.off { opacity: .45; }
   #leave { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
@@ -112,7 +116,7 @@
   #howto { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 8;
     background: rgba(5,3,14,.72); }
   #howto.hidden { display: none; }
-  #howto .box { width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; box-sizing: border-box;
+  #howto .box { width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); overflow: auto; box-sizing: border-box;
     padding: 16px 20px; border: 2px solid #05d9e8; border-radius: 10px; background: rgba(13,8,32,.96);
     box-shadow: 0 0 24px rgba(5,217,232,.4); color: #d1f7ff; font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace; }
   #howto h2 { margin: 0 0 8px; font-size: 20px; color: #05d9e8; text-shadow: 0 0 10px #05d9e8; }
@@ -134,6 +138,8 @@
   #leave #lvYes { border-color: #ff2a6d; }
   #leave button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   body.touchui #touch, body.touchui #tbar { display: flex; }
+  /* upright phone: the stage is turned, so the screen's top is the game's left and its bottom the game's right */
+  body.rot #touch { padding-left: max(14px, env(safe-area-inset-top)); padding-right: max(14px, env(safe-area-inset-bottom)); padding-bottom: max(14px, env(safe-area-inset-left)); }
   body.touchui.inlobby #touch, body.touchui.inlobby #tbar { display: none; }
   body.touchui #help { display: none; }
   #help { position: absolute; left: 0; right: 0; bottom: .5em; text-align: center; pointer-events: none;

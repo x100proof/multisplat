@@ -658,11 +658,18 @@ editable physics.
     and the lobby footer say so.
   - Touch (NinjaRunner's `TOUCH_BTN`, `btnAt`, `fingerOn`, `syncTouch`): ◀ ▶ bottom left, » ✦ ⚔ ⤒
     (✦ = `tT`, throw, `THROW_SYMBOL`)
-    bottom right, plus a small ♪ (mute) and ⛶ (full screen) bar. Every finger is tracked by pointer
+    bottom right, plus a small ♪ (mute) and ? ✕ bar (full screen is the corner button). Every finger is tracked by pointer
     id and can slide between buttons; jump and slash presses are latched like keys. **Run is the »
     toggle** (as in NinjaRunner), so one thumb stays on ◀ ▶ and the other on ⤒ ⚔. The bits are OR-ed
-    into the tick mask (`touchBits()`) and log `device touch`. Buttons show when `pointer: coarse`
-    (or `?touch`), hide while the lobby is open, and live in `#stage`, so they turn with it.
+    into the tick mask (`touchBits()`) and log `device touch`. `TOUCH_UI` is on when `pointer: coarse`
+    (or `?touch`) at load, and also switches on at the first real touch (`enableTouchUI`, a capturing
+    `pointerdown` with `pointerType` touch, or `touchstart`), for tablets with a mouse, Android "desktop
+    site" and browsers that report a fine pointer; it only adds buttons, keys and gamepad still work.
+    The buttons hide while the lobby is open and live in `#stage`, so they turn with it (in the rotated
+    portrait stage the safe-area insets are swapped: the screen's top is the game's left). The ♪ ? ✕ bar
+    is 46 px, the full-screen button has a 52x46 hit area, and audio is also unlocked from `touchend` and
+    `click` (iOS Safari). `test/multiclient.js` `phoneTest` drives all of this with real CDP touches
+    in portrait, landscape and a fine-pointer context.
     Fight calls `goLandscape()` (full screen + orientation lock where allowed), as NinjaRunner's
     start does; a phone held upright still gets the rotated stage.
   - Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash, Y to throw, bumpers or

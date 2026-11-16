@@ -109,6 +109,28 @@ ARCHITECTURE.md    the code as implemented
   RTT, capped at 150 ms. Keep 200 ms of position history per player.
 - HP bars are drawn above every player, and your own HP is also shown in the HUD.
 
+### 5.1 Long swords (pickup)
+
+- **Spawning:** the server spawns a long-sword pickup at a random time, 20–40 s after the
+  previous one appeared. At most **2** lie in the arena at once. A pickup appears at a
+  dedicated item point in `shared/level.js` (≥6 of them, spread over all tiers, none on
+  spikes), chosen at random among points with no pickup and no player within 32 units.
+  All of this uses the sim's seeded RNG, so it stays deterministic.
+- **Picking up:** a living player whose body touches the pickup takes it. If two touch it on
+  the same tick, the lower player id wins. A player who already has a long sword leaves it
+  where it is. An unclaimed pickup stays until taken.
+- **Effect:** the holder's sword reach is **×1.6** (`swordBoxOf` length, both chop and sweep).
+  Damage, timing and knockback are unchanged. Lag compensation uses the longer box.
+- **Losing it:** the holder keeps the long sword until they die, by any cause. It is not
+  dropped. They respawn with the standard sword. Leaving the arena also discards it.
+- **Protocol:** snapshots carry a `long` flag per player and the list of pickups (id, x, y).
+  New events: `item` (a pickup appeared) and `pickup` (who took which).
+- **Look and sound:** the pickup is a glowing, slowly bobbing blade in the neon style. A held
+  long sword is drawn visibly longer with a brighter trail, so opponents can read the threat.
+  Pickup has its own SFX, and the kill feed marks long-sword kills.
+- **Prediction:** the client predicts its own longer reach only after the server confirms the
+  pickup; the pickup itself is not predicted.
+
 ## 6. Networking
 
 ### 6.1 Protocol
@@ -353,6 +375,8 @@ tests passing and a commit.
    - Kill gibs, spatter, pools, the combat score (§8), kill feed, scoreboard and touch controls.
    - Debug entries (§13) for the new audio and gore code.
 4. **M4: Review.** A full code review pass. Fix confirmed issues.
+5. **M5: Long swords.** The pickup in §5.1: sim, level item points, protocol, client art and
+   SFX, unit tests, and a multiclient assertion that a pickup extends reach and is lost on death.
 
 **Repo conventions:**
 - `ARCHITECTURE.md` describes the code as it actually is and is updated in the same commit as

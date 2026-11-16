@@ -267,6 +267,12 @@ reverb) but **fast and aggressive**:
     (shrink or truncate names as needed) without covering the HP readout or the kill feed.
   - A kill feed (`A ✂ B`, last 5 kills, fading out).
   - A detailed scoreboard (kills and deaths) while Tab is held.
+  - **A full-screen button in the top right corner**, on desktop and touch, in the game and in
+    the lobby. It toggles full screen (Fullscreen API, with the webkit fallback), its icon
+    shows the current state, and it follows changes made outside it (Escape, F11 where
+    detectable). **F** toggles it from the keyboard. On touch it replaces the ⛶ button in
+    the top-left bar and also requests landscape, as that button did. It is hidden where the
+    browser has no fullscreen support. The score strip and kill feed must not overlap it.
   - A respawn countdown while dead.
 - Name tags float above players. Duplicate names get a `#2` suffix.
 - **D** toggles the debug panel: tunables, hitboxes, RTT and FPS, snapshot jitter, and a
@@ -437,7 +443,7 @@ tests passing and a commit.
    SFX, unit tests, and a multiclient assertion that a pickup extends reach and is lost on death.
 6. **M6: Later changes**, one commit each: leaving with Escape (§6.4), no spike traps (§3), the
    5 s heartbeat (§6.4), scores for everyone along the top (§9), neon blood by default with a
-   real-gore option (§7), and ninja stars (§5.2).
+   real-gore option (§7), ninja stars (§5.2), and the full-screen button (§9).
 
 **Repo conventions:**
 - `ARCHITECTURE.md` describes the code as it actually is and is updated in the same commit as

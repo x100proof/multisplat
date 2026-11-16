@@ -74,6 +74,17 @@ export function cleanName(s) {
   const n = s.trim().replace(/ {2,}/g, ' ');
   return NAME_RE.test(n) ? n : null;
 }
+// Chat (SPEC §9): the longest message, in code points, and the per-player rate (1 per 1.5 s, burst 3).
+export const CHAT = Object.freeze({ maxLen: 80, burst: 3, refillMs: 1500, showMs: 6000, fadeMs: 1000 });
+// Whitespace (tabs, newlines and Unicode spaces) becomes one space; control (Cc), format (Cf: zero-width, bidi
+// and tag characters, soft hyphen, BOM) and unpaired surrogates are removed; the result is trimmed
+// and cut to CHAT.maxLen code points, so an emoji is never split. Returns '' for "drop this" and
+// null for a non-string. Used by the server (authoritative) and by the client and tests.
+export function cleanChat(s) {
+  if (typeof s !== 'string') return null;
+  const t = s.replace(/[\t-\r\p{Z}]/gu, ' ').replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '').replace(/ {2,}/g, ' ').trim();
+  return Array.from(t).slice(0, CHAT.maxLen).join('').trim();
+}
 export const HISTORY_TICKS = Math.ceil(NET.historyMs * TICK_HZ / 1000);
 
 // The 8 lobby colours (SPEC §9). The first six are NinjaRunner's NEON palette.

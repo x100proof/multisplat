@@ -4,7 +4,7 @@
 // close(code, reason), so unit tests can drive it with fakes and call tick() by hand.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName } from '../shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName, cleanChat, CHAT } from '../shared/constants.js';
 
 export const PROTOCOL = 1;
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
@@ -115,8 +115,36 @@ export class Arena {
       case 'ping': return this.onPing(conn, m);
       case 'hello': return this.onHello(conn, m);
       case 'leave': return this.onLeave(conn);
+      case 'chat': return this.onChat(conn, m);
       default: return this.kick(conn, 'unknown');
     }
+  }
+
+  // Chat (SPEC §9). Only a player in the arena or the queue may chat; a viewer's message is ignored.
+  // Per-player token bucket kept on the record (so a reconnect does not refill it): burst 3, one
+  // more every 1.5 s. A message over the limit is dropped and counts toward the flood kick. The
+  // text is relayed as an event to every connection and is never logged: only its length is.
+  onChat(conn, m) {
+    if (typeof m.text !== 'string') return this.kick(conn, 'malformed');
+    const rec = conn.rec;
+    if (!rec) return;
+    const now = this.now();
+    const c = rec.chat || (rec.chat = { tokens: CHAT.burst, at: now });
+    c.tokens = Math.min(CHAT.burst, c.tokens + (now - c.at) / CHAT.refillMs);
+    c.at = now;
+    if (c.tokens < 1) {
+      conn.dropCount++;
+      conn.drops.push(now);
+      while (conn.drops.length && conn.drops[0] < now - FLOOD_WINDOW_MS) conn.drops.shift();
+      if (conn.drops.length === 1 || conn.dropCount % 50 === 0) this.event('ratelimit', conn.id, { dropped: conn.dropCount });
+      if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
+      return;
+    }
+    const text = cleanChat(m.text);
+    if (!text) return;
+    c.tokens -= 1;
+    this.event('chat', conn.id, { player: rec.id, len: Array.from(text).length });
+    this.broadcastEvents([{ type: 'chat', id: rec.id, text }]);
   }
 
   // Token buckets: 90 input messages/s, 10 other messages/s. Excess is dropped; sustained excess

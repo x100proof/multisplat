@@ -109,6 +109,20 @@
   #tbar button { width: 46px; height: 46px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
                  background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
   #tbar button.off { opacity: .45; }
+  /* chat (SPEC §9): the list bottom left (above the thumb buttons on touch), the one-line box bottom centre
+     (top centre on touch, clear of the phone keyboard). Lines are plain text and fade after ~6 s. */
+  #chatlist { position: absolute; left: .8em; bottom: .8em; width: min(26em, 46%); display: flex; flex-direction: column; gap: .15em;
+              pointer-events: none; z-index: 6; font-weight: 700; font-size: clamp(10px, 1.6vw, 15px); text-shadow: 0 0 4px #000, 1px 1px 0 #000; }
+  #chatlist > div { background: rgba(5,3,10,.55); padding: .1em .5em; border-radius: 4px; color: #e6f3ff; overflow-wrap: anywhere;
+                    animation: chatfade 1s linear 5s forwards; }
+  @keyframes chatfade { to { opacity: 0; } }
+  body.chatting #chatlist { bottom: 4.2em; }
+  body.touchui #chatlist { bottom: calc(clamp(64px, 21vmin, 100px) + 22px); }
+  #chatbox { position: absolute; left: 50%; bottom: 1.2em; transform: translateX(-50%); width: min(30em, 70%); z-index: 6; }
+  #chatbox.hidden { display: none; }
+  body.touchui #chatbox { bottom: auto; top: calc(var(--sh) + 4px); }
+  #chatIn { width: 100%; box-sizing: border-box; padding: .45em .7em; font: 700 clamp(13px, 2vw, 18px) ui-monospace, Menlo, Consolas, monospace;
+            color: #fff; background: rgba(5,3,10,.88); border: 2px solid #05d9e8; border-radius: 8px; outline: none; box-shadow: 0 0 12px rgba(5,217,232,.5); }
   #leave { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
     background: rgba(5,3,14,.6); }
   #leave.hidden { display: none; }
@@ -220,8 +234,10 @@
   <div id="msgSub"></div>
   <div id="feed"></div>
   <div id="board" class="hidden"></div>
-  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button></div>
-  <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · D debug · F full screen · Esc leave · H how to play</div>
+  <div id="chatlist" aria-live="polite"></div>
+  <div id="chatbox" class="hidden"><input id="chatIn" type="text" maxlength="80" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Say something, Enter to send" aria-label="Chat message"></div>
+  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button><button id="tChat" aria-label="Chat">💬</button></div>
+  <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · C chat · D debug · F full screen · Esc leave · H how to play</div>
 </div>
 <div id="touch">
   <div class="grp"><button id="tL" aria-label="Left">◀</button><button id="tR" aria-label="Right">▶</button></div>
@@ -239,6 +255,7 @@
       <tr class="keysonly"><td>↑ or Z</td><td>Jump. Hold it longer to jump higher.</td></tr>
       <tr class="keysonly"><td>Space</td><td>Slash. Press again right after a chop for a sweep.</td></tr>
       <tr class="keysonly"><td>X</td><td>Throw a ninja star, if you have any.</td></tr>
+      <tr class="keysonly"><td>C</td><td>Chat: type a line, Enter sends it, Esc cancels. Everyone sees it above your head for a few seconds.</td></tr>
       <tr class="keysonly"><td>Tab</td><td>Hold for the full scoreboard.</td></tr>
       <tr class="keysonly"><td>F · M</td><td>Full screen · mute.</td></tr>
       <tr class="keysonly"><td>Esc</td><td>Leave the fight (it asks first).</td></tr>
@@ -248,6 +265,7 @@
       <tr class="touchonly"><td>⤒</td><td>Jump. Hold it longer to jump higher.</td></tr>
       <tr class="touchonly"><td>⚔</td><td>Slash. Tap again right after a chop for a sweep.</td></tr>
       <tr class="touchonly"><td>✦</td><td>Throw a ninja star, if you have any.</td></tr>
+      <tr class="touchonly"><td>💬</td><td>Chat: type a line and send it; everyone sees it above your head.</td></tr>
       <tr class="touchonly"><td>♪ · ? · ✕</td><td>Mute · this screen · leave the fight.</td></tr>
     </table>
     <h3>Fighting</h3>
@@ -280,7 +298,7 @@
     <ul id="lPlayers"></ul>
     <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
     <div id="lStatus"></div>
-    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · X throw star · Tab scores · F full screen · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · ✦ throw star · » run on/off</span><span><a href="#" id="lHelp">How to play</a> · <a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
+    <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · X throw star · Tab scores · C chat · F full screen · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · ✦ throw star · » run on/off · 💬 chat</span><span><a href="#" id="lHelp">How to play</a> · <a href="#" id="lReport">Report a problem</a> <span id="lReportId"></span></span></div>
   </div>
 </div>
 <div id="dbg" class="hidden"></div>

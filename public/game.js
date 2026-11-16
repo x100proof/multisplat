@@ -4,7 +4,7 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, CHAT } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { createNet } from './net.js';
 import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
@@ -343,6 +343,7 @@ const sfx = {
   jump: () => tone(320, .16, 'square', 640, .05),
   stomp: () => tone(260, .12, 'square', 80, .07),
   bonk: () => tone(140, .08, 'triangle', 90, .1),
+  chat: () => { tone(880, .07, 'sine', 1180, .035); tone(1320, .08, 'sine', null, .02, .06); },   // a soft blip for a chat line
   die: () => [523, 392, 330, 262].forEach((f, i) => tone(f, .16, 'square', null, .05, i * .15)),
   check: () => { tone(660, .1, 'triangle', null, .08); tone(880, .2, 'triangle', null, .08, .1); },
   // long sword taken: a metallic draw (bright noise sweep) and a rising neon-bell arpeggio.
@@ -408,6 +409,7 @@ function heldBits() {
   return b | padBits();
 }
 addEventListener('keydown', e => {
+  if (chatKey(e)) return;   // the chat box owns the keyboard while open; C opens it
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') { if (e.code === 'Enter') fight(); return; }
   if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleFullscreen(); return; }
   if (e.code === 'KeyH' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !leaveOpen) { helpScreen(!helpOpen); return; }
@@ -562,6 +564,7 @@ let autopilot = null;         // window.__mp.autopilot = (me, players) => bitmas
 
 function onEvents(evs) {
   for (const e of evs) {
+    if (e.type === 'chat') { onChatEvent(e); continue; }   // chat text stays out of eventLog
     eventLog.push(e); if (eventLog.length > 200) eventLog.shift();
     const near = e.id === ME || e.attacker === ME || e.victim === ME;
     if (e.type === 'hit') {
@@ -686,7 +689,8 @@ function playFx(p) {
 // Online: sample input, predict our player and queue the input for the server (sent per frame).
 function updateOnline() {
   ME = net.id ?? -1;
-  let k = lobbyOpen || leaveOpen || helpOpen ? 0 : heldBits() | touchBits() | latch;
+  if (chatOpen && (lobbyOpen || leaveOpen || helpOpen || net.mode === 'viewer')) chatScreen(false);   // another screen took over
+  let k = lobbyOpen || leaveOpen || helpOpen || chatOpen ? 0 : heldBits() | touchBits() | latch;
   latch = 0;
   if (forced[ME] !== undefined) k = forced[ME];
   if (autopilot && net.me) { try { k = autopilot(net.me, state.players) | 0; } catch (e) { dbg('error', 'autopilot: ' + e.message); } }
@@ -1116,6 +1120,7 @@ function render() {
     if (p.stars > 0) drawStarCount(p, px, py);
     if (p.id === ME) drawThrowHint(p, px, py);
   }
+  if (ONLINE) for (const p of order) drawChatBubble(p, p.x - cx, p.y);   // over everyone's tags and counts
 
   // ninja stars in flight (online: interpolated at the render tick like remote players)
   for (const st of state.stars || []) {
@@ -1718,6 +1723,100 @@ function backToLobby(message) {
 document.getElementById('lvYes').addEventListener('click', leaveGame);
 document.getElementById('lvNo').addEventListener('click', () => leaveMenu(false));
 
+// ---------- chat (SPEC §9): C opens a one-line box, Enter sends, Escape cancels ----------
+// Incoming lines show as a speech bubble above the speaker (canvas text) and in a small list at the
+// bottom left (DOM, textContent only). Text is never HTML and never goes into the debug log.
+let chatOpen = false;
+const chats = new Map();      // player id -> { text, at, lines } the bubble currently shown
+const chatBox = document.getElementById('chatbox'), chatIn = document.getElementById('chatIn'), chatListEl = document.getElementById('chatlist');
+function chatScreen(open) {
+  if (open === chatOpen) return;
+  if (open && (!ONLINE || lobbyOpen || leaveOpen || helpOpen || !net || net.mode === 'viewer')) return;
+  chatOpen = open;
+  chatBox.classList.toggle('hidden', !open); document.body.classList.toggle('chatting', open);
+  for (const k in keys) keys[k] = false;
+  latch = 0; fingers.clear(); syncTouch(); board(false);
+  if (open) { chatIn.value = ''; chatIn.focus(); } else { chatIn.value = ''; if (document.activeElement === chatIn) chatIn.blur(); }
+  dbg('life', open ? 'chat opened' : 'chat closed');
+}
+function chatSend() {
+  const text = cleanChat(chatIn.value);
+  chatScreen(false);
+  if (text) net.chat(text);
+}
+// Returns true when the key belongs to chat (the game's key handler then does nothing).
+function chatKey(e) {
+  if (chatOpen) {
+    if (e.isComposing) return true;
+    if (e.code === 'Escape' || e['key'] === 'Escape') { e.preventDefault(); chatScreen(false); }
+    else if (e.code === 'Enter' || e['key'] === 'Enter') { e.preventDefault(); chatSend(); }
+    else if (e.code === 'Tab') e.preventDefault();
+    return true;   // anything else types into the box
+  }
+  if (e.code === 'KeyC' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && e.target.tagName !== 'INPUT') {
+    if (!ONLINE || lobbyOpen || leaveOpen || helpOpen) return false;
+    e.preventDefault();   // the focused box must not receive this very C
+    chatScreen(true);
+    return chatOpen;
+  }
+  return false;
+}
+chatIn.addEventListener('blur', () => chatScreen(false));   // clicking away closes it
+tapBtn('tChat', () => chatScreen(!chatOpen));   // focus() runs inside the tap, so a phone's keyboard comes up
+document.getElementById('tChat').addEventListener('click', () => { if (chatOpen) chatIn.focus(); });
+function onChatEvent(e) {
+  if (typeof e.text !== 'string') return;
+  const text = e.text, m = metaOf(e.id), now = performance.now();
+  dbg('audio', 'chat blip', { id: e.id, len: Array.from(text).length });
+  chats.set(e.id, { text, at: now, lines: null });
+  sfx.chat();
+  const row = document.createElement('div'), nm = document.createElement('b');
+  nm.textContent = m ? m.name : '?'; nm.style.color = m ? colorOf(e.id) : '#cfd8e6';
+  row.append(nm, ': ' + text);
+  chatListEl.appendChild(row);
+  while (chatListEl.children.length > 5) chatListEl.firstChild.remove();
+  setTimeout(() => row.remove(), CHAT.showMs);
+}
+// Word-wrap into at most 3 short lines (the rest is cut with an ellipsis; the list has it all).
+function chatLines(text) {
+  const maxW = 80, out = [];
+  let cur = '';
+  for (const word of text.split(' ')) {
+    for (let w = word; w;) {   // a word longer than a line is broken by characters
+      const t = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(t).width <= maxW) { cur = t; break; }
+      if (cur) { out.push(cur); cur = ''; continue; }
+      let n = 1; const cs = Array.from(w);
+      while (n < cs.length && ctx.measureText(cs.slice(0, n + 1).join('')).width <= maxW) n++;
+      out.push(cs.slice(0, n).join('')); w = cs.slice(n).join('');
+    }
+  }
+  if (cur) out.push(cur);
+  if (out.length > 3) { out.length = 3; out[2] = Array.from(out[2]).slice(0, -1).join('') + '…'; }
+  return out;
+}
+// The bubble sits above the star count and the throw hint (the highest things over a head).
+function drawChatBubble(p, px, py) {
+  const c = chats.get(p.id);
+  if (!c) return;
+  const age = performance.now() - c.at;
+  if (age >= CHAT.showMs) { chats.delete(p.id); return; }
+  ctx.save();
+  ctx.font = '700 5px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  if (!c.lines) c.lines = chatLines(c.text);
+  const lh = 6, w = Math.max(...c.lines.map(l => ctx.measureText(l).width)) + 6, h = c.lines.length * lh + 3;
+  let x = px + p.w / 2 - w / 2; x = Math.max(2, Math.min(VW - w - 2, x));
+  const y = Math.max(2, py - 25 - h);   // bottom edge 25 above the feet line: clear of the throw hint (-21)
+  ctx.globalAlpha = Math.max(0, Math.min(1, (CHAT.showMs - age) / CHAT.fadeMs));
+  ctx.fillStyle = 'rgba(5,3,10,.82)'; ctx.strokeStyle = colorOf(p.id); ctx.lineWidth = .8;
+  rrect(ctx, x, y, w, h, 2); ctx.fill(); ctx.stroke();
+  const tx = Math.max(x + 3, Math.min(x + w - 3, px + p.w / 2));   // the tail points at the head
+  ctx.beginPath(); ctx.moveTo(tx - 2, y + h); ctx.lineTo(tx, y + h + 2.5); ctx.lineTo(tx + 2, y + h); ctx.fillStyle = 'rgba(5,3,10,.82)'; ctx.fill();
+  ctx.fillStyle = '#f2fbff'; ctx.textAlign = 'left';
+  c.lines.forEach((l, i) => ctx.fillText(l, x + 3, y + 1.5 + (i + 1) * lh - 1.3));
+  ctx.restore();
+}
+
 // ---------- versions (SPEC §10): a page older than the server reloads itself, once per build ----------
 const BUILD = (document.querySelector('meta[name="build"]') || {}).content || '';
 let staleBuild = false;
@@ -1796,6 +1895,7 @@ window.__mp = {
   },
   get strip() { return { builds: stripBuilds, chips: [...stripEl.children].map(c => ({ id: +c.dataset.id, me: c.classList.contains('me'), text: c.textContent })) }; },
   get throwHint() { return performance.now() < throwHintUntil ? throwHintText() : null; },   // the "X to throw" reminder while shown
+  get chat() { return { open: chatOpen, bubbles: [...chats].filter(([, c]) => performance.now() - c.at < CHAT.showMs).map(([id, c]) => ({ id, text: c.text })), lines: [...chatListEl.children].map(e => e.textContent) }; },
   get feed() { return [...feedEl.children].map(e => e.textContent); },
   get perf() { return { renderMs, goreMs, fps }; },
   get music() { return music; }, analyzeLoop, startAudio: initAudio,

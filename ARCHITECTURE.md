@@ -245,6 +245,7 @@ Client → server:
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
+{ t: 'chat', text }                     // SPEC §9: a chat line (rules below); a non-string text is a `malformed` kick
 ```
 
 Server → client:
@@ -279,6 +280,7 @@ render identical gore. There are also:
 { type: 'join',  tick, id, name, color }
 { type: 'leave', tick, id, reason: 'timeout'|'kick' }
 { type: 'score', tick, id, score, deaths }   // after every kill, for the killer and the victim
+{ type: 'chat',  id, text }                  // a chat line, to every connection (viewers too); no position, so it is released at once
 ```
 
 If a player leaves within `creditTicks` of being hit, it is first killed with `move: 'leave'`, so
@@ -957,5 +959,33 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   killing swing from breaking it.
 - **How to play** (`#howto`, `helpScreen` in `game.js`): H, the touch ? button or the lobby link opens
   it; H, Escape, Enter, Close or a click outside shuts it; inputs are zeroed while it is open.
+- **Chat** (SPEC §9). `{t:'chat', text}` goes through the usual 10/s message bucket, then
+  `Arena.onChat`. Rules: a non-string `text` is a `malformed` kick (even from a viewer); a connection
+  with no record (a lobby viewer) is ignored; `cleanChat` (`shared/constants.js`, next to `cleanName`)
+  turns tabs, newlines and Unicode spaces into one space, removes control characters (C0, DEL, C1),
+  format characters (`\p{Cf}`: zero-width, bidi, soft hyphen, BOM, tags; this also drops the zero-width
+  joiner, so ZWJ emoji sequences fall apart into their parts) and unpaired surrogates, collapses
+  spaces, trims, cuts to `CHAT.maxLen` = 80 code points (`Array.from`, so an emoji is never split)
+  and trims again; an empty result is dropped. Each player record has a token bucket (`rec.chat`,
+  burst `CHAT.burst` = 3, one token per `CHAT.refillMs` = 1500 ms; it lives on the record so a
+  reconnect does not refill it). A message with no token is dropped and counts as a drop toward the
+  same flood window as `allow()` (90 drops in 3 s is a `flood` kick). A relayed line becomes the event
+  `{type:'chat', id, text}`, broadcast to every connection. The text is never logged: the event ring
+  gets `chat` with `player` and `len` only. Queued players may chat.
+  Client: `net.chat(text)` sends; `onEvents` in `net.js` logs `chat received` with the length only.
+  In `game.js` (block after the leave menu): `chatKey` runs first in the `keydown` handler. C opens
+  (`chatScreen(true)`; not in the lobby, as a viewer, or with the leave menu, help or a text input
+  focused; the C itself is `preventDefault`ed), and while the `#chatbox` is open it returns true for
+  every key so nothing else acts (Enter sends via `cleanChat` then closes, Escape and a blur close,
+  Tab is swallowed); `updateOnline` zeroes the input bits (`chatOpen`) and closes the box if another
+  screen took over. `#tChat` (💬 in `#tbar`) calls `chatScreen` from the pointerdown handler so the
+  focus (and a phone's keyboard) happens inside the tap; on touch the box sits at the top. Incoming
+  `chat` events go to `onChatEvent` before the event log: a bubble state (`chats`, id to text and
+  time), a row in `#chatlist` (`textContent` only, name in the player's colour, last 5, CSS fade
+  from 5 s, removed at 6 s) and `sfx.chat`. `drawChatBubble` runs after all players are drawn: up
+  to 3 wrapped lines (80 units wide, ellipsis after the third), bottom edge 25 units above the feet
+  (name tag 9, HP bar 7, stars 14.5, throw hint 21), clamped into the view, alpha fading over the
+  last `CHAT.fadeMs` of `CHAT.showMs` (6 s); only players in `state.players` and alive are drawn.
+  `window.__mp.chat` exposes `{open, bubbles, lines}` for tests. Chat text never enters `dbg()`.
 - **Star count above the head** (`drawStarCount`): "★n" above any player with stars; the throw
   reminder sits above it.

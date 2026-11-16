@@ -77,6 +77,28 @@ test('a steady 60 inputs/s is fine', async () => {
   c.ws.close();
 });
 
+test('chat flood is dropped and then kicked; an oversize chat closes the connection', async () => {
+  const a = await open(), w = await open();
+  a.ws.send(JSON.stringify({ t: 'hello', name: 'chatty', color: 0 }));
+  await sleep(100);
+  a.ws.send(JSON.stringify({ t: 'chat', text: 'x'.repeat(900) }));   // under 1 KB: cut to 80 and relayed, even to a viewer
+  await sleep(150);
+  const got = w.msgs.filter(m => m.t === 'event').flatMap(m => m.ev).filter(e => e.type === 'chat');
+  assert.equal(got.length, 1); assert.equal(got[0].text, 'x'.repeat(80));
+  for (let i = 0; i < 300; i++) a.ws.send(JSON.stringify({ t: 'chat', text: 'spam ' + i }));
+  const { code } = await a.closed;
+  assert.equal(a.kick()?.reason, 'flood');
+  assert.equal(code, 4004);
+  const relayed = w.msgs.filter(m => m.t === 'event').flatMap(m => m.ev).filter(e => e.type === 'chat').length;
+  assert.ok(relayed <= 4, `at most the burst got through, saw ${relayed}`);
+  const b = await open();
+  b.ws.send(JSON.stringify({ t: 'hello', name: 'big', color: 1 }));
+  await sleep(100);
+  b.ws.send(JSON.stringify({ t: 'chat', text: 'y'.repeat(2000) }));
+  assert.equal((await b.closed).code, 1009);
+  w.ws.close();
+});
+
 test(`connections over MAX_PER_IP are refused`, async () => {
   const ip = nextIp(), socks = [];
   for (let i = 0; i < 4; i++) socks.push(await open({ ip }));

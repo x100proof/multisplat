@@ -166,6 +166,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
     live = false; dropped = false; seq = 0; pending = []; unsent = [];
   };
+  // Send a chat line (SPEC §9). Only its length is logged, never the text.
+  net.chat = function chat(text) {
+    dbg('chat', 'sent', { len: Array.from(text).length });
+    send({ t: 'chat', text });
+  };
   // Test hook: drop the connection as if the network failed (the token is kept for resume).
   net.drop = function drop() { if (ws) ws.close(); };
 
@@ -251,6 +256,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       } else if (e.type === 'score') {
         const mm = net.meta.get(e.id); if (mm) { mm.score = e.score; mm.deaths = e.deaths; }
       }
+      if (e.type === 'chat') dbg('chat', 'received', { id: e.id, len: Array.from(e.text || '').length });
       if (e.type === 'spawn' && e.id === net.id) dbg('life', 'spawn', { x: Math.round(e.x), y: Math.round(e.y) });
       if (e.type === 'kill' && e.victim === net.id) {
         dbg('life', 'death', { killer: e.killer, move: e.move });

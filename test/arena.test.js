@@ -653,3 +653,98 @@ test('no two fighters share a colour; a queued player gets a free one on promoti
   assert.equal(new Set(worn).size, worn.length);
   assert.ok(b.events().some(ev => ev.type === 'join' && ev.id === 5 && ev.color === 0), 'others learn the assigned colour');
 });
+
+// ---------- chat (SPEC §9) ----------
+function chatSetup(opts) {
+  const s = setup(opts);
+  const a = s.conn(), b = s.conn(), v = s.conn();
+  a.say({ t: 'hello', name: 'A', color: 0 }); b.say({ t: 'hello', name: 'B', color: 1 });
+  const chats = c => c.events().filter(e => e.type === 'chat');
+  return { ...s, a, b, v, chats };
+}
+
+test('chat is relayed as an event to players and lobby viewers alike', () => {
+  const { a, b, v, chats } = chatSetup();
+  a.say({ t: 'chat', text: 'hello world' });
+  for (const c of [a, b, v]) assert.deepEqual(chats(c), [{ type: 'chat', id: 1, text: 'hello world' }]);
+});
+
+test('chat text is trimmed, stripped of control, zero-width and bidi characters, collapsed and cut to 80 code points', () => {
+  const { a, b, chats, clock } = chatSetup();
+  const say = text => { clock.advance(2000); a.say({ t: 'chat', text }); return chats(b).at(-1)?.text; };
+  assert.equal(say('  hi \t\n  there  '), 'hi there');
+  assert.equal(say('a\u0000b\u0007c\u001bd\u007fe\u0085f\u009bg'), 'abcdefg', 'C0, DEL and C1 are stripped');
+  assert.equal(say('x​y‌z‍⁠﻿w'), 'xyzw', 'zero-width characters are stripped');
+  assert.equal(say('‮evil‬ ⁦x⁩ ‎‏ok'), 'evil x ok', 'bidi controls are stripped');
+  assert.equal(say('<b>&amp;</b>'), '<b>&amp;</b>', 'HTML is left alone: the client only ever uses text');
+  assert.equal(Array.from(say('é'.repeat(200))).length, 80);
+});
+
+test('an emoji is never split by the 80 cut, and an empty result is dropped', () => {
+  const { a, b, chats, clock } = chatSetup();
+  a.say({ t: 'chat', text: '😀'.repeat(100) });
+  assert.equal(chats(b)[0].text, '😀'.repeat(80));
+  clock.advance(5000);
+  for (const text of ['', '   ', '​‮', '\n\t']) a.say({ t: 'chat', text });
+  assert.equal(chats(b).length, 1, 'nothing left after sanitising: dropped');
+  assert.equal(a.closed, null, 'and not a kick');
+});
+
+test('a lobby viewer cannot chat; a queued player can', () => {
+  const { v, b, conn, chats } = chatSetup({ maxPlayers: 2 });
+  v.say({ t: 'chat', text: 'let me in' });
+  assert.equal(chats(b).length, 0); assert.equal(v.closed, null);
+  const q = conn(); q.say({ t: 'hello', name: 'Q', color: 2 });
+  assert.equal(q.last('welcome').state, 'queue');
+  q.say({ t: 'chat', text: 'waiting' });
+  assert.equal(chats(b)[0].text, 'waiting'); assert.equal(chats(v)[0].id, 3);
+});
+
+test('non-string chat text is a malformed kick', () => {
+  for (const text of [undefined, 5, null, { a: 1 }, ['x'], true]) {
+    const { a } = chatSetup();
+    a.say({ t: 'chat', text });
+    assert.deepEqual(a.closed, { code: KICK.malformed, reason: 'malformed' }, JSON.stringify(text));
+  }
+  const { v } = chatSetup();
+  v.say({ t: 'chat', text: 7 });   // even a viewer
+  assert.equal(v.closed?.reason, 'malformed');
+});
+
+test('chat rate limit: a burst of 3, then one per 1.5 s; the drops count toward the flood kick', () => {
+  const { a, b, chats, clock } = chatSetup({ pings: false, heartbeatMs: Infinity });
+  const send = () => a.say({ t: 'chat', text: 'spam' });
+  for (let i = 0; i < 5; i++) send();
+  assert.equal(chats(b).length, 3, 'the burst');
+  clock.advance(1400); send();
+  assert.equal(chats(b).length, 3, 'not yet');
+  clock.advance(200); send();
+  assert.equal(chats(b).length, 4, 'one more after 1.5 s');
+  send();
+  assert.equal(chats(b).length, 4);
+  clock.advance(4500);   // refills the burst, never more than 3
+  for (let i = 0; i < 5; i++) send();
+  assert.equal(chats(b).length, 7);
+  assert.equal(a.closed, null, 'a few drops are not a kick');
+  // a sustained flood is kicked like any other (90 drops within 3 s)
+  for (let i = 0; i < 200 && !a.closed; i++) send();
+  assert.equal(a.closed?.reason, 'flood');
+});
+
+test('each player has their own chat budget', () => {
+  const { a, b, chats } = chatSetup();
+  for (let i = 0; i < 6; i++) a.say({ t: 'chat', text: 'a' });
+  for (let i = 0; i < 3; i++) b.say({ t: 'chat', text: 'b' });
+  assert.equal(chats(a).filter(e => e.id === 1).length, 3);
+  assert.equal(chats(a).filter(e => e.id === 2).length, 3);
+});
+
+test('the event ring records that a chat happened and its length, never the text', () => {
+  const { a, events } = chatSetup();
+  const secret = 'the-password-is-swordfish';
+  a.say({ t: 'chat', text: secret });
+  const rows = events.all().filter(e => e.type === 'chat');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].len, secret.length);
+  assert.ok(!JSON.stringify(events.all()).includes('swordfish'));
+});

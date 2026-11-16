@@ -358,6 +358,78 @@ async function leaveTest() {
   await srv.stop();
 }
 
+// Chat (SPEC §9): A presses C, types, presses Enter; every page (a lobby viewer too) shows the line and
+// the speaker's bubble; typing "hfmx" into the box toggles nothing and throws nothing; Escape cancels
+// without opening the leave menu; a few seconds later the line is gone.
+async function chatTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPlayer(srv, 'Talker', 3), B = await openPlayer(srv, 'Listen', 6);
+  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+  const V = { page: await ctx.newPage(), name: 'Viewer' };
+  V.page.on('pageerror', e => errors.push(`Viewer: ${e.message}`));
+  await V.page.goto(srv.url);
+  await V.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open' && window.__mp.lobbyOpen);
+  const ui = p => p.page.evaluate(() => ({ chat: __mp.chat, help: __mp.helpOpen, leave: __mp.leaveOpen, mute: document.getElementById('tMute').classList.contains('off'),
+    fs: !!document.fullscreenElement, debug: !document.getElementById('dbg').classList.contains('hidden'),
+    boxShown: !document.getElementById('chatbox').classList.contains('hidden'), val: document.getElementById('chatIn').value }));
+  await waitFor(async () => (await A.page.evaluate(() => __mp.state.players.length)) === 2, { what: 'both players in the arena' });
+  const before = await ui(A);
+  // Escape cancels and does not open the leave menu
+  await A.page.keyboard.press('KeyC');
+  let u = await ui(A);
+  assert.ok(u.chat.open && u.boxShown && u.val === '', 'C opens the box, without typing a "c" into it');
+  await A.page.keyboard.type('draft');
+  await A.page.keyboard.press('Escape');
+  u = await ui(A);
+  assert.ok(!u.chat.open && !u.boxShown && !u.leave, 'Escape cancels chat and does not open the leave menu');
+  assert.deepEqual((await ui(B)).chat.lines, [], 'a cancelled message is not sent');
+  // while open, keys type and trigger nothing else
+  await A.page.keyboard.press('KeyC');
+  await A.page.keyboard.type('hfmx dD?', { delay: 20 });
+  await A.page.keyboard.press('Space'); await A.page.keyboard.press('ArrowLeft'); await A.page.keyboard.press('Tab');
+  u = await ui(A);
+  assert.ok(u.chat.open && u.val.startsWith('hfmx dD?'), `the box holds what was typed (${u.val})`);
+  assert.ok(!u.help && u.mute === before.mute && u.fs === before.fs && u.debug === before.debug, 'h, f, m, x, d did nothing else');
+  assert.equal(await A.page.evaluate(() => document.activeElement.id), 'chatIn', 'Tab does not move the focus');
+  await A.page.keyboard.press('Control+A'); await A.page.keyboard.press('Backspace');
+  const msg = '  Hello  <b>world</b>  ‮!  ';
+  await A.page.keyboard.insertText(msg);
+  await A.page.keyboard.press('Enter');
+  u = await ui(A);
+  assert.ok(!u.chat.open && !u.boxShown, 'Enter sends and closes');
+  const want = 'Hello <b>world</b> !';
+  for (const p of [A, B, V]) {
+    await waitFor(async () => (await ui(p)).chat.lines.length === 1, { what: `${p.name} sees the chat line` });
+    assert.deepEqual((await ui(p)).chat.lines, ['Talker: ' + want], `${p.name}: "name: text", sanitised`);
+  }
+  for (const p of [A, B, V]) {
+    const b = (await ui(p)).chat.bubbles;
+    assert.deepEqual(b, [{ id: A.id, text: want }], `${p.name}: bubble state for the speaker`);
+  }
+  assert.equal(await B.page.evaluate(() => document.querySelectorAll('#chatlist b').length), 1, 'the markup in the text did not become elements');
+  assert.equal(await B.page.evaluate(() => document.querySelectorAll('#chatlist *').length), 1);
+  // no text in the debug log
+  for (const p of [A, B, V]) {
+    const dump = await p.page.evaluate(() => JSON.stringify(__mp.debug.entries()));
+    assert.ok(!dump.includes('Hello'), `${p.name}: chat text is not in the debug ring`);
+  }
+  // it goes away by itself
+  await sleep(7000);
+  for (const p of [A, B, V]) {
+    const c = (await ui(p)).chat;
+    assert.deepEqual(c.lines, [], `${p.name}: the line faded out`);
+    assert.deepEqual(c.bubbles, [], `${p.name}: the bubble faded out`);
+  }
+  assert.ok(!(await ui(V)).chat.open);
+  // the lobby viewer cannot chat: C does nothing there
+  await V.page.keyboard.press('KeyC');
+  assert.ok(!(await ui(V)).chat.open, 'no chat box in the lobby');
+  log('chat: C, Enter, Escape, bubble and list on every page (viewer too), keys swallowed, text gone after 6 s');
+  for (const p of [A, B, V]) await p.page.context().close();
+  await srv.stop();
+}
+
 // Ninja stars (SPEC §5.2): STAR_SECS=1,1 and ITEM_POINTS=0,1 put star pickups on the floor quickly
 // (ITEM_SECS keeps long swords away). A bot grabs stars: the "X to throw" reminder and the status
 // bar's count show; it throws at the opponent standing on the same floor; every page sees the
@@ -718,6 +790,7 @@ async function main() {
     await predictionTest();
     await longSwordTest();
     await leaveTest();
+    await chatTest();
     await starTest();
     await heartbeatTest();
     await fullscreenTest();

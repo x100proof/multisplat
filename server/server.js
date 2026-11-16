@@ -104,7 +104,7 @@ function delayer(sim) {
 
 export async function startServer(cfg = loadConfig(), { log = console.log } = {}) {
   const events = createEventRing(2000);
-  const arena = new Arena({ log, event: events.push });
+  const arena = new Arena({ log, event: events.push, maxPerIp: cfg.maxPerIp });
   const clientIp = req => clientIpOf(req, cfg.trustProxy);
   const debug = createDebug({ dir: cfg.debugDir, allowedOrigins: cfg.allowedOrigins, clientIp, arena, events, log });
 

@@ -4,12 +4,14 @@
 // close(code, reason), so unit tests can drive it with fakes and call tick() by hand.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName } from '../shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName } from '../shared/constants.js';
 
 export const PROTOCOL = 1;
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
 const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
+const DRAIN_WINDOW = 30;                            // ticks over which a standing input backlog is measured
+const PRESS_BITS = KEY.JUMP | KEY.SLASH;            // edge-triggered keys a skipped input must not lose
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
 const FLOOD_KICK_DROPS = 90;                        // dropped messages within FLOOD_WINDOW_MS → kick
@@ -25,8 +27,8 @@ const r2 = v => Math.round(v * 100) / 100;
 
 export class Arena {
   constructor({ cfg = DEFAULTS, now = () => performance.now(), log = () => {}, event = () => {},
-    maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, seed } = {}) {
-    this.cfg = cfg; this.now = now; this.log = log; this.event = event;
+    maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, maxPerIp = Infinity, seed } = {}) {
+    this.cfg = cfg; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
     this.state = Sim.createWorld({ seed: seed ?? (randomBytes(4).readUInt32BE() % 2147483646) + 1 });
     this.hist = Sim.createHistory();
@@ -135,19 +137,30 @@ export class Arena {
     const old = m.token && this.tokens.get(m.token);
     if (old) {
       if (old.conn) { const prev = old.conn; prev.rec = null; this.kick(prev, 'replaced'); }
-      old.conn = conn; old.discAt = null; old.lastActive = this.now(); old.inputs.length = 0; old.lastSeq = -1; old.maxSeq = -1;
+      old.conn = conn; old.ip = conn.ip; old.discAt = null; old.lastActive = this.now(); old.inputs.length = 0; this.resetInputs(old);
       conn.rec = old;
       this.log(`resume conn=${conn.id} id=${old.id}`);
       this.event('resume', conn.id, { player: old.id });
+      // A queued player who was away while a slot freed up was skipped by promote(): retry now.
+      if (old.state === 'queue') this.promote();
       this.welcome(conn, old, true);
       this.lobbyDirty = true;
       return;
     }
     if (m.token) this.event('resume-refused', conn.id, {});
 
+    // Records outlive their sockets for graceMs, so without this one address could churn
+    // connect + hello + close and hold every slot and queue place. Past maxPerIp records, the
+    // oldest disconnected one from that address is released.
+    const mine = [...this.recs.values()].filter(r => r.ip === conn.ip);
+    if (mine.length >= this.maxPerIp) {
+      const away = mine.filter(r => !r.conn).sort((a, b) => a.discAt - b.discAt)[0];
+      if (away) this.release(away, 'replaced');
+    }
+
     const rec = {
       id: this.nextId++, name: this.uniqueName(name), color, token: randomBytes(16).toString('hex'),
-      conn, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0,
+      conn, ip: conn.ip, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
       lastActive: this.now(), discAt: null, fx: 0, joinedAt: this.now(),
     };
     conn.rec = rec;
@@ -189,6 +202,11 @@ export class Arena {
     const taken = new Set([...this.recs.values()].map(r => r.name.toLowerCase()));
     if (!taken.has(name.toLowerCase())) return name;
     for (let i = 2; ; i++) if (!taken.has(`${name}#${i}`.toLowerCase())) return `${name}#${i}`;
+  }
+
+  // Forget input sequencing: a new session (resume) restarts its seq from 1.
+  resetInputs(rec) {
+    rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.minQ = Infinity; rec.qTicks = 0;
   }
 
   activate(rec, promoted) {
@@ -289,10 +307,12 @@ export class Arena {
       let keys = 0;
       if (rec.conn && rec.inputs.length) {
         const inp = rec.inputs.shift();
-        keys = inp.keys; rec.lastSeq = inp.seq; rec.starve = 0;
-        if (keys !== 0) rec.lastActive = now;
+        keys = inp.keys | rec.carry; rec.carry = 0;
+        rec.lastSeq = inp.seq; rec.starve = 0;
+        if (inp.keys !== 0) rec.lastActive = now;
       } else if (rec.conn && ++rec.starve <= STARVE_ZERO_TICKS) keys = rec.lastKeys;
       rec.lastKeys = keys;
+      if (rec.conn) this.drainBacklog(rec);
       inputs.set(rec.id, keys);
     }
     const st = this.state;
@@ -316,6 +336,25 @@ export class Arena {
     for (const c of this.conns) if (now - c.rateAt >= 1000) { c.inRate = Math.round(c.inCount * 1000 / (now - c.rateAt)); c.inCount = 0; c.rateAt = now; }
     const dt = this.now() - t0;
     this.recordTickTime(dt);
+  }
+
+  // Every starved tick (a repeat or a 0) leaves the late inputs queued one tick further behind, and
+  // without this nothing ever took that back: input latency ratcheted up to the worst stall seen
+  // (up to the 12-input cap, past which inputs were simply lost). So: if the queue never fell below
+  // `min` over the last DRAIN_WINDOW ticks, `min - 1` of its oldest inputs are pure added latency
+  // and are skipped, keeping one as a cushion against the next bit of jitter. A fresh jump or
+  // slash press in a skipped input is carried into the next tick, so a one-tick tap survives.
+  // Batched senders (2-3 inputs a frame) bring the queue to 0 or 1 every frame and are untouched.
+  drainBacklog(rec) {
+    rec.minQ = Math.min(rec.minQ, rec.inputs.length);
+    if (++rec.qTicks < DRAIN_WINDOW) return;
+    let prev = rec.lastKeys;
+    for (let n = rec.minQ - 1; n > 0; n--) {
+      const inp = rec.inputs.shift();
+      rec.carry |= inp.keys & ~prev & PRESS_BITS; prev = inp.keys;
+      rec.lastSeq = inp.seq;
+    }
+    rec.minQ = Infinity; rec.qTicks = 0;
   }
 
   recordTickTime(dt) {

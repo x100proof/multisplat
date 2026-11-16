@@ -6,6 +6,7 @@
 import * as Sim from '/shared/sim.js';
 import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, PALETTE, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, CHAT } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
+import { PICK_TOL, pickAt, followTarget, cycleTarget } from '/shared/spectate.js';
 import { createNet } from './net.js';
 import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
 import { createMusic, analyze as analyzeLoop } from './music.js';
@@ -414,8 +415,10 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleFullscreen(); return; }
   if (e.code === 'KeyH' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !leaveOpen) { helpScreen(!helpOpen); return; }
   if (helpOpen) { if (e.code === 'Escape' || e.code === 'Enter') helpScreen(false); if (e.code === 'Tab') e.preventDefault(); return; }
-  if (lobbyOpen && e.code === 'Enter' && !(e.target.closest && e.target.closest('#lBots'))) { fight(); return; }   // Enter on − / + presses that
+  if (lobbyOpen && e.code === 'Enter' && !(e.target.closest && e.target.closest('#lBots, #lWatch'))) { fight(); return; }   // Enter on − / + presses that
+  if (e.code === 'Escape' && watching) { if (!e.repeat && !lobbyOpen && !escLeavesFullscreen()) watch(false); return; }   // SPEC §16: nothing to lose, no menu
   if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen && !(escLeavesFullscreen() && !leaveOpen)) leaveMenu(!leaveOpen); return; }
+  if (watching && !lobbyOpen && watchKey(e)) return;   // ← → switch the followed ninja, ↓ back to the leader
   if (leaveOpen) { if (e.code === 'Tab') e.preventDefault(); return; }   // the menu owns the keyboard (Enter presses the focused button)
   if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
   noteDevice('keyboard');
@@ -481,7 +484,7 @@ addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preve
 // the small top bar on touch screens: sound and full screen
 const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
 tapBtn('tMute', () => { setMuted(!muted); document.getElementById('tMute').classList.toggle('off', muted); });
-tapBtn('tLeave', () => leaveMenu(true));
+tapBtn('tLeave', () => (watching ? watch(false) : leaveMenu(true)));   // a watcher goes straight back (SPEC §16)
 tapBtn('tHelp', () => helpScreen(true));
 // On phones that allow it (Android), joining the fight goes full screen and locks landscape.
 let triedLandscape = false;
@@ -713,7 +716,9 @@ function updateOffline() {
 // ---------- camera: follows the local player, clamped to the arena ----------
 const clampCam = x => Math.max(0, Math.min(L.w * T - VW, x));
 const clampCamY = y => Math.max(0, Math.min(L.h * T - VH, y));
-const focus = () => Sim.getPlayer(state, ME) || (ONLINE && !lobbyOpen && state.players.find(p => p.alive)) || { x: L.w * T / 2, y: L.h * T / 2, w: 10, h: 13 };
+// A watcher (SPEC §16) follows the ninja it picked, or by default the leader; nobody there: the centre.
+const focus = () => Sim.getPlayer(state, ME) || (watching && Sim.getPlayer(state, watchTarget())) ||
+  (ONLINE && !lobbyOpen && !watching && state.players.find(p => p.alive)) || { x: L.w * T / 2, y: L.h * T / 2, w: 10, h: 13 };
 const camTargetX = () => focus().x + 5 - VW / 2;
 const camTargetY = () => focus().y + focus().h / 2 - VH * .55;
 function snapCamera() { S.camX = clampCam(camTargetX()); S.camY = clampCamY(camTargetY()); }
@@ -1109,6 +1114,7 @@ function render() {
   const order = state.players.filter(p => p.alive).sort((a, b) => (a.id === ME) - (b.id === ME));
   for (const p of order) {
     const px = p.x - cx, py = p.y, col = colorOf(p.id);
+    if (watching && p.id === watchId) drawWatchRing(p, px, py, col);   // the ninja a watcher follows (SPEC §16)
     if (!(p.iframes > 0 && (p.iframes >> 2) % 2)) {
       if (p.stun > 0 && (p.stun >> 1) % 2) ctx.filter = 'brightness(2.2)';   // hit flash
       drawKanbei(p, px, py, p.face, {}, col);
@@ -1242,7 +1248,7 @@ function hudCommon() {
     }
   }
   // the strip along the top: rebuilt only when a name, colour, score, order, away flag or our own id changed
-  const k = JSON.stringify([ME, rows.map(r => [r.id, r.name, r.col || r.color, r.score, !!r.away])]);
+  const k = JSON.stringify([ME, watching ? watchTarget() : null, rows.map(r => [r.id, r.name, r.col || r.color, r.score, !!r.away])]);
   if (k !== stripKey) { stripKey = k; stripRows(rows); stripBuilds++; }
 }
 // Scores for everyone along the top (SPEC §9): one chip per player (colour dot, name, score) in
@@ -1251,7 +1257,7 @@ function stripRows(rows) {
   stripEl.textContent = '';
   for (const p of rows) {
     const c = document.createElement('div');
-    c.className = 'chip' + (p.id === ME ? ' me' : '') + (p.away ? ' away' : '');
+    c.className = 'chip' + (p.id === ME ? ' me' : '') + (p.away ? ' away' : '') + (watching && p.id === watchTarget() ? ' watched' : '');
     c.dataset.id = String(p.id);
     const dot = span('', null, 'dot'); dot.style.background = p.col || PALETTE[p.color] || '#fff';
     c.append(dot, span(p.name, null, 'nm'), span(String(p.score), null, 'sc'));
@@ -1374,6 +1380,17 @@ function hudOnline() {
   else if (me && !me.alive) msg = `SPLAT · respawn in ${(Math.max(0, me.respawn) / 60).toFixed(1)}`;
   setText('msg', msg);
   setText('msgSub', sub);
+  if (watching) watchHud();
+}
+
+// The followed ninja while watching (SPEC §16): a pulsing ring of its colour on the ground at its feet,
+// under the body, so it never covers the tag, the HP bar or a chat bubble.
+function drawWatchRing(p, px, py, col) {
+  const a = .55 + .3 * Math.sin(S.tick * .12);
+  ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = .9;
+  ctx.shadowColor = col; ctx.shadowBlur = blur(5);
+  ctx.beginPath(); ctx.ellipse(px + p.w / 2, py + p.h + .3, 9, 2.4, 0, 0, TAU); ctx.stroke();
+  ctx.restore();
 }
 
 // Name tag above the HP bar. Names come from the server (allowlisted characters only).
@@ -1604,6 +1621,7 @@ function setupLobby() {
   });
   markColor();
   document.getElementById('lFight').addEventListener('click', fight);
+  document.getElementById('lWatch').addEventListener('click', () => watch(true));   // SPEC §16: no name, no slot
   // AI players (SPEC §15): − / + ask the server; the count shown is always the server's
   document.getElementById('lBotDec').addEventListener('click', () => net.bots(-1));
   document.getElementById('lBotInc').addEventListener('click', () => net.bots(1));
@@ -1682,6 +1700,7 @@ function renderLobby() {
   setText('lBotN', String(bots));
   document.getElementById('lBotDec').disabled = bots <= 0;
   document.getElementById('lBotInc').disabled = bots >= botMax || players.length >= cap;
+  document.getElementById('lWatch').disabled = net.mode !== 'viewer';   // SPEC §16: watching is for lobby viewers
 }
 
 // ---------- how to play: H (or ? on touch, or the lobby link) opens it; H, Escape, Enter or Close shuts it ----------
@@ -1723,6 +1742,7 @@ function leaveGame() {
   backToLobby('');
 }
 function backToLobby(message) {
+  if (watching) watchUi(false);
   lobbyOpen = true;
   lobbyEl.classList.remove('hidden');
   document.body.classList.add('inlobby');
@@ -1731,6 +1751,80 @@ function backToLobby(message) {
 }
 document.getElementById('lvYes').addEventListener('click', leaveGame);
 document.getElementById('lvNo').addEventListener('click', () => leaveMenu(false));
+
+// ---------- watching (SPEC §16): Watch in the lobby shows the arena full screen, following a ninja ----------
+// A watcher is just a lobby viewer with the lobby closed: no hello, no record, no slot (so it works with
+// a full arena or a queue), net.mode stays 'viewer', and the server already sends viewers every
+// snapshot and event and ignores their input. Which ninja the camera follows never leaves the page:
+// the one clicked or tapped (followed through death and respawn), else the leader (shared/spectate.js).
+let watching = false, watchChosen = null, watchId = null;   // chosen: picked by the watcher; id: followed now
+const watchEl = document.getElementById('watch');
+function watchUi(on) {
+  watching = on; watchChosen = null; watchId = null;
+  document.body.classList.toggle('watching', on);
+  watchEl.classList.toggle('hidden', !on);
+  for (const k in keys) keys[k] = false;
+  latch = 0; fingers.clear(); syncTouch(); board(false); stripKey = '';
+}
+function watch(on) {
+  if (!ONLINE || on === watching) return;
+  if (on && (!lobbyOpen || net.mode !== 'viewer')) return;
+  watchUi(on);
+  dbg('life', on ? 'watching' : 'stopped watching');
+  if (!on) { backToLobby(''); return; }
+  initAudio();
+  goLandscape();
+  lobbyOpen = false;
+  lobbyEl.classList.add('hidden');
+  document.body.classList.remove('inlobby');
+  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+  watchTarget(); snapCamera();
+}
+// The followed ninja this frame (also called by the camera); forgets a chosen one that has left.
+function watchTarget() {
+  const t = followTarget(state.players, standings(), watchChosen);
+  if (watchChosen != null && t.chosen == null) dbg('life', 'watched player left', { id: watchChosen });
+  watchChosen = t.chosen; watchId = t.id;
+  return t.id;
+}
+// Client (CSS px) ↔ world units through the drawn canvas. On a phone held upright the stage is
+// turned 90° clockwise, so the canvas's x runs down the screen and its y from right to left.
+function toWorld(px, py) {
+  const r = cv.getBoundingClientRect(), rot = stage.classList.contains('rot');
+  const u = rot ? (py - r.top) / r.height : (px - r.left) / r.width, v = rot ? (r.right - px) / r.width : (py - r.top) / r.height;
+  return u < 0 || u > 1 || v < 0 || v > 1 ? null : { x: S.camX + u * VW, y: S.camY + v * VH };
+}
+function toClient(x, y) {
+  const r = cv.getBoundingClientRect(), rot = stage.classList.contains('rot'), u = (x - S.camX) / VW, v = (y - S.camY) / VH;
+  return rot ? { x: r.right - v * r.width, y: r.top + u * r.height } : { x: r.left + u * r.width, y: r.top + v * r.height };
+}
+// Click or tap a ninja to follow it; a click on the arena away from everyone goes back to the leader.
+// Hit-tested against the drawn (interpolated) positions, with a fingertip's tolerance on touch.
+stage.addEventListener('pointerdown', e => {
+  if (!watching || lobbyOpen || helpOpen || e.button > 0 || e.target.closest('button, input, a, #watch')) return;
+  const w = toWorld(e.clientX, e.clientY);
+  if (!w) return;
+  watchChosen = pickAt(state.players, w.x, w.y, e.pointerType === 'touch' ? PICK_TOL.touch : PICK_TOL.mouse);
+  watchTarget();
+  dbg('life', watchChosen != null ? 'watch: follow' : 'watch: leader', { id: watchId });
+});
+// ← → the next or previous ninja in score order, ↓ back to the leader.
+function watchKey(e) {
+  if (e.code !== 'ArrowLeft' && e.code !== 'ArrowRight' && e.code !== 'ArrowDown') return false;
+  e.preventDefault();
+  if (!e.repeat) watchChosen = e.code === 'ArrowDown' ? null : cycleTarget(state.players, standings(), watchTarget(), e.code === 'ArrowLeft' ? -1 : 1);
+  watchTarget();
+  return true;
+}
+// The bar under the score strip: who is followed (in their colour) and how to change it.
+function watchHud() {
+  const m = watchId != null ? metaOf(watchId) : null;
+  setText('wWho', m ? m.name : 'the arena');
+  setText('wWhy', m ? (watchChosen != null ? '' : ' (the leader)') : ' · nobody is fighting yet');
+  const col = m ? PALETTE[m.color] || '#fff' : '#d1f7ff';
+  if (watchHud.col !== col) { watchHud.col = col; document.getElementById('wWho').style.color = col; }
+}
+document.getElementById('wLobby').addEventListener('click', () => watch(false));
 
 // ---------- chat (SPEC §9): C opens a one-line box, Enter sends, Escape cancels ----------
 // Incoming lines show as a speech bubble above the speaker (canvas text) and in a small list at the
@@ -1912,4 +2006,7 @@ window.__mp = {
   pause() { paused = true; }, resume() { paused = false; last = performance.now(); acc = 0; },
   step(n = 1) { for (let i = 0; i < n; i++) update(); },
   reset: resetWorld,
+  // spectator mode (SPEC §16): watch(on), the state, and where a ninja is on screen (client CSS px) for clicks
+  watch, get watching() { return { on: watching, id: watchId, chosen: watchChosen }; },
+  screenOf(id) { const p = Sim.getPlayer(state, id); return p ? toClient(p.x + p.w / 2, p.y + p.h / 2) : null; },
 };

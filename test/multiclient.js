@@ -3,6 +3,7 @@
 // report read back through tools/debug.js, prediction error under NET_SIM=120,2, and a long-sword
 // pickup (ITEM_SECS / ITEM_POINTS shorten the spawn timer and keep pickups on the floor) that
 // every page sees, that lengthens the holder's reach in a scripted check and is lost on death.
+// Also AI players, and spectator mode (watchTest, SPEC §16).
 //
 //   node test/multiclient.js            (Chromium from $PLAYWRIGHT_CHROMIUM or playwright's cache)
 import assert from 'node:assert/strict';
@@ -877,6 +878,84 @@ async function renameTest() {
   await srv.stop();
 }
 
+// Spectator mode (SPEC §16): with the arena full (11 bots + a human) and someone queued, Watch on a
+// fresh page closes the lobby without taking a slot or a queue place, follows the leader, follows the
+// ninja clicked on screen, ← → switch, Esc goes back to the lobby, and Fight from there still queues.
+async function watchTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const open = async name => {
+    const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+    const page = await ctx.newPage();
+    page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
+    page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
+    await page.goto(srv.url);
+    await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+    return { page, name };
+  };
+  const H = await openPlayer(srv, 'Host', 0);
+  for (let i = 0; i < 11; i++) {   // fill the arena with bots (rate-limited: a short pause between presses)
+    await H.page.evaluate(() => __mp.net.bots(1)); await sleep(300);
+  }
+  await waitFor(() => H.page.evaluate(() => __mp.state.players.length === 12), { what: 'a full arena' });
+  const Q = await open('Q');
+  await Q.page.fill('#lName', 'Queued'); await Q.page.click('#lFight');
+  await Q.page.waitForFunction(() => __mp.net.mode === 'queue');
+  const W = await open('W');
+  const st = () => W.page.evaluate(() => ({ lobby: __mp.lobbyOpen, w: __mp.watching, mode: __mp.net.mode, id: __mp.net.id,
+    players: __mp.net.lobby.players.length, queue: __mp.net.lobby.queue.length, ids: __mp.state.players.map(p => p.id),
+    bar: document.getElementById('watch').classList.contains('hidden') ? null : document.getElementById('watch').textContent }));
+  assert.ok(!(await W.page.isDisabled('#lWatch')), 'Watch is open to a lobby viewer with a full arena');
+  await W.page.click('#lWatch');
+  await waitFor(async () => (await st()).w.id != null, { what: 'watching follows someone' });
+  let s = await st();
+  assert.equal(s.lobby, false); assert.equal(s.w.on, true); assert.equal(s.mode, 'viewer'); assert.equal(s.id, null);
+  assert.equal(s.players, 12); assert.equal(s.queue, 1, 'the watcher took no slot and no queue place');
+  assert.equal(s.w.chosen, null, 'the default is the leader');
+  assert.match(s.bar, /WATCHING/); assert.match(s.bar, /Click a ninja to follow them/); assert.match(s.bar, /\(the leader\)/);
+  // click a living ninja on screen (not the one followed now) and the camera follows it
+  let picked = null;
+  await waitFor(async () => {
+    const c = await W.page.evaluate(() => {
+      const r = document.getElementById('c').getBoundingClientRect(), cur = __mp.watching.id;
+      for (const p of __mp.state.players) {
+        const q = __mp.screenOf(p.id);
+        if (p.alive && p.id !== cur && Math.abs(p.vx) < 2 && q.x > r.left + 20 && q.x < r.right - 20 && q.y > r.top + 60 && q.y < r.bottom - 20) return { id: p.id, ...q };
+      }
+      return null;
+    });
+    if (!c) return false;
+    await W.page.mouse.click(c.x, c.y);
+    if ((await st()).w.chosen === c.id) { picked = c.id; return true; }
+    return false;
+  }, { timeout: 15000, what: 'a click picks a ninja' });
+  await sleep(1500);
+  const onScreen = await W.page.evaluate(id => {
+    const r = document.getElementById('c').getBoundingClientRect(), q = __mp.screenOf(id);
+    return { w: __mp.watching, in: q.x >= r.left && q.x <= r.right && q.y >= r.top && q.y <= r.bottom };
+  }, picked);
+  assert.equal(onScreen.w.id, picked, 'still following the clicked ninja (through death and respawn too)');
+  assert.ok(onScreen.in, 'the camera keeps it on screen');
+  assert.ok(!(await st()).bar.includes('(the leader)'));
+  // ← → walk through the others; ↓ goes back to the leader
+  await W.page.keyboard.press('ArrowRight');
+  s = await st(); assert.ok(s.w.chosen != null && s.w.chosen !== picked, '→ switches to another ninja');
+  await W.page.keyboard.press('ArrowDown');
+  s = await st(); assert.equal(s.w.chosen, null, '↓ back to the leader');
+  // input from the watching page reaches nobody: still a viewer with no player
+  assert.equal(s.mode, 'viewer'); assert.equal(s.players, 12);
+  // Esc: back to the lobby, and Fight from there still queues
+  await W.page.keyboard.press('Escape');
+  await waitFor(async () => (await st()).lobby, { what: 'Esc returns to the lobby' });
+  s = await st(); assert.equal(s.w.on, false); assert.equal(s.bar, null);
+  assert.ok(await W.page.isVisible('#lobby'));
+  await W.page.fill('#lName', 'Watcher'); await W.page.click('#lFight');
+  await W.page.waitForFunction(() => __mp.net.mode === 'queue' && __mp.net.queuePos === 2, null, { timeout: 5000 });
+  log('watch: no slot with a full arena and a queue, leader by default, click follows, ← → ↓, Esc to the lobby, Fight still queues');
+  for (const p of [H, Q, W]) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -892,6 +971,7 @@ async function main() {
     await phoneTest();
     await staleBuildTest();
     await botTest();
+    await watchTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

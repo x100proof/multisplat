@@ -162,6 +162,26 @@
   #help { position: absolute; left: 0; right: 0; bottom: .5em; text-align: center; pointer-events: none;
           font-size: clamp(9px, 1.6vw, 14px); color: rgba(209,247,255,.7); text-shadow: 1px 1px 0 #000; transition: opacity 1s; }
   #help.gone { opacity: 0; }
+  /* watching (SPEC §16): who is followed and how to change it, centred under the score strip (the status
+     bar is empty for a watcher), with a Lobby button (a 44 px touch target). No movement buttons, chat or help line. */
+  #watch { position: absolute; left: 50%; top: calc(var(--sh) + 4px); transform: translateX(-50%); z-index: 4; display: flex; align-items: center; gap: .7em;
+           width: max-content; max-width: min(36em, calc(100% - 2 * min(30%, 15em))); box-sizing: border-box; padding: .25em .3em .25em .8em; border-radius: 8px; pointer-events: none;
+           background: rgba(5,3,10,.6); border: 1px solid rgba(5,217,232,.45); font-weight: 700; font-size: clamp(10px, 1.7vw, 15px);
+           color: #d1f7ff; text-shadow: 1px 1px 0 #000; }
+  #watch.hidden { display: none; }
+  #watch .txt { min-width: 0; text-align: center; }
+  #watch .txt > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #watch .tag { color: #05d9e8; letter-spacing: .08em; text-shadow: 0 0 6px #05d9e8; }
+  #watch .txt > .hint { font-weight: 400; font-size: .85em; opacity: .85; white-space: normal; }
+  body.touchui #watch { top: auto; bottom: max(8px, env(safe-area-inset-bottom)); max-width: calc(100% - 24px); }   /* the thumb buttons are hidden */
+  #watch .touchhelp, body.touchui #watch .keyshelp { display: none; }
+  body.touchui #watch .touchhelp { display: inline; }
+  #wLobby { pointer-events: auto; flex: none; min-width: 44px; min-height: 44px; padding: 0 .8em; font: inherit; font-weight: 800; cursor: pointer;
+            color: #05d9e8; background: rgba(0,0,0,.45); border: 2px solid #05d9e8; border-radius: 6px; touch-action: manipulation; }
+  #wLobby:hover { background: rgba(5,217,232,.15); }
+  body.watching #help, body.watching #tChat, body.touchui.watching #touch { display: none; }
+  body.touchui #howto p .touchonly { display: inline; }   /* the How to play "Watching" text (rows use table-row) */
+  body.watching #strip .chip.watched { border-color: #f9f871; box-shadow: 0 0 6px rgba(249,248,113,.6); color: #fff; }
 
   #dbg { position: fixed; top: 10px; right: 10px; width: 280px; max-height: calc(100vh - 20px); overflow-y: auto;
          background: rgba(20, 14, 30, .6); border: 1px solid rgba(255,255,255,.25); border-radius: 8px;
@@ -204,6 +224,14 @@
   #lFight { width: 100%; margin-top: 14px; font: inherit; font-weight: 800; font-size: 20px; letter-spacing: .1em; padding: 9px;
             color: #05030a; background: #ff2a6d; border: 0; border-radius: 6px; cursor: pointer; box-shadow: 0 0 16px #ff2a6d; }
   #lFight:hover { background: #ff5a8d; }
+  /* Fight and Watch side by side (SPEC §16), both at least 48 px tall; Watch is the quieter outline */
+  #lActs { display: flex; gap: 8px; margin-top: 14px; }
+  #lActs #lFight { margin-top: 0; flex: 2 1 0; width: auto; min-height: 48px; }
+  #lWatch { flex: 1 1 0; min-height: 48px; font: inherit; font-weight: 800; font-size: 18px; letter-spacing: .08em; padding: 9px 6px; cursor: pointer;
+            color: #05d9e8; background: rgba(0,0,0,.45); border: 2px solid #05d9e8; border-radius: 6px; box-shadow: 0 0 10px rgba(5,217,232,.4); touch-action: manipulation; }
+  #lWatch:hover:not(:disabled) { background: rgba(5,217,232,.15); }
+  #lWatch:disabled { opacity: .35; cursor: not-allowed; }
+  #lWatchNote { font-size: 12px; color: #9ad8ff; margin-top: 6px; }
   #lErr { color: #ff6ec7; font-size: 12px; min-height: 1.2em; margin-top: 6px; }
   #lPlayers { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow-y: auto; font-size: 14px; }
   #lPlayers li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
@@ -248,6 +276,9 @@
   <div id="chatlist" aria-live="polite"></div>
   <div id="chatbox" class="hidden"><input id="chatIn" type="text" maxlength="80" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Say something, Enter to send" aria-label="Chat message"></div>
   <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button><button id="tChat" aria-label="Chat">💬</button></div>
+  <div id="watch" class="hidden"><div class="txt"><div><span class="tag">WATCHING</span> <span id="wWho"></span><span id="wWhy"></span></div>
+    <div class="hint"><span class="keyshelp">Click a ninja to follow them · click empty space for the leader · ← → switch · Esc lobby</span><span class="touchhelp">Tap a ninja to follow them · tap empty space for the leader</span></div></div>
+    <button id="wLobby" type="button" aria-label="Back to the lobby">LOBBY</button></div>
   <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · C chat · D debug · F full screen · Esc leave · H how to play</div>
 </div>
 <div id="touch">
@@ -285,6 +316,8 @@
     <p>A glowing blade sometimes appears in the arena. Walk into it to take it: your sword reaches further until you die. A ninja with a long sword carries a longer, glowing scabbard. When they are killed the sword drops where they fell, and anyone can take it. Slash a sword lying on the ground to smash it.</p>
     <h3>Ninja stars</h3>
     <p>Spinning stars appear often. Each pickup gives 3, and you can carry 9. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
+    <h3>Watching</h3>
+    <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the arena is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, click empty space to go back to the leader, or use ← → to switch. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, or tap empty space to go back to the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
     <div class="foot"><span>The fight carries on while this is open.</span><button id="hwClose">Close</button></div>
   </div>
 </div>
@@ -302,7 +335,8 @@
     <input id="lName" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="ninja name">
     <label>Colour</label>
     <div id="lColors"></div>
-    <button id="lFight">FIGHT</button>
+    <div id="lActs"><button id="lFight">FIGHT</button><button id="lWatch" type="button">WATCH</button></div>
+    <div id="lWatchNote">Watch: no name needed and it takes no slot, even when the arena is full. Click or tap a ninja to follow them.</div>
     <div id="lErr"></div>
     <div id="lInfo"></div>
     <div id="lBots"><label><span class="dot"></span>AI players</label><div class="ctl"><button id="lBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lBotN" aria-live="polite">0</span><button id="lBotInc" type="button" aria-label="More AI players">+</button></div></div>

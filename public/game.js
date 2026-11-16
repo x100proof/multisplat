@@ -1794,15 +1794,17 @@ function toClient(x, y) {
   const r = cv.getBoundingClientRect(), rot = stage.classList.contains('rot'), u = (x - S.camX) / VW, v = (y - S.camY) / VH;
   return rot ? { x: r.right - v * r.width, y: r.top + u * r.height } : { x: r.left + u * r.width, y: r.top + v * r.height };
 }
-// Click or tap a ninja to follow it; a click on the arena away from everyone goes back to the leader.
+// Click or tap a ninja to follow it; a click on the arena away from everyone changes nothing.
 // Hit-tested against the drawn (interpolated) positions, with a fingertip's tolerance on touch.
 stage.addEventListener('pointerdown', e => {
   if (!watching || lobbyOpen || helpOpen || e.button > 0 || e.target.closest('button, input, a, #watch')) return;
   const w = toWorld(e.clientX, e.clientY);
   if (!w) return;
-  watchChosen = pickAt(state.players, w.x, w.y, e.pointerType === 'touch' ? PICK_TOL.touch : PICK_TOL.mouse);
+  const hit = pickAt(state.players, w.x, w.y, e.pointerType === 'touch' ? PICK_TOL.touch : PICK_TOL.mouse);
+  if (hit == null) return;
+  watchChosen = hit;
   watchTarget();
-  dbg('life', watchChosen != null ? 'watch: follow' : 'watch: leader', { id: watchId });
+  dbg('life', 'watch: follow', { id: watchId });
 });
 // ← → the next or previous ninja in score order, ↓ back to the leader.
 function watchKey(e) {

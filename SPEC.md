@@ -619,8 +619,8 @@ Watch the fight without joining, and follow any ninja.
 - **Screen:** the arena fills the screen as in play. There are no movement buttons, no chat, no HP,
   stars or score of one's own. A bar (top centre; bottom centre on touch, where the thumb buttons are
   gone) says "WATCHING *name*" in the followed ninja's colour, "(the leader)" while on the default,
-  and how to change it: "Click a ninja to follow them · click empty space for the leader · ← →
-  switch · Esc lobby" (touch: "Tap a ninja to follow them · tap empty space for the leader"), with a
+  and how to change it: "Click a ninja to follow them · ← → switch · ↓ leader · Esc lobby"
+  (touch: "Tap a ninja to follow them"), with a
   **Lobby** button (44 px). The followed ninja has a pulsing ring of its colour at its feet and its
   chip in the score strip is outlined.
 - **Camera:** by default it follows **the leader**: the first ninja in the score strip's order (score,
@@ -630,7 +630,8 @@ Watch the fight without joining, and follow any ninja.
 - **Following:** clicking or tapping a ninja follows it: hit-tested in world units against the
   drawn (interpolated) living ninjas, body or name tag, within 6 units for a mouse and 14 for a
   finger (about a fingertip on a phone), nearest wins; it works on a phone held upright (the turned
-  stage). A click on the arena away from everyone goes back to the leader. A followed ninja is kept
+  stage). A click on the arena away from everyone changes nothing (removed at the user's request;
+  ↓ goes back to the leader). A followed ninja is kept
   through death and respawn; when it leaves the arena the watcher falls back to the leader. **← →**
   step through the ninjas in score order, **↓** goes back to the leader. All of this is local to the
   page; nothing is sent.

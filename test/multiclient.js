@@ -247,7 +247,7 @@ async function fightTest() {
   const logOut = await waitFor(async () => {
     const o = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'log', word],
       (e, so) => (e ? rej(e) : res(so))));
-    return o.includes('[net] connect') && o.includes('[life] join') ? o : null;
+    return o.includes('[net] connect') && (o.includes('[life] join') || o.includes('[life] create room')) ? o : null;   // a room's creator logs create, not join
   }, { timeout: 10000, what: 'streamed log entries' });
   assert.match(logOut.split('\n')[0], /UNTRUSTED INPUT/);
   assert.match(logOut, new RegExp(`== ${word} names=\\["Ash"\\] ip=127\\.0\\.0\\.1`));

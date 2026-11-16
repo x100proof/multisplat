@@ -295,7 +295,7 @@ test('report flood: 6 per minute per IP, then 429', async () => {
 
 test('a forged resume token attaches nothing; the token is never stored', async () => {
   const c = await open();
-  c.ws.send(JSON.stringify({ t: 'hello', name: 'reporter', color: 2 }));
+  c.ws.send(JSON.stringify({ t: 'create', name: 'reporter', color: 2, room: '' }));   // rooms (SPEC §17): a hello needs a room, so make one
   await sleep(150);
   const { token, id } = c.msgs.find(m => m.t === 'welcome' && m.id);
   const ok = await post(goodReport({ token }));

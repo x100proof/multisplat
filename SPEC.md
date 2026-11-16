@@ -25,7 +25,7 @@ source separately. Port its code rather than reinventing it.
 | Identity | Nickname plus colour. No accounts. Both are remembered in `localStorage`. |
 | Match | Endless drop-in, drop-out play. A player's score lives only while they are connected (a reconnect grace period applies, §6.4). |
 | Input | Keyboard, gamepad (Gamepad API) and NinjaRunner-style touch controls. Phones are forced to landscape the way NinjaRunner does it. |
-| Theme | NinjaRunner's dark cyberpunk night city: parallax neon skylines, rain, neon rim light, multi-colour neon blood. |
+| Theme | NinjaRunner's dark cyberpunk night city: parallax neon skylines, rain, neon rim light. Blood is **red** (not NinjaRunner's multi-colour neon blood). |
 | SFX | Same synthesised WebAudio style as NinjaRunner (slash, jump, bonk and so on). Port its `sfx`. |
 | Music | **New.** Original, fast-paced and combat-driven (see §8). It is not NinjaRunner's ambient score. |
 | Character | Pip the ninja from NinjaRunner (`drawPip`, `drawTails`, `drawSword`). Each player's headband, tails and rim glow are tinted with their chosen colour. |
@@ -169,8 +169,11 @@ ARCHITECTURE.md    the code as implemented
 ## 7. Gore (wanted in quantity)
 
 Port NinjaRunner's blood system: `blood` particles, `L.decals`, `L.pools` that grow into
-puddles, blood-stained spikes (`L.bloody`), neon `BLOOD = NEON_LIST`, the 'lighter' blend and
-screen shake.
+puddles, blood-stained spikes (`L.bloody`) and screen shake.
+
+**All blood is red.** Do not port NinjaRunner's multi-colour neon palette (`BLOOD = NEON_LIST`).
+Use a small palette of reds: bright for fresh spurts and fountains, darker crimson for pools
+and old decals. Choose the blend mode so stacked blood still reads as red on the dark city.
 
 - **On hit:** a short blood spurt from the impact point in the direction of the blow.
 - **On kill:**

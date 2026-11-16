@@ -91,8 +91,10 @@
   :root { --fsw: calc(clamp(17px, 2.6vw, 24px) + 12px); --mbw: calc(clamp(17px, 2.6vw, 24px) + 8px); }
   body.nofs { --fsw: 0px; }
   /* the mute button sits just left of the full screen button (where that is hidden, in its place);
-     --mbw is the room it takes. A speaker with a cross; lit up while the sound is off. */
+     --mbw is the room it takes. A ♪; lit up while the sound is off. */
   #muteBtn { right: var(--fsw); }
+  #muteBtn { font: 700 clamp(13px, 2vw, 18px)/1 system-ui, sans-serif; }
+  body.touchui #muteBtn { font-size: 19px; }
   #muteBtn.on { border-color: #ff2a6d; color: #ff2a6d; box-shadow: 0 0 10px rgba(255,42,109,.75); }
   #fsBtn { right: 4px; }
   #fsBtn, #muteBtn { position: fixed; top: 2px; z-index: 7; width: calc(clamp(17px, 2.6vw, 24px) + 4px); height: calc(clamp(17px, 2.6vw, 24px) + 2px);
@@ -285,7 +287,7 @@
   <div id="board" class="hidden"></div>
   <div id="chatlist" aria-live="polite"></div>
   <div id="chatbox" class="hidden"><input id="chatIn" type="text" maxlength="80" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Say something, Enter to send" aria-label="Chat message"></div>
-  <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button><button id="tChat" aria-label="Chat">💬</button></div>
+  <div id="tbar"><button id="tHelp" aria-label="How to play">?</button><button id="tLeave" aria-label="Leave">✕</button><button id="tChat" aria-label="Chat">💬</button></div>
   <div id="watch" class="hidden"><div class="txt"><div><span class="tag">WATCHING</span> <span id="wWho"></span><span id="wWhy"></span></div>
     <div class="hint"><span class="keyshelp">Click a ninja to follow them · ← → switch · ↓ leader · Esc lobby</span><span class="touchhelp">Tap a ninja to follow them</span></div></div>
     <button id="wLeader" type="button" aria-label="Follow the leader">LEADER</button><button id="wLobby" type="button" aria-label="Back to the lobby">LOBBY</button></div>
@@ -296,7 +298,7 @@
   <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tT" aria-label="Throw a ninja star">✦</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
-<button id="muteBtn" aria-label="Mute (M)" title="Mute (M)" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h4l5-4v14l-5-4H3z" stroke-linejoin="round"/><path d="M15.5 9l6 6M21.5 9l-6 6"/></svg></button>
+<button id="muteBtn" aria-label="Mute (M)" title="Mute (M)" aria-pressed="false">♪</button>
 <button id="fsBtn" aria-label="Full screen (F)" title="Full screen (F)" aria-pressed="false"><svg class="in" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><svg class="out" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>
 <div id="howto" class="hidden" role="dialog" aria-modal="true" aria-labelledby="hwTitle">
   <div class="box">
@@ -319,7 +321,7 @@
       <tr class="touchonly"><td>⚔</td><td>Slash. Tap again right after a chop for a sweep.</td></tr>
       <tr class="touchonly"><td>✦</td><td>Throw a ninja star, if you have any.</td></tr>
       <tr class="touchonly"><td>💬</td><td>Chat: type a line and send it; everyone sees it above your head.</td></tr>
-      <tr class="touchonly"><td>♪ · ? · ✕</td><td>Mute · this screen · leave the fight.</td></tr>
+      <tr class="touchonly"><td>♪ · ? · ✕</td><td>Mute (top right, lit up while muted) · this screen · leave the fight.</td></tr>
     </table>
     <h3>Fighting</h3>
     <p>You have 100 HP. A chop does 34 damage and a sweep 25. For a moment after respawning you flash and can't be hurt, until you attack.</p>

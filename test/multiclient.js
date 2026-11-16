@@ -391,7 +391,7 @@ async function chatTest() {
   V.page.on('pageerror', e => errors.push(`Viewer: ${e.message}`));
   await V.page.goto(srv.url);
   await V.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open' && window.__mp.lobbyOpen);
-  const ui = p => p.page.evaluate(() => ({ chat: __mp.chat, help: __mp.helpOpen, leave: __mp.leaveOpen, mute: document.getElementById('tMute').classList.contains('off'),
+  const ui = p => p.page.evaluate(() => ({ chat: __mp.chat, help: __mp.helpOpen, leave: __mp.leaveOpen, mute: document.getElementById('muteBtn').classList.contains('on'),
     fs: !!document.fullscreenElement, debug: !document.getElementById('dbg').classList.contains('hidden'),
     boxShown: !document.getElementById('chatbox').classList.contains('hidden'), val: document.getElementById('chatIn').value }));
   await waitFor(async () => (await A.page.evaluate(() => __mp.state.players.length)) === 2, { what: 'both players in the arena' });
@@ -728,7 +728,7 @@ async function phoneTest() {
     await sleep(400);
     assert.equal(await page.evaluate(() => document.body.classList.contains('touchui')), true, `${v.name}: touch UI is on`);
     // every button is on screen, at least 44 px each way (hit area), and none overlap
-    const ids = ['tL', 'tR', 'tRun', 'tT', 'tS', 'tJ', 'tMute', 'tHelp', 'tLeave'];
+    const ids = ['tL', 'tR', 'tRun', 'tT', 'tS', 'tJ', 'tHelp', 'tLeave'];
     const rects = {};
     for (const id of ids) {
       const r = rects[id] = await centre(id);

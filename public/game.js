@@ -309,10 +309,9 @@ function initAudio() {
 let music = null;
 function setMuted(m) {
   muted = m; if (music) { music.muted = m; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted');
-  // every mute control shows the state: the speaker button by full screen, the touch ♪, M
-  const b = document.getElementById('muteBtn'), t = document.getElementById('tMute');
+  // the ♪ button by full screen shows the state (M toggles it too)
+  const b = document.getElementById('muteBtn');
   if (b) { b.classList.toggle('on', m); b.setAttribute('aria-pressed', String(m)); const l = m ? 'Sound on (M)' : 'Mute (M)'; b.title = l; b.setAttribute('aria-label', l); }
-  if (t) t.classList.toggle('off', m);
 }
 document.addEventListener('visibilitychange', () => { if (AC) { if (document.hidden) AC.suspend(); else AC.resume(); } });
 // Everything plays through one master gain.
@@ -489,7 +488,6 @@ for (const ev of ['pointerup', 'pointercancel']) pad.addEventListener(ev, e => {
 addEventListener('contextmenu', e => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
 // the small top bar on touch screens: sound and full screen
 const tapBtn = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); initAudio(); fn(); });
-tapBtn('tMute', () => setMuted(!muted));
 tapBtn('tLeave', () => (watching ? watch(false) : leaveMenu(true)));   // a watcher goes straight back (SPEC §16)
 tapBtn('tHelp', () => helpScreen(true));
 // On phones that allow it (Android), joining the fight goes full screen and locks landscape.

@@ -30,7 +30,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
     meta: new Map(),                                   // id -> {name, color, score, deaths, away}
-    lobby: { players: [], queue: [], cap: NET.maxPlayers },
+    lobby: { players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1 },
     me: null,                                          // the predicted local player (sim object)
     stats: { rtt: 0, rttAvg: 0, rttMax: 0, offset: 0, jitter: 0, reconnects: 0, snaps: 0, snapGapMax: 0,
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
@@ -167,6 +167,12 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     live = false; dropped = false; seq = 0; pending = []; unsent = [];
   };
   // Send a chat line (SPEC §9). Only its length is logged, never the text.
+  // Ask for one AI player more (d = 1) or fewer (d = -1) (SPEC §15). The server answers with a
+  // lobby message carrying the new count; nothing changes here until then.
+  net.bots = function bots(d) {
+    dbg('life', 'bots', { d });
+    send({ t: 'bots', d: d > 0 ? 1 : -1 });
+  };
   net.chat = function chat(text) {
     dbg('chat', 'sent', { len: Array.from(text).length });
     send({ t: 'chat', text });
@@ -224,7 +230,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   }
 
   function onLobbyMsg(m) {
-    net.lobby = { players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap };
+    // bots / botMax (SPEC §15) come with every lobby message; a welcome's roster leaves them as they were
+    net.lobby = { players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
+      bots: Number.isInteger(m.bots) ? m.bots : net.lobby.bots, botMax: Number.isInteger(m.botMax) ? m.botMax : net.lobby.botMax };
     for (const p of net.lobby.players) net.meta.set(p.id, { ...(net.meta.get(p.id) || {}), ...p });
     if (net.id != null && net.mode === 'queue') {
       const i = net.lobby.queue.findIndex(q => q.id === net.id);
@@ -249,7 +257,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   function onEvents(m) {
     for (const e of m.ev) {
       if (e.type === 'join') {
-        net.meta.set(e.id, { ...(net.meta.get(e.id) || { score: 0, deaths: 0 }), id: e.id, name: e.name, color: e.color, away: false });
+        net.meta.set(e.id, { ...(net.meta.get(e.id) || { score: 0, deaths: 0 }), id: e.id, name: e.name, color: e.color, away: false, bot: !!e.bot });
         if (e.id === net.id) { net.mode = 'play'; net.queuePos = 0; dbg('life', 'promoted', { id: e.id }); }
       } else if (e.type === 'leave') {
         const mm = net.meta.get(e.id); if (mm) mm.gone = true;

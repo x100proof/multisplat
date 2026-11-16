@@ -4,7 +4,7 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, CHAT } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, PALETTE, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, CHAT } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { createNet } from './net.js';
 import { createGore, clearGore, goreKill, goreHit, stepGore, fadeOf, fingerprint, settled, killKey, GORE } from './gore.js';
@@ -414,7 +414,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleFullscreen(); return; }
   if (e.code === 'KeyH' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !leaveOpen) { helpScreen(!helpOpen); return; }
   if (helpOpen) { if (e.code === 'Escape' || e.code === 'Enter') helpScreen(false); if (e.code === 'Tab') e.preventDefault(); return; }
-  if (lobbyOpen && e.code === 'Enter') { fight(); return; }
+  if (lobbyOpen && e.code === 'Enter' && !(e.target.closest && e.target.closest('#lBots'))) { fight(); return; }   // Enter on − / + presses that
   if (e.code === 'Escape') { if (!e.repeat && !lobbyOpen && !(escLeavesFullscreen() && !leaveOpen)) leaveMenu(!leaveOpen); return; }
   if (leaveOpen) { if (e.code === 'Tab') e.preventDefault(); return; }   // the menu owns the keyboard (Enter presses the focused button)
   if (e.code === 'KeyD' && !e.repeat) { toggleDebug(); return; }
@@ -542,7 +542,7 @@ const DUMMY = 2;
 const metaOf = id => (ONLINE ? net.meta.get(id) : null);
 const colorOf = id => {
   const m = metaOf(id);
-  if (m) return COLORS[m.color] || COLORS[0];
+  if (m) return PALETTE[m.color] || COLORS[0];   // PALETTE: COLORS plus the bots' own (SPEC §15)
   return id === ME ? COLORS[0] : COLORS[(id * 3) % COLORS.length];
 };
 const nameOf = id => { const m = metaOf(id); return m ? m.name : id === ME ? 'you' : 'dummy'; };
@@ -1216,7 +1216,7 @@ function boardRows(el, rows, withDeaths) {
   el.textContent = '';
   for (const p of rows) {
     const r = document.createElement('div'); r.className = 'row' + (p.id === ME ? ' me' : '');
-    const dot = span('', null, 'dot'); dot.style.background = p.col || COLORS[p.color] || '#fff';
+    const dot = span('', null, 'dot'); dot.style.background = p.col || PALETTE[p.color] || '#fff';
     r.append(dot, span(p.name + (p.away ? ' (away)' : ''), null, 'nm'), span(String(p.score), null, 'sc'));
     if (withDeaths) r.append(span(String(p.deaths ?? 0), null, 'dt'));
     el.appendChild(r);
@@ -1252,7 +1252,7 @@ function stripRows(rows) {
     const c = document.createElement('div');
     c.className = 'chip' + (p.id === ME ? ' me' : '') + (p.away ? ' away' : '');
     c.dataset.id = String(p.id);
-    const dot = span('', null, 'dot'); dot.style.background = p.col || COLORS[p.color] || '#fff';
+    const dot = span('', null, 'dot'); dot.style.background = p.col || PALETTE[p.color] || '#fff';
     c.append(dot, span(p.name, null, 'nm'), span(String(p.score), null, 'sc'));
     stripEl.appendChild(c);
   }
@@ -1603,6 +1603,9 @@ function setupLobby() {
   });
   markColor();
   document.getElementById('lFight').addEventListener('click', fight);
+  // AI players (SPEC §15): − / + ask the server; the count shown is always the server's
+  document.getElementById('lBotDec').addEventListener('click', () => net.bots(-1));
+  document.getElementById('lBotInc').addEventListener('click', () => net.bots(1));
   document.getElementById('lReport').addEventListener('click', async e => {
     e.preventDefault();
     const out = document.getElementById('lReportId');
@@ -1652,7 +1655,7 @@ function renderLobby() {
   const sorted = [...players].sort((a, b) => b.score - a.score);
   for (const p of sorted) {
     const li = document.createElement('li');
-    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = COLORS[p.color] || '#fff';
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = PALETTE[p.color] || '#fff';
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = p.name + (p.away ? ' (away)' : '');
     const sc = document.createElement('span'); sc.className = 'sc'; sc.textContent = String(p.score);
     li.append(dot, nm, sc); list.appendChild(li);
@@ -1668,11 +1671,16 @@ function renderLobby() {
   ql.textContent = '';
   queue.forEach((q, i) => {
     const li = document.createElement('li'); if (q.id === net.id) li.className = 'me';
-    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = COLORS[q.color] || '#fff';
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = PALETTE[q.color] || '#fff';
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = `#${i + 1} ${q.name}` + (q.id === net.id ? ' (you)' : '') + (q.away ? ' (away)' : '');
     li.append(dot, nm); ql.appendChild(li);
   });
   document.getElementById('lQueueBox').classList.toggle('hidden', !queue.length);
+  // AI players: − needs a bot to remove; + needs one under the limit and a free slot
+  const { bots = 0, botMax = cap - 1 } = net.lobby;
+  setText('lBotN', String(bots));
+  document.getElementById('lBotDec').disabled = bots <= 0;
+  document.getElementById('lBotInc').disabled = bots >= botMax || players.length >= cap;
 }
 
 // ---------- how to play: H (or ? on touch, or the lobby link) opens it; H, Escape, Enter or Close shuts it ----------

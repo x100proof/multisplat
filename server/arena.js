@@ -2,9 +2,11 @@
 // lobby, the 12 slots and the FIFO spectator queue, resume tokens, idle kicks and lag-compensated
 // slashes. It knows nothing about sockets: a connection is any object with send(string) and
 // close(code, reason), so unit tests can drive it with fakes and call tick() by hand.
+// AI players (SPEC §15) are records with `bot: true` and no connection; server/ai.js drives them.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName, cleanChat, CHAT } from '../shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName, cleanChat, CHAT, BOT } from '../shared/constants.js';
+import { newBrain, botKeys, navOf } from './ai.js';
 
 export const PROTOCOL = 1;
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
@@ -40,6 +42,9 @@ export class Arena {
     this.recs = new Map();        // player id -> record (active, queued or waiting for a resume)
     this.tokens = new Map();      // resume token -> record (never logged or stored)
     this.queue = [];              // queued records, FIFO
+    this.bots = [];               // bot records in the order they were added (SPEC §15)
+    this.botBucket = { tokens: BOT.globalBurst, at: now() };   // arena-wide bot add/remove budget
+    navOf(level, cfg);            // build the bots' route table now, not on the first + press
     this.nextId = 1; this.nextConn = 1;
     this.lobbyDirty = false; this.lobbyAt = -Infinity;
     this.tickStats = { n: 0, sum: 0, max: 0, overruns: 0, recent: [] };
@@ -116,6 +121,7 @@ export class Arena {
       case 'hello': return this.onHello(conn, m);
       case 'leave': return this.onLeave(conn);
       case 'chat': return this.onChat(conn, m);
+      case 'bots': return this.onBots(conn, m);
       default: return this.kick(conn, 'unknown');
     }
   }
@@ -132,19 +138,83 @@ export class Arena {
     const c = rec.chat || (rec.chat = { tokens: CHAT.burst, at: now });
     c.tokens = Math.min(CHAT.burst, c.tokens + (now - c.at) / CHAT.refillMs);
     c.at = now;
-    if (c.tokens < 1) {
-      conn.dropCount++;
-      conn.drops.push(now);
-      while (conn.drops.length && conn.drops[0] < now - FLOOD_WINDOW_MS) conn.drops.shift();
-      if (conn.drops.length === 1 || conn.dropCount % 50 === 0) this.event('ratelimit', conn.id, { dropped: conn.dropCount });
-      if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
-      return;
-    }
+    if (c.tokens < 1) return this.dropped(conn);
     const text = cleanChat(m.text);
     if (!text) return;
     c.tokens -= 1;
     this.event('chat', conn.id, { player: rec.id, len: Array.from(text).length });
     this.broadcastEvents([{ type: 'chat', id: rec.id, text }]);
+  }
+
+  // Drop a rate-limited message: it counts toward the flood kick like allow()'s drops.
+  dropped(conn) {
+    const now = this.now();
+    conn.dropCount++;
+    conn.drops.push(now);
+    while (conn.drops.length && conn.drops[0] < now - FLOOD_WINDOW_MS) conn.drops.shift();
+    if (conn.drops.length === 1 || conn.dropCount % 50 === 0) this.event('ratelimit', conn.id, { dropped: conn.dropCount });
+    if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
+  }
+
+  // AI players (SPEC §15): {t:'bots', d: 1|-1} adds or removes one, {t:'bots', n} asks for n in all.
+  // Any connection may send it (lobby viewers too). Anything else in d/n is a `malformed` kick. Each
+  // connection has a bucket (BOT.burst, one more every BOT.refillMs; an empty bucket drops the message
+  // and counts toward the flood kick) and the arena has one more, charged per bot actually added or
+  // removed (BOT.globalBurst, one every BOT.globalRefillMs), so many connections together still can't
+  // put more than a few spawns a second on the tick loop. The sender gets the lobby at once; everyone
+  // else with the next (coalesced) lobby broadcast.
+  onBots(conn, m) {
+    const hasD = m.d !== undefined, hasN = m.n !== undefined;
+    if (hasD === hasN || (hasD && m.d !== 1 && m.d !== -1) || (hasN && (!Number.isInteger(m.n) || m.n < 0 || m.n > this.maxBots())))
+      return this.kick(conn, 'malformed');
+    const now = this.now();
+    const c = conn.botBucket || (conn.botBucket = { tokens: BOT.burst, at: now });
+    c.tokens = Math.min(BOT.burst, c.tokens + (now - c.at) / BOT.refillMs); c.at = now;
+    if (c.tokens < 1) return this.dropped(conn);
+    c.tokens -= 1;
+    const want = hasN ? m.n : this.bots.length + m.d;
+    const g = this.botBucket;
+    g.tokens = Math.min(BOT.globalBurst, g.tokens + (now - g.at) / BOT.globalRefillMs); g.at = now;
+    let changed = 0;
+    while (g.tokens >= 1 && want > this.bots.length && this.addBot(conn)) { g.tokens -= 1; changed++; }
+    while (g.tokens >= 1 && want < this.bots.length) { this.removeBot(conn); g.tokens -= 1; changed++; }
+    this.event('bots', conn.id, { want, n: this.bots.length, changed });
+    this.send(conn, this.lobbyMsg());
+  }
+
+  maxBots() { return Math.max(0, this.maxPlayers - 1); }
+
+  // Add a bot in a free slot. Refused (false) at maxBots or with no free slot: bots never evict and
+  // never queue. Name "AI n" with the lowest free n (then the usual #2 de-duplication); the reserved
+  // colour BOT.color, which no human can pick, so freeColor() leaves it alone.
+  addBot(conn = null) {
+    if (this.bots.length >= this.maxBots() || this.activeCount() >= this.maxPlayers) return false;
+    const used = new Set(this.bots.map(r => r.botNo));
+    let no = 1; while (used.has(no)) no++;
+    const id = this.nextId++;
+    const rec = {
+      id, name: this.uniqueName(`${BOT.name} ${no}`), color: BOT.color, token: null, bot: true, botNo: no,
+      brain: newBrain(this.state.rng ^ (id * 7919)),   // seeded from the sim's seed, without consuming it
+      conn: null, ip: null, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
+      lastActive: this.now(), discAt: null, fx: 0, joinedAt: this.now(),
+    };
+    this.recs.set(id, rec);
+    this.bots.push(rec);
+    const saved = this.pendingEvents;
+    this.pendingEvents = [];
+    this.activate(rec, false, conn);
+    this.broadcastEvents([this.joinEvent(rec), ...this.pendingEvents]);
+    this.pendingEvents = saved;
+    this.lobbyDirty = true;
+    return true;
+  }
+
+  // Remove the most recently added bot (its slot goes to the first queued human, as any leave does).
+  removeBot(conn = null) {
+    const rec = this.bots.pop();
+    if (!rec) return false;
+    this.release(rec, 'bot removed', conn);
+    return true;
   }
 
   // Token buckets: 90 input messages/s, 10 other messages/s. Excess is dropped; sustained excess
@@ -156,11 +226,7 @@ export class Arena {
     conn.pingBucket = Math.min(PING_RATE, conn.pingBucket + dt * PING_RATE);
     const key = type === 'input' ? 'bucket' : 'pingBucket';
     if (conn[key] >= 1) { conn[key] -= 1; return true; }
-    conn.dropCount++;
-    conn.drops.push(now);
-    while (conn.drops.length && conn.drops[0] < now - FLOOD_WINDOW_MS) conn.drops.shift();
-    if (conn.drops.length === 1 || conn.dropCount % 50 === 0) this.event('ratelimit', conn.id, { dropped: conn.dropCount });
-    if (conn.drops.length >= FLOOD_KICK_DROPS) this.kick(conn, 'flood');
+    this.dropped(conn);
     return false;
   }
 
@@ -185,6 +251,7 @@ export class Arena {
     if (conn.rec) return this.kick(conn, 'protocol');
     const name = cleanName(m.name);
     const color = m.color;
+    // Only the 12 human colours: BOT.color (= COLORS.length, SPEC §15) and anything past it is refused.
     if (!name || !Number.isInteger(color) || color < 0 || color >= COLORS.length) return this.kick(conn, 'bad hello');
     if (m.token !== undefined && (typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token))) return this.kick(conn, 'bad hello');
 
@@ -270,22 +337,25 @@ export class Arena {
     rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.minQ = Infinity; rec.qTicks = 0;
   }
 
-  activate(rec, promoted) {
-    rec.color = this.freeColor(rec);
+  // by: the connection that asked for a bot (for the logs only)
+  activate(rec, promoted, by = null) {
+    if (!rec.bot) rec.color = this.freeColor(rec);
     rec.state = 'play'; rec.lastActive = this.now(); rec.inputs.length = 0;
     const evs = Sim.addPlayer(this.state, rec.id, { cfg: this.cfg, level: this.level });
-    this.log(`${promoted ? 'promote' : 'join'} conn=${rec.conn ? rec.conn.id : '-'} id=${rec.id} name=${rec.name}`);
-    this.event(promoted ? 'promote' : 'join', rec.conn ? rec.conn.id : null, { player: rec.id });
+    const cid = rec.conn ? rec.conn.id : by ? by.id : null;
+    this.log(`${promoted ? 'promote' : rec.bot ? 'bot-add' : 'join'} conn=${cid ?? '-'} id=${rec.id} name=${rec.name}`);
+    this.event(promoted ? 'promote' : rec.bot ? 'bot-add' : 'join', cid, { player: rec.id });
     this.pendingEvents.push(...evs.map(e => ({ ...e })));
   }
 
-  joinEvent(rec) { return { type: 'join', tick: this.state.tick, id: rec.id, name: rec.name, color: rec.color }; }
+  joinEvent(rec) { return { type: 'join', tick: this.state.tick, id: rec.id, name: rec.name, color: rec.color, ...(rec.bot ? { bot: true } : {}) }; }
 
   // The player is gone for good: free its slot, invalidate its token, promote from the queue.
-  release(rec, reason) {
+  release(rec, reason, by = null) {
     if (!this.recs.has(rec.id)) return;
     this.recs.delete(rec.id);
-    this.tokens.delete(rec.token);
+    if (rec.token) this.tokens.delete(rec.token);
+    if (rec.bot) { const bi = this.bots.indexOf(rec); if (bi >= 0) this.bots.splice(bi, 1); }
     const qi = this.queue.indexOf(rec);
     if (qi >= 0) this.queue.splice(qi, 1);
     const evs = [];
@@ -298,7 +368,7 @@ export class Arena {
       evs.push({ type: 'leave', tick: this.state.tick, id: rec.id, reason });
     }
     this.log(`leave id=${rec.id} reason=${reason}`);
-    this.event('leave', rec.conn ? rec.conn.id : null, { player: rec.id, reason });
+    this.event('leave', rec.conn ? rec.conn.id : by ? by.id : null, { player: rec.id, reason });
     rec.state = 'gone';
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
@@ -331,11 +401,11 @@ export class Arena {
   roster() {
     return [...this.recs.values()].filter(r => r.state === 'play').map(r => {
       const p = Sim.getPlayer(this.state, r.id);
-      return { id: r.id, name: r.name, color: r.color, score: p ? p.score : 0, deaths: p ? p.deaths : 0, away: !r.conn };
+      return { id: r.id, name: r.name, color: r.color, score: p ? p.score : 0, deaths: p ? p.deaths : 0, away: !r.conn && !r.bot, ...(r.bot ? { bot: true } : {}) };
     });
   }
   queueList() { return this.queue.map(r => ({ id: r.id, name: r.name, color: r.color, away: !r.conn })); }
-  lobbyMsg() { return { t: 'lobby', players: this.roster(), queue: this.queueList(), cap: this.maxPlayers }; }
+  lobbyMsg() { return { t: 'lobby', players: this.roster(), queue: this.queueList(), cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots() }; }
 
   // Add a 'score' event for the killer and the victim after each kill.
   withScores(evs) {
@@ -374,12 +444,17 @@ export class Arena {
       if (!rec.conn && rec.discAt != null && now - rec.discAt >= this.graceMs) this.release(rec, 'timeout');
       else if (rec.conn && rec.state === 'play' && now - rec.lastActive >= this.idleMs) this.kick(rec.conn, 'idle');
     }
-    // one input per player per tick; a missing input repeats the last one for a few ticks
+    // one input per player per tick; a missing input repeats the last one for a few ticks. A bot's
+    // keys come from its brain, which sees the others as they were brain.delay ticks ago (SPEC §15).
     const inputs = new Map();
     for (const rec of this.recs.values()) {
       if (rec.state !== 'play') continue;
       let keys = 0;
-      if (rec.conn && rec.inputs.length) {
+      if (rec.bot) {
+        const seen = new Map();
+        for (const o of Sim.positionsAt(this.hist, this.state.tick - rec.brain.delay) || []) seen.set(o.id, o);
+        keys = botKeys(rec.brain, Sim.getPlayer(this.state, rec.id), this.state, seen, { cfg: this.cfg, level: this.level });
+      } else if (rec.conn && rec.inputs.length) {
         const inp = rec.inputs.shift();
         keys = inp.keys | rec.carry; rec.carry = 0;
         rec.lastSeq = inp.seq; rec.starve = 0;
@@ -392,6 +467,7 @@ export class Arena {
     const st = this.state;
     const rewind = a => {
       const rec = this.recs.get(a.id);
+      if (rec && rec.bot) return null;              // a bot sees the present: no lag compensation
       const ms = Math.min(NET.rewindCapMs, NET.interpMs + (rec && rec.conn ? rec.conn.rtt : 0) / 2);
       return Sim.positionsAt(this.hist, st.tick - ms / TICK_MS);
     };
@@ -495,13 +571,14 @@ export class Arena {
   }
   recView(rec) {
     const p = Sim.getPlayer(this.state, rec.id);
-    return { id: rec.id, name: rec.name, color: rec.color, state: rec.conn ? rec.state : rec.state + ' (disconnected)',
+    return { id: rec.id, name: rec.name, color: rec.color, state: rec.bot ? rec.state + ' (bot)' : rec.conn ? rec.state : rec.state + ' (disconnected)',
+      ...(rec.bot ? { bot: true } : {}),
       queuePos: this.queuePos(rec), conn: rec.conn ? rec.conn.id : null, lastSeq: rec.lastSeq, inputQueue: rec.inputs.length,
       idleS: Math.round((this.now() - rec.lastActive) / 1000),
       ...(p ? { x: r2(p.x), y: r2(p.y), hp: p.hp, alive: p.alive, long: !!p.long, stars: p.stars | 0, score: p.score, deaths: p.deaths } : {}) };
   }
   adminState() {
-    return { tick: this.state.tick, uptimeS: Math.round((this.now() - this.startedAt) / 1000),
+    return { tick: this.state.tick, bots: this.bots.length, uptimeS: Math.round((this.now() - this.startedAt) / 1000),
       items: (this.state.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, this.state.itemT) * TICK_MS / 1000),
       starInS: r2(Math.max(0, this.state.starT ?? 0) * TICK_MS / 1000),
       stars: (this.state.stars || []).map(f => ({ id: f.id, owner: f.owner, x: r2(f.x), y: r2(f.y), vx: f.vx, dist: r2(f.dist) })),

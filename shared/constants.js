@@ -91,3 +91,11 @@ export const HISTORY_TICKS = Math.ceil(NET.historyMs * TICK_HZ / 1000);
 // 12 colours for 12 fighters: no two players in the arena share one (the server enforces it).
 export const COLORS = Object.freeze(['#ff2a6d', '#05d9e8', '#f9f871', '#b026ff', '#39ff14', '#ff6ec7', '#ff8c1a', '#ffffff',
   '#3d6bff', '#ff2d1a', '#00c9a7', '#c6ff1a']);
+
+// AI players (SPEC §15). Every bot wears BOT.hex, which is not in COLORS, so no human can pick it
+// (a hello with any colour index outside COLORS is refused); clients look colours up in PALETTE,
+// where it sits at index BOT.color. Names are "AI 1", "AI 2", … Adding or removing is rate-limited
+// per connection (burst 4, one more every 250 ms) and arena-wide (burst 12, then 8 a second).
+export const BOT = Object.freeze({ color: COLORS.length, hex: '#9fb4c8', name: 'AI',
+  burst: 4, refillMs: 250, globalBurst: 12, globalRefillMs: 125 });
+export const PALETTE = Object.freeze([...COLORS, BOT.hex]);

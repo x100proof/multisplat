@@ -64,7 +64,7 @@ async function main() {
     case 'state': {
       const s = await get('/state');
       out(`tick ${s.tick} · up ${s.uptimeS}s · tick time avg ${s.tickTime.avgMs} ms, p99 ${s.tickTime.p99Ms}, max ${s.tickTime.maxMs} (budget ${s.tickTime.budgetMs}), overruns ${s.tickTime.overruns}`);
-      out(`players (${s.players.length}):`);
+      out(`players (${s.players.length}${s.bots ? `, ${s.bots} AI` : ''}):`);   // bots show state 'play (bot)', conn=null
       for (const p of s.players) out(`  ${p.id} ${JSON.stringify(p.name)} ${p.state} conn=${p.conn} score=${p.score} deaths=${p.deaths} hp=${p.hp} alive=${p.alive}${p.long ? ' LONG' : ''} stars=${p.stars ?? 0} x=${p.x} y=${p.y} seq=${p.lastSeq} idle=${p.idleS}s`);
       if (s.items) {
         const longs = s.items.filter(i => i.kind !== 'star'), stars = s.items.filter(i => i.kind === 'star');

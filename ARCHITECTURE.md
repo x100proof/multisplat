@@ -246,6 +246,7 @@ Client → server:
 { t: 'ping', id, ct /* client clock, echoed */ }
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
 { t: 'chat', text }                     // SPEC §9: a chat line (rules below); a non-string text is a `malformed` kick
+{ t: 'bots', d: 1|-1 } | { t: 'bots', n } // SPEC §15: one AI player more/fewer, or n in all (0..botMax); else a `malformed` kick
 ```
 
 Server → client:
@@ -265,19 +266,20 @@ Server → client:
      // kind 1 = ninja stars, 0 = long sword; st = the ninja stars in flight; stars = the count carried
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
-{ t: 'lobby', players: [roster], queue: [...], cap }   // on connect and on roster/score change (≤ 2/s)
+{ t: 'lobby', players: [roster], queue: [...], cap, bots, botMax }   // on connect and on roster/score change (≤ 2/s);
+                                       // at once to the sender of a `bots` request
 { t: 'pong', id, ct, tick, tf /* 0..1 into the current tick */ }
 { t: 'kick', reason }                  // then close with 4001 idle, 4002 malformed, 4003 unknown,
                                        // 4004 flood, 4005 protocol, 4006 bad hello, 4007 replaced, 4008 shutdown
 // The heartbeat timeout is not a kick: no `kick` message, close code 4100 (`NET.timeoutClose`).
-roster = { id, name, color, score, deaths, away /* disconnected, inside the grace period */ }
+roster = { id, name, color /* 0-11, or BOT.color = 12 for a bot */, score, deaths, away /* disconnected, inside the grace period */, bot? /* true: an AI player */ }
 ```
 
 Events are the sim's `spawn`, `hit`, `kill`, `item`, `pickup`, `throw` and `starEnd` (shapes above), relayed unchanged. `kill.seed` lets every client
 render identical gore. There are also:
 
 ```js
-{ type: 'join',  tick, id, name, color }
+{ type: 'join',  tick, id, name, color, bot? }
 { type: 'leave', tick, id, reason: 'timeout'|'kick' }
 { type: 'score', tick, id, score, deaths }   // after every kill, for the killer and the victim
 { type: 'chat',  id, text }                  // a chat line, to every connection (viewers too); no position, so it is released at once
@@ -989,3 +991,29 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   `window.__mp.chat` exposes `{open, bubbles, lines}` for tests. Chat text never enters `dbg()`.
 - **Star count above the head** (`drawStarCount`): "★n" above any player with stars; the throw
   reminder sits above it.
+- **AI players** (SPEC §15). `BOT` and `PALETTE` (`COLORS` plus `BOT.hex` at index `BOT.color` = 12)
+  in `shared/constants.js`. `server/arena.js`: `onBots` (shape check, per-connection bucket
+  `conn.botBucket`, arena-wide `this.botBucket` charged per change, then `send(lobbyMsg)` to the
+  sender), `addBot` (refused at `maxBots()` = `maxPlayers − 1` or with no free slot; a record with
+  `bot: true`, `botNo`, `brain`, `conn: null`, `ip: null`, `token: null`, kept in `this.bots` in
+  order; `activate` skips `freeColor` for it), `removeBot` (pops the newest, `release(…, 'bot
+  removed')`, which also promotes from the queue); `dropped(conn)` is the shared drop/flood
+  bookkeeping now used by `allow`, `onChat` and `onBots`. In `tick()` a bot's keys come from
+  `botKeys(rec.brain, player, state, seen)` where `seen` is `Sim.positionsAt(hist, tick −
+  brain.delay)`; the `rewind` callback returns null for a bot. Grace expiry, idle kicks, the
+  heartbeat and per-IP record counting all key on `rec.conn`/`rec.ip`, so they skip bots without
+  special cases. `roster`, `joinEvent`, `recView` and `adminState` mark bots.
+  `server/ai.js`: `navOf(level, cfg)` (cached) cuts the level into surfaces (runs of standable
+  tiles), links them by simulating with `Sim.movePlayer` a standing and a running jump both ways
+  from every 3 units of each surface plus a run off each end (`fly`), and keeps a first-hop table
+  from a BFS per surface (about 25 ms, built in the `Arena` constructor). `newBrain(seed)` holds
+  the bot's own Park–Miller `rng`, reaction `delay` (6–12 ticks) and `aggr` (15–30 % swing chance
+  per tick). `botKeys` picks a target (nearest by |dx| + 1.5|dy|, +160 if spawn-protected,
+  re-judged every 20 ticks with a 0.7 hysteresis), turns and slashes in reach (`18 × reach + 6`
+  units, |dy| < 15), throws when on the same level with no solid tile between (`clearRow`),
+  else walks to a pickup or the target: same surface → walk; other surface → the nearest takeoff
+  of the first hop, where each tick within 40 units it simulates the jump from its live state and
+  jumps (holding the keys in `brain.air` until it lands) when that lands on the next surface. A
+  bot walking but not moving for 12–25 ticks hops. Client: `net.bots(d)`; `net.lobby.bots/botMax`;
+  `#lBots` (− `#lBotN` +) in the lobby, rendered in `renderLobby`; colours looked up in `PALETTE`.
+  Tests: `test/bots.test.js`, `botTest` in `test/multiclient.js`.

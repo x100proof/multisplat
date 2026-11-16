@@ -21,7 +21,7 @@ source separately. Port its code rather than reinventing it.
 | Topic | Decision |
 |---|---|
 | Lobby | **One global arena.** No rooms. Players see a lobby screen (who is playing, scores), enter a name, then join. |
-| Capacity | 12 active fighters. Later joiners wait in a FIFO queue as spectators and are promoted automatically when a slot frees. |
+| Capacity | 12 active fighters, AI players (§15) included. Later joiners wait in a FIFO queue as spectators and are promoted automatically when a slot frees. |
 | Identity | Nickname plus colour. No accounts. Both are remembered in `localStorage`. |
 | Match | Endless drop-in, drop-out play. A player's score lives only while they are connected (a reconnect grace period applies, §6.4). |
 | Input | Keyboard, gamepad (Gamepad API) and NinjaRunner-style touch controls. Phones are forced to landscape the way NinjaRunner does it. |
@@ -183,7 +183,7 @@ ARCHITECTURE.md    the code as implemented
 
 ### 6.1 Protocol
 - Messages are JSON over WebSocket. Every message has a `t` type field.
-  Client → server: `hello`, `input`, `ping`, `leave`, `chat`. Server → client: `welcome`, `snapshot`, `event`,
+  Client → server: `hello`, `input`, `ping`, `leave`, `chat`, `bots` (§15). Server → client: `welcome`, `snapshot`, `event`,
   `lobby`, `pong`, `kick`.
 - **Inputs:** each tick the client sends `{t:'input', seq, keys}`, where `keys` is a bitmask
   (left, right, jump, run, slash). Inputs may be batched, at most 3 ticks per message.
@@ -271,7 +271,8 @@ reverb) but **fast and aggressive**:
   validated on the server too), a palette of 12 neon colour swatches (**no two fighters share a colour**: swatches worn by
   players in the arena are greyed out, and the server gives a player whose colour is taken the
   next free one), a live list of players
-  with their scores, and the queue position if the arena is full. There is a Fight button.
+  with their scores, and the queue position if the arena is full. There is a Fight button, and an
+  "AI players" row with − / count / + (§15).
 - **In-game HUD:**
   - Your HP, your score and your ninja-star count (§5.2).
   - **Scores for everyone along the top:** a strip across the top of the screen with every
@@ -497,3 +498,54 @@ tests passing and a commit.
   each change.
 - Separate commits per logical change.
 - Respect the repo hygiene rule above, and run `test/hygiene.js` before each commit.
+
+## 15. AI players
+
+Server-side bots that fight like players, added and removed from the lobby.
+
+- **Lobby control:** an "AI players" row with − / count / + buttons (44 px touch targets).
+  Anyone in the lobby, viewer or player, may press them. The count is server state: a press
+  sends a request and the shown number is always the server's, live on every page (it rides in
+  every `lobby` message as `bots` with the limit `botMax`). − is disabled at 0; + at the limit or
+  when the arena is full.
+- **Slots:** a bot holds an arena slot exactly like a human, so every bot is one human fewer in
+  the arena. At most **slots − 1** (11) bots, so a human can always get in once a slot frees. +
+  is refused when no slot is free: bots never queue, and humans never evict bots (a human who
+  finds the arena full queues as usual). − removes the most recently added bot, and its slot goes
+  to the first queued human.
+- **Look:** every bot wears one reserved colour (`BOT.hex`, a steel blue-grey) that is not among
+  the 12 human swatches. The server refuses that colour (or any index outside the 12) in a
+  human `hello` (`bad hello`). The "no two fighters share a colour" rule (§9) is for humans; all
+  bots share theirs. Names are "AI 1", "AI 2", … (lowest free number, then the usual `#2`
+  de-duplication). Bots are in the roster (`bot: true`), score strip, scoreboard, kill feed and
+  so on exactly like players.
+- **Behaviour:** each tick the server computes a bot's key mask and feeds it into the same input
+  path as a human's, so bots obey every rule of the sim and have no other powers. A bot sees the
+  other fighters **6–12 ticks late** (its reaction time, from the lag-compensation history) and
+  its own state, the lying pickups and the level. It targets the nearest living opponent (bots
+  included; a spawn-protected one counts as farther), finds its way to it across the platforms
+  (jumping obstacles and up to planks and ledges, walking off edges to come down), slashes in
+  reach with a per-bot 15–30 % chance per tick (so it hesitates a few ticks), throws stars at a
+  target on the same level with a clear line, and detours for a long sword it lacks or star
+  pickups when they are nearer than the target. A bot blocked by another body hops over it.
+  Bots respawn like players and are never idle-kicked or timed out.
+- **Determinism:** a bot draws its few random choices from its own seeded generator (seeded from
+  the arena's sim seed and its id), never `Math.random` and never the sim's `rng`, so the sim
+  stays deterministic and a bot fight is repeatable for a seed. Bots get no lag compensation:
+  their swings test the present.
+- **Protocol:** client → server `{t:'bots', d: 1|-1}` (one more / one fewer) or `{t:'bots', n}`
+  (that many in all, 0..`botMax`). Any other shape is a `malformed` kick. The sender gets a
+  `lobby` message at once; everyone else with the next coalesced one.
+- **Security (a public write path that spends tick time):** the message goes through the usual
+  10/s bucket, then a per-connection bucket (burst 4, one more every 250 ms; an empty bucket drops
+  the message and counts toward the flood kick), then an arena-wide budget charged per bot
+  actually added or removed (burst 12, then 8 a second), so many connections together cannot
+  churn spawns. The number of bots is capped at 11, so their per-tick cost is bounded. Bots have
+  no socket, no IP and no resume token: they never count toward `MAX_PER_IP`/`MAX_CONN` or the
+  per-IP record cap, and nothing a client sends can address one.
+- **Debugging:** `adminState` carries `bots` (the count) and lists bots with `bot: true`, state
+  `play (bot)` and `conn: null`; `tools/debug.js state` shows them. Logs: `bot-add` and `leave …
+  reason=bot removed`.
+- **Tests:** `test/bots.test.js` (limits, the reserved colour, slots, the brain's inputs, a 60 s
+  headless fight in which bots kill and are killed, determinism); a `test/multiclient.js` section
+  (− / + live on two pages, bots in the arena in their colour, a human still joins).

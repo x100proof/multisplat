@@ -804,6 +804,62 @@ async function staleBuildTest() {
   await ctx.close(); await srv.stop();
 }
 
+// AI players (SPEC §15): two lobby viewers; − / + on one updates the count on both; bots fight in the
+// arena wearing the reserved colour, which is not among the swatches; + stops at slots − 1; a human
+// still joins the last free slot, after which + is disabled; − then removes the newest bot.
+async function botTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const open = async name => {
+    const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+    const page = await ctx.newPage();
+    page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
+    page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
+    await page.goto(srv.url);
+    await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+    return { page, name };
+  };
+  const V = await open('V'), W = await open('W');
+  const ui = p => p.page.evaluate(() => ({ n: document.getElementById('lBotN').textContent,
+    dec: document.getElementById('lBotDec').disabled, inc: document.getElementById('lBotInc').disabled,
+    bots: (__mp.net.lobby.players || []).filter(q => q.bot), swatches: document.querySelectorAll('#lColors .sw').length,
+    inArena: __mp.state.players.map(q => q.id) }));
+  const both = (n, what) => waitFor(async () => (await ui(V)).n === String(n) && (await ui(W)).n === String(n), { what });
+  await both(0, 'count 0 on both pages');
+  assert.ok((await ui(V)).dec, '− disabled with no bots');
+  await V.page.click('#lBotInc'); await V.page.click('#lBotInc');
+  await both(2, '+ + shows 2 on both pages');
+  await W.page.click('#lBotDec');
+  await both(1, '− on the other page shows 1 on both');
+  await V.page.click('#lBotInc');
+  await both(2, 'back to 2');
+  // the bots are in the arena, in the reserved colour, named AI n, and that colour is not a swatch
+  const hex = await V.page.evaluate(async () => (await import('/shared/constants.js')).BOT.hex);
+  await waitFor(async () => { const u = await ui(W); return u.bots.length === 2 && u.bots.every(b => u.inArena.includes(b.id)); }, { what: 'bots in the arena' });
+  const u = await ui(W);
+  assert.equal(u.swatches, 12, 'twelve human swatches, none for bots');
+  for (const b of u.bots) { assert.equal(b.color, 12); assert.match(b.name, /^AI \d+$/); }
+  const dot = await W.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => [li.querySelector('.nm').textContent, getComputedStyle(li.querySelector('.dot')).backgroundColor]));
+  const rgb = `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
+  assert.ok(dot.length === 2 && dot.every(([, c]) => c === rgb), `bot dots ${JSON.stringify(dot)} in ${rgb}`);
+  // up to slots − 1 (rate-limited: a short pause between presses)
+  for (let i = 0; i < 12; i++) { if (!(await ui(V)).inc) await V.page.click('#lBotInc'); await sleep(300); }
+  await both(11, 'eleven bots at most');
+  assert.ok((await ui(V)).inc, '+ disabled at the limit');
+  // a human still gets the free slot
+  await W.page.fill('#lName', 'Human');
+  await W.page.click('#lFight');
+  await W.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
+  await waitFor(async () => (await ui(V)).inArena.length === 12, { what: '12 in the arena' });
+  assert.ok((await ui(V)).inc, '+ disabled with the arena full');
+  await V.page.click('#lBotDec');
+  await waitFor(async () => (await ui(V)).n === '10', { what: '− removes one' });
+  assert.ok(!(await W.page.evaluate(() => __mp.net.lobby.players.some(q => q.name === 'AI 11'))), 'the newest bot went first');
+  log('bots: − / + live on both lobby pages, reserved colour in the arena, at most 11, a human still joins');
+  for (const p of [V, W]) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -817,6 +873,7 @@ async function main() {
     await fullscreenTest();
     await phoneTest();
     await staleBuildTest();
+    await botTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

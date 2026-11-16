@@ -182,7 +182,7 @@ ARCHITECTURE.md    the code as implemented
 
 ### 6.1 Protocol
 - Messages are JSON over WebSocket. Every message has a `t` type field.
-  Client → server: `hello`, `input`, `ping`, `leave`. Server → client: `welcome`, `snapshot`, `event`,
+  Client → server: `hello`, `input`, `ping`, `leave`, `chat`. Server → client: `welcome`, `snapshot`, `event`,
   `lobby`, `pong`, `kick`.
 - **Inputs:** each tick the client sends `{t:'input', seq, keys}`, where `keys` is a bitmask
   (left, right, jump, run, slash). Inputs may be batched, at most 3 ticks per message.
@@ -286,6 +286,22 @@ reverb) but **fast and aggressive**:
     the top-left bar and also requests landscape, as that button did. It is hidden where the
     browser has no fullscreen support. The score strip and kill feed must not overlap it.
   - A respawn countdown while dead.
+- **Chat (C):** C opens a one-line text box at the bottom of the screen. Type and press Enter
+  to send, Escape to cancel. On touch a 💬 button opens it. While the box is open the keyboard
+  types into it and controls nothing else, and your character stands still.
+  - Everyone, players and lobby viewers, sees the message for about **6 s** before it fades: as
+    a speech bubble above the speaker's head, and as a "name: text" line in a small chat list
+    in the bottom left (last 5 lines). A soft blip plays.
+  - **Protocol:** client → server `{t:'chat', text}`; the server relays it as an event
+    `{type:'chat', id, text}`. Only a player in the arena or the queue may chat.
+  - **Server rules (this is a public write path):** the text is trimmed, control and bidi
+    characters are stripped, runs of whitespace collapse to one space, and it is cut to **80
+    characters**; an empty result is dropped. Non-string text is a kick (`malformed`). Each
+    player may send **1 message every 1.5 s** with a burst of 3; more are dropped and count
+    toward the flood kick. The server never logs or stores chat text (only "chat" and its
+    length in the event ring), and chat text is never included in debug reports.
+  - **Client rules:** chat text reaches the DOM and canvas as text only, never as HTML. There
+    is no word filter.
 - **How to play (H):** H opens a screen that explains the goal, the controls for the current
   device (keyboard and gamepad, or touch), fighting, long swords and ninja stars. H, Escape,
   Enter or its Close button shuts it. On touch a ? button opens it, and the lobby has a "How

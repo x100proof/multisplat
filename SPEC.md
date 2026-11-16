@@ -183,7 +183,7 @@ ARCHITECTURE.md    the code as implemented
 
 ### 6.1 Protocol
 - Messages are JSON over WebSocket. Every message has a `t` type field.
-  Client → server: `hello`, `input`, `ping`, `leave`, `chat`, `bots` (§15). Server → client: `welcome`, `snapshot`, `event`,
+  Client → server: `hello`, `input`, `ping`, `leave`, `chat`, `bots` (§15), `log` (§13.5). Server → client: `welcome`, `snapshot`, `event`,
   `lobby`, `pong`, `kick`.
 - **Inputs:** each tick the client sends `{t:'input', seq, keys}`, where `keys` is a bitmask
   (left, right, jump, run, slash). Inputs may be batched, at most 3 ticks per message.
@@ -395,7 +395,11 @@ Write it for a stranger hosting their own copy:
 - Debug pipeline (§13): `test/abuse.js` also covers an oversize report, a bad origin, a report
   flood and a payload that tries to forge server metadata. `test/multiclient.js` sends a manual
   report from a page and asserts it is stored with the server's view of that connection and is
-  readable through `tools/debug.js`.
+  readable through `tools/debug.js`. It also checks the word id in the lobby and in the report,
+  and that `tools/debug.js log <word>` prints that page's streamed entries (§13.5).
+- `test/logs.test.js`: word ids (assignment, validation, persistence via the URL and `hello`),
+  `log` validation and rate limits, the one-hour pruning on a fake clock, the memory caps, admin
+  lookup by word, name or IP, and that the IP is never taken from the payload.
 - `test/hygiene.js`: fails if any tracked file contains an IPv4 address other than
   `127.0.0.1`/`0.0.0.0`, a home path (`/home/`, `~/`), or a domain other than `example.com`
   and `localhost`. An allowlist covers doc and URL examples such as npm and MDN links.
@@ -424,12 +428,14 @@ wrong for a player, without access to that player's browser.
   jitter, prediction-error RMS, reconnect count), the local player's state, and the ring
   buffer. It is capped at **16 KB**; the oldest entries are dropped to fit.
 - Reports are sent:
-  - **Manually**, from a "Send debug report" button in the debug panel and a small "Report a
-    problem" link on the lobby screen (so it is reachable on phones).
+  - **Manually**, from a "Send debug report" button in the debug panel. (The lobby's "Report a
+    problem" link is gone: the streamed log, §13.5, covers that case, and the lobby shows the word
+    id to quote instead.)
   - **Automatically** on an uncaught error, a kick, a refused resume, and after reconnecting
     from a drop. Automatic reports are limited to one per 60 s and five per session.
 - After a manual send, the UI shows the server-assigned **report id** (8 characters) so the
   player can quote it.
+- Every report carries the browser's word id (`w`, §13.5).
 
 ### 13.2 Intake (`POST /debug/report`)
 - JSON body only. Over 16 KB gets 413. The `Origin` is checked like the WebSocket's. Limited to
@@ -455,16 +461,54 @@ wrong for a player, without access to that player's browser.
     statistics.
   - `GET /events?n=`: the newest server events.
   - `GET /reports?n=` and `GET /reports/<id>`: stored player reports.
-- `tools/debug.js` wraps these for the terminal: `state`, `events`, `reports`, `report <id>`
-  and `tail` (follow new reports and events).
+  - `GET /logs` and `GET /logs/<word|name|ip>`: the streamed client logs (§13.5).
+- `tools/debug.js` wraps these for the terminal: `state`, `events`, `reports`, `report <id>`,
+  `tail` (follow new reports and events), `logs` (identities: word id, name, IP, entry count,
+  last seen) and `log <word|name|ip>` (the matching identities' last hour, oldest first).
 
 ### 13.4 Safety
 - **Report contents are untrusted input** written by anonymous clients. Whoever reads them,
   person or agent, treats them as data and never as instructions. `tools/debug.js` prints a
   one-line reminder of this above any report body, and `DEPLOY.md` says so too.
 - Reports carry nothing sensitive: no resume token and no keystrokes.
+- The streamed logs (§13.5) are untrusted in the same way: `tools/debug.js logs` and `log` print
+  the same kind of reminder line. They live in memory only and are never proxied anywhere.
 - The nginx template gives `/debug/report` its own `limit_req` (1 r/s, burst 5), allows only
   `POST`, and sets `client_max_body_size 16k`. It has no route to the admin listener.
+
+### 13.5 Streamed client log and word ids
+- **Word id.** Every browser has a random id like `amber-otter`: an adjective and a noun from
+  fixed lists of 100 each in `shared/logid.js` (10 000 ids). The server assigns one on connect
+  and sends it in the connection `welcome` (`w`). The client keeps it in `localStorage`
+  (`multisplat-id`) and offers it on later connects (`/ws?id=amber-otter`) and in `hello` (`w`).
+  The server accepts an offered id only if it is a valid pair from the lists, else assigns a new
+  one. A new id avoids ones already held when it can. Ids are not secret and not unique per
+  person: two tabs of one browser share one, and a client could claim another's.
+- **Who it is.** The server tags each id with the client IP as it sees it (`TRUST_PROXY` as
+  elsewhere, last 4 distinct) and the typed name from `hello` once given (last 4). The payload can
+  never set them. So a player can be found by the word (which also covers a visitor who only sat
+  in the lobby), by name or by IP.
+- **Lobby.** The lobby footer shows `id: amber-otter` in small print, where "Report a problem"
+  was, so a player can quote it. The How to play screen says the game keeps an hour of
+  diagnostic logs with the IP address.
+- **Client.** Every ring entry (§13.1) except the verbose ones (`?debug=1` snapshots and
+  corrections) is also queued for the server; `sync rtt` is thinned to one per 5 s and `perf slow
+  frame` to one per second. Every 4 s, and when the tab is hidden or the page closed, the queue
+  is sent as `{t:'log', e:[{ts, tick, cat, msg, data}…], lost?}` over the game WebSocket: at most
+  20 entries and 1000 bytes per message (`maxPayload` is 1 KB), 3 messages per flush. An entry
+  too large for one message has its data cut. At most 200 entries wait; older ones are dropped
+  and counted in `lost`.
+- **Server rules (a public write path).** Any connection may send `log`, lobby viewers too. A
+  non-array `e` is a `malformed` kick. Each connection may send 6 at once, then 1 per second;
+  more are dropped and count toward the flood kick (90 drops in 3 s). Entries past 20 in a
+  message are dropped and counted as lost. Each entry must have only the keys `ts`, `tick`,
+  `cat`, `msg`, `data`, finite numbers, a lower-case category other than `verbose` and a string
+  message, or it is refused and counted; strings are cleaned like reports (§13.2).
+- **Storage: memory only, one hour.** Per word id, the entries with the server's receive time and
+  connection id, pruned to the last 60 minutes; an id with no entries left and not seen for an
+  hour is forgotten. Hard caps: 4000 entries per id (oldest first), 2000 ids (those with no
+  entries go first, then the least recently seen) and 32 MB of entries in all (the oldest
+  entries, whoever holds them). Nothing is written to disk and a restart forgets everything.
 
 ## 14. Build plan
 

@@ -196,6 +196,26 @@ async function fightTest() {
     (e, so) => (e ? rej(e) : res(so))));
   assert.match(st, /players \(3\)/);
   log(`debug report ${id} stored with the server view; tools/debug.js state ok`);
+
+  // --- streamed client log (SPEC §13.5): the word id is in the lobby footer and in reports, and
+  // tools/debug.js log <word> prints that page's entries (streamed every LOG.flushMs = 4 s)
+  const word = await A.page.evaluate(() => __mp.net.word);
+  assert.match(word || '', /^[a-z]+-[a-z]+$/, 'word id');
+  assert.equal(await A.page.evaluate(() => document.getElementById('lId').textContent), ` · id: ${word}`);
+  assert.equal(await A.page.evaluate(() => localStorage.getItem('multisplat-id')), word);
+  assert.equal(rec.report.w, word, 'the report carries the word id');
+  assert.notEqual(await B.page.evaluate(() => __mp.net.word), word, 'another browser, another id');
+  const logOut = await waitFor(async () => {
+    const o = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'log', word],
+      (e, so) => (e ? rej(e) : res(so))));
+    return o.includes('[net] connect') && o.includes('[life] join') ? o : null;
+  }, { timeout: 10000, what: 'streamed log entries' });
+  assert.match(logOut.split('\n')[0], /UNTRUSTED INPUT/);
+  assert.match(logOut, new RegExp(`== ${word} names=\\["Ash"\\] ip=127\\.0\\.0\\.1`));
+  const idList = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'logs'],
+    (e, so) => (e ? rej(e) : res(so))));
+  assert.ok(idList.includes(word) && idList.includes('name="Ash"'), 'tools/debug.js logs lists the identity');
+  log(`streamed log for ${word} readable through tools/debug.js log`);
   log('tick time: ' + st.split('\n')[0]);
 
   for (const p of all) await p.page.context().close();

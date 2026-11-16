@@ -1606,13 +1606,9 @@ function setupLobby() {
   // AI players (SPEC §15): − / + ask the server; the count shown is always the server's
   document.getElementById('lBotDec').addEventListener('click', () => net.bots(-1));
   document.getElementById('lBotInc').addEventListener('click', () => net.bots(1));
-  document.getElementById('lReport').addEventListener('click', async e => {
-    e.preventDefault();
-    const out = document.getElementById('lReportId');
-    out.textContent = 'sending…';
-    const id = await sendReport('manual', 'lobby link');
-    out.textContent = id ? `report id ${id}` : 'could not send';
-  });
+  // The log word id (SPEC §13.5), small in the footer so a player can quote it.
+  const idEl = document.getElementById('lId'), showId = w => { idEl.textContent = w ? ` · id: ${w}` : ''; };
+  if (net) { showId(net.word); net.onWord = showId; }
 }
 // Colours already worn by fighters can't be picked (the server would hand out another anyway).
 function takenColors() { return new Set(net ? (net.lobby.players || []).filter(p => p.id !== net.id).map(p => p.color) : []); }

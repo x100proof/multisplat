@@ -7,6 +7,8 @@ import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
 import { DEFAULTS, NET, TICK_MS, COLORS, KEY, KEY_MASK, cleanName, cleanChat, CHAT, BOT } from '../shared/constants.js';
 import { newBrain, botKeys, navOf } from './ai.js';
+import { createLogStore } from './logs.js';
+import { isWordId, LOG } from '../shared/logid.js';
 
 export const PROTOCOL = 1;
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
@@ -31,7 +33,8 @@ const r2 = v => Math.round(v * 100) / 100;
 export class Arena {
   constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
     maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, heartbeatMs = NET.heartbeatMs,
-    maxPerIp = Infinity, seed, build = '' } = {}) {
+    maxPerIp = Infinity, seed, build = '', logs = createLogStore() } = {}) {
+    this.logs = logs;     // the streamed client logs, per word id (SPEC §13.5; server/logs.js)
     this.build = build;   // the server's build id, sent in every welcome (SPEC §10)
     this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
@@ -57,8 +60,13 @@ export class Arena {
     const conn = { ...transport, id: this.nextConn++, rec: null, rtt: 0, connectedAt: this.now(),
       bucket: NET.inputRate, pingBucket: PING_RATE, bucketAt: this.now(), drops: [], dropCount: 0,
       inCount: 0, inRate: 0, rateAt: this.now(), heardAt: this.now(), closed: false };
+    // Log identity (SPEC §13.5): the word id the browser offered (transport.word, from the /ws URL)
+    // if valid, else a new one; told to the client in the welcome. The IP is the server's own view.
+    conn.word = this.logs.assign(transport.word);
+    conn.logBucket = LOG.burst; conn.logAt = this.now(); conn.logDropped = 0;
+    this.logs.touch(conn.word, { ip: conn.ip });
     this.conns.add(conn);
-    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS });
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.state.tick, cap: this.maxPlayers, colors: COLORS, w: conn.word });
     this.send(conn, this.lobbyMsg());
     return conn;
   }
@@ -98,6 +106,7 @@ export class Arena {
     if (conn.closed) return;
     conn.closed = true;
     this.conns.delete(conn);
+    this.logs.touch(conn.word);         // last seen
     const rec = conn.rec;
     if (rec && rec.conn === conn) {
       rec.conn = null; rec.discAt = this.now(); rec.inputs.length = 0;
@@ -122,6 +131,7 @@ export class Arena {
       case 'leave': return this.onLeave(conn);
       case 'chat': return this.onChat(conn, m);
       case 'bots': return this.onBots(conn, m);
+      case 'log': return this.onLog(conn, m);
       default: return this.kick(conn, 'unknown');
     }
   }
@@ -144,6 +154,22 @@ export class Arena {
     c.tokens -= 1;
     this.event('chat', conn.id, { player: rec.id, len: Array.from(text).length });
     this.broadcastEvents([{ type: 'chat', id: rec.id, text }]);
+  }
+
+  // Streamed client log (SPEC §13.5): {t:'log', e:[entry…], lost?}. Any connection may send it (lobby
+  // viewers too). A non-array `e` is a `malformed` kick; entries past LOG.maxEntries and entries of
+  // the wrong shape are dropped and counted in the store. Its own bucket per connection (LOG.burst,
+  // LOG.perSec): a message over it is dropped and counts toward the flood kick.
+  onLog(conn, m) {
+    if (!Array.isArray(m.e)) return this.kick(conn, 'malformed');
+    const now = this.now();
+    conn.logBucket = Math.min(LOG.burst, conn.logBucket + (now - conn.logAt) / 1000 * LOG.perSec);
+    conn.logAt = now;
+    if (conn.logBucket < 1) { conn.logDropped++; return this.dropped(conn); }
+    conn.logBucket -= 1;
+    const over = Math.max(0, m.e.length - LOG.maxEntries);
+    const lost = (Number.isInteger(m.lost) && m.lost > 0 ? m.lost : 0) + over;
+    this.logs.add(conn.word, m.e.slice(0, LOG.maxEntries), { ip: conn.ip, conn: conn.id, lost });
   }
 
   // Drop a rate-limited message: it counts toward the flood kick like allow()'s drops.
@@ -254,6 +280,9 @@ export class Arena {
     // Only the 12 human colours: BOT.color (= COLORS.length, SPEC §15) and anything past it is refused.
     if (!name || !Number.isInteger(color) || color < 0 || color >= COLORS.length) return this.kick(conn, 'bad hello');
     if (m.token !== undefined && (typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token))) return this.kick(conn, 'bad hello');
+    // The word id may come again in the hello (SPEC §13.5); an invalid one is ignored. Tag it with the typed name.
+    if (isWordId(m.w) && m.w !== conn.word) { conn.word = m.w; this.logs.touch(conn.word, { ip: conn.ip }); }
+    this.logs.touch(conn.word, { name });
 
     // resume: the token is valid while the record exists (connected or within the grace period)
     const old = m.token && this.tokens.get(m.token);
@@ -566,8 +595,8 @@ export class Arena {
       maxMs: r2(s.max), overruns: s.overruns, budgetMs: r2(TICK_MS) };
   }
   connView(c) {
-    return { conn: c.id, ip: c.ip, player: c.rec ? c.rec.id : null, rttMs: Math.round(c.rtt), inputRate: c.inRate,
-      dropped: c.dropCount, ageS: Math.round((this.now() - c.connectedAt) / 1000) };
+    return { conn: c.id, ip: c.ip, word: c.word, player: c.rec ? c.rec.id : null, rttMs: Math.round(c.rtt), inputRate: c.inRate,
+      dropped: c.dropCount, logDropped: c.logDropped, ageS: Math.round((this.now() - c.connectedAt) / 1000) };
   }
   recView(rec) {
     const p = Sim.getPlayer(this.state, rec.id);

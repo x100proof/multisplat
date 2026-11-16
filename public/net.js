@@ -4,13 +4,16 @@
 import * as Sim from '/shared/sim.js';
 import { DEFAULTS, NET, TICK_MS, PW, PH, KEY, FX } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
-import { dbg, dbgv, sendReport } from './debug.js';
+import { dbg, dbgv, sendReport, setWordId, setLogSink } from './debug.js';
+import { isWordId } from '/shared/logid.js';
 
 const INTERP_TICKS = NET.interpMs / TICK_MS;          // 6
 const EXTRAP_TICKS = NET.extrapMs / TICK_MS;          // 6
 const SNAP_KEEP = 60;                                  // ~2 s of snapshots
 const PENDING_MAX = 120;
 const ERR_KEEP = 180;                                  // prediction-error samples for the graph
+const LS_WORD = 'multisplat-id';                       // the log word id (SPEC §13.5), kept per browser
+const lsWord = () => { try { const w = localStorage.getItem(LS_WORD); return isWordId(w) ? w : null; } catch { return null; } };
 
 // Snapshot player array layout (server/arena.js snapshot()).
 function unpack(a) {
@@ -35,7 +38,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     stats: { rtt: 0, rttAvg: 0, rttMax: 0, offset: 0, jitter: 0, reconnects: 0, snaps: 0, snapGapMax: 0,
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
     serverTick: 0,
+    word: lsWord(),                                    // log word id: offered on connect, set by the welcome
   };
+  if (net.word) setWordId(net.word);
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
   let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
@@ -57,7 +62,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
 
   const status = s => { net.state = s; onStatus(s); };
 
-  function url() { return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'; }
+  function url() { return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (net.word ? '?id=' + net.word : ''); }
 
   net.connect = function connect() {
     clearTimeout(retryTimer);
@@ -131,6 +136,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   });
 
   function send(obj) { if (!frozen && ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  // The streamed debug log (SPEC §13.5) goes out on this socket whenever it is open.
+  setLogSink(str => { if (frozen || !ws || ws.readyState !== 1) return false; ws.send(str); return true; });
 
   // Test hook: behave like a page whose timers and event handlers are frozen for `ms` (a
   // backgrounded or suspended tab): nothing is sent, incoming messages are lost, and a close that
@@ -150,7 +157,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     sentToken = net.token;
     // after a drop, ask to resume only: if the grace period is over the server says `expired`
     // and we go back to the lobby rather than silently joining as someone new
-    send({ t: 'hello', name: want.name, color: want.color, ...(net.token ? { token: net.token, ...(dropped ? { resume: true } : {}) } : {}) });
+    send({ t: 'hello', name: want.name, color: want.color, ...(net.word ? { w: net.word } : {}), ...(net.token ? { token: net.token, ...(dropped ? { resume: true } : {}) } : {}) });
   }
 
   net.join = function join(name, color) {
@@ -201,6 +208,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (m.cap) net.cap = m.cap;
     if (m.b) net.serverBuild = m.b;
     if (m.b && net.build && m.b !== net.build && net.onStale) net.onStale(m.b);
+    if (isWordId(m.w) && m.w !== net.word) {             // the server's word id for this browser (SPEC §13.5)
+      net.word = m.w;
+      try { localStorage.setItem(LS_WORD, m.w); } catch { /* private mode: a new id each visit */ }
+    }
+    if (m.w) { setWordId(net.word); if (net.onWord) net.onWord(net.word); }
     if (m.expired) {                                    // our resume came too late: the slot is gone
       dbg('net', 'resume refused: grace period over');
       sendReport('auto', 'resume expired');

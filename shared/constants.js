@@ -36,9 +36,10 @@ export const DEFAULTS = Object.freeze({
   // long-sword pickups (SPEC §5.1): a new one 20-40 s after the previous appeared, at most 2 lying
   // at once, at an item point with no player within itemClear units
   itemMinTicks: 1200, itemMaxTicks: 2400, itemMax: 2, itemClear: 32,
-  // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; +3 each, carry 9; throw
+  // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; bundles of 5, 10 or 15
+  // (STAR_BUNDLES), carry 30; throw
   // cooldown 15 ticks; flight 6 units/tick for 240 units; 20 damage and a small knockback
-  starMinTicks: 300, starMaxTicks: 600, starMax: 4, starGive: 3, starCarry: 9,
+  starMinTicks: 300, starMaxTicks: 600, starMax: 4, starCarry: 30,
   throwCd: 5, starSpeed: 6, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
 });
 
@@ -47,6 +48,10 @@ export const DEFAULTS = Object.freeze({
 export const LONG_REACH = 1.6;
 // A pickup's body, centred on its item point's x and resting on the point's surface (y).
 export const ITEM_W = 8, ITEM_H = 14;
+// Ninja-star bundles (SPEC §5.2): a star pickup holds n stars, drawn when it appears with weights
+// 6 : 3 : 2 (likelihood inversely proportional to n). Not in DEFAULTS: the debug panel edits numbers.
+export const STAR_BUNDLES = [{ n: 5, w: 6 }, { n: 10, w: 3 }, { n: 15, w: 2 }];
+export const STAR_LEGACY_N = 3;   // a star pickup without n (made before bundles) holds this many
 export const STAR_W = 4, STAR_H = 4;    // a flying star's box (centred on its x, y)
 export const STAR_HAND = 6;             // a star leaves the hand this far below the body's top
 

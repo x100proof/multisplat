@@ -152,8 +152,12 @@ ARCHITECTURE.md    the code as implemented
 - **Spawning:** ninja-star pickups appear fairly often: one every 5–10 s, with at most **4**
   lying in the arena at once. They use the same item points and free-point rule as long swords
   (a point holds one pickup of either kind). Seeded RNG, as for everything in the sim.
-- **Picking up:** touching a pickup gives **3** stars. A player can carry at most 9; a player
-  already at 9 leaves the pickup where it is.
+- **Bundles:** each pickup holds **5, 10 or 15** stars, drawn when it appears. A bigger bundle is
+  rarer: the odds are inversely proportional to the amount, 1/5 : 1/10 : 1/15 = 6 : 3 : 2
+  (about 55 %, 27 %, 18 %).
+- **Picking up:** touching a pickup gives its stars. A player can carry at most **30**; a player
+  already at 30 leaves the pickup where it is. A player with less room takes what fits, and the
+  rest stays lying as a smaller pickup (e.g. at 27, a 10 gives 3 and leaves a 7).
 - **Throwing:** **X** on the keyboard throws one star in the facing direction (X no longer
   means run; run is Shift only). There is a throw button on touch and a gamepad button. Throw is
   a new input bit, edge-triggered like slash, with a very short cooldown (5 ticks), so three quick presses throw three stars. A player in
@@ -166,12 +170,15 @@ ARCHITECTURE.md    the code as implemented
   the shared sim. They are not lag-compensated.
 - **Kills and loss:** a star kill scores like any kill and is marked in the kill feed. Unthrown
   stars are lost on death and on leaving.
-- **Protocol:** snapshots carry each player's star count, the star pickups and the stars in
-  flight. Events: `item` and `pickup` carry a kind, and there are `throw` and star `hit` events.
+- **Protocol:** snapshots carry each player's star count, the star pickups (with their amount)
+  and the stars in flight. Events: `item` and `pickup` carry a kind; a star `item` its amount `n`,
+  a star `pickup` the stars gained (`gain`), the new count and any stars left lying (`left`).
+  There are `throw` and star `hit` events.
   The client predicts neither the pickup nor its own throw's hit; it may show its own throw
   animation and sound at once.
 - **Look and feel:**
-  - The pickup is a spinning neon shuriken, clearly different from the long-sword blade.
+  - The pickup is a spinning neon shuriken, clearly different from the long-sword blade. Its
+    amount floats over it ("+10"), and a bigger bundle looks a little bigger and brighter.
   - A flying star spins and leaves a short trail.
   - **When you grab stars, text appears above your character reminding you of the key**
     ("X to throw", or the button's symbol on touch), for a few seconds.

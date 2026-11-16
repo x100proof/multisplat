@@ -537,7 +537,7 @@ export class Arena {
 
   // Snapshot (SPEC §6.1): every player as [id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars],
   // flags = alive 1 | onGround 2 | sweep 4 | long sword 8; the lying pickups `it` as [[id, x, y, kind]]
-  // (kind 1 = ninja stars, 0 = long sword); the stars in flight `st` as [[id, x, y, vx, owner]].
+  // (kind 1 = ninja stars, 0 = long sword; a star pickup adds its amount: [id, x, y, 1, n]); the stars in flight `st` as [[id, x, y, vx, owner]].
   // Each client also gets its own full player state (`me`, with `stars`) and its last processed
   // input `seq`, for reconciliation.
   snapshot() {
@@ -548,7 +548,7 @@ export class Arena {
       return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
         (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx, q.stars | 0];
     });
-    const it = (st.items || []).map(i => [i.id, i.x, i.y, Sim.itemKind(i) === 'star' ? 1 : 0]);
+    const it = (st.items || []).map(i => (Sim.itemKind(i) === 'star' ? [i.id, i.x, i.y, 1, Sim.starAmount(i)] : [i.id, i.x, i.y, 0]));
     const fl = (st.stars || []).map(f => [f.id, r2(f.x), r2(f.y), f.vx, f.owner]);
     const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + ',"st":' + JSON.stringify(fl) + '}';
     const head = '{"t":"snapshot","tick":' + st.tick;

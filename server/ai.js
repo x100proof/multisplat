@@ -11,7 +11,7 @@
 // first hop on the shortest route and, each tick near it, simulates the jump from its own current
 // state: when that lands on the next surface it jumps, holding the same keys until it lands.
 import * as Sim from '../shared/sim.js';
-import { KEY, T, PW, PH, LONG_REACH, DEFAULTS } from '../shared/constants.js';
+import { KEY, T, PW, PH, LONG_REACH, DEFAULTS, STAR_BUNDLES } from '../shared/constants.js';
 import { LEVEL, isSolid, isPlat } from '../shared/level.js';
 
 const RNG_M = 2147483647;
@@ -208,7 +208,9 @@ function think(b, me, state, seen, cfg, L) {
   let item = null, icost = Infinity;
   for (const it of state.items || []) {
     const kind = Sim.itemKind(it);
-    if (kind === 'long' ? me.long : (me.stars | 0) >= cfg.starCarry - 2) continue;
+    // stars: worth it while there is room for the whole pickup or for at least a smallest bundle
+    // (5 of the 30); a near-full bot leaves the bundles to others
+    if (kind === 'long' ? me.long : cfg.starCarry - (me.stars | 0) < Math.min(Sim.starAmount(it), STAR_BUNDLES[0].n)) continue;
     const c = far(cx, feet, it.x, it.y);
     if (c < icost) { icost = c; item = it; }
   }

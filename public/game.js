@@ -615,7 +615,7 @@ function onEvents(evs) {
         throwHintUntil = performance.now() + THROW_HINT_MS;
         const el = document.getElementById('hStars'); el.classList.remove('got'); void el.offsetWidth; el.classList.add('got');
       }
-      if (!ONLINE && e.id === ME) dbg('life', star ? 'stars gained' : 'long sword taken', { item: e.item, x: e.x, y: e.y, ...(star ? { now: e.stars } : {}) });
+      if (!ONLINE && e.id === ME) dbg('life', star ? 'stars gained' : 'long sword taken', { item: e.item, x: e.x, y: e.y, ...(star ? { gain: e.gain, now: e.stars, ...(e.left ? { left: e.left } : {}) } : {}) });
     } else if (e.type === 'throw') {
       if (!ONLINE && e.id === ME) dbg('life', 'star thrown', { star: e.star, left: e.stars });
     } else if (e.type === 'starEnd') {
@@ -876,8 +876,10 @@ function shuriken(r, spin, fill, edge) {
 }
 // A star pickup: a spinning neon shuriken hovering over a magenta light pool, with a spinning
 // violet halo ring: clearly not the long sword's upright cyan blade. x centre, y the surface.
+// A bigger bundle (SPEC §5.2: 5, 10 or 15 stars) has a slightly bigger, brighter shuriken.
 function drawStarItem(it, x, y) {
-  const t = S.tick + it.id * 23, bob = Math.sin(t * .07) * 1.2, pulse = .6 + .4 * Math.sin(t * .12);
+  const n = Sim.starAmount(it), big = Math.max(0, Math.min(10, n - 5)) / 10;   // 0 for 5 (or fewer), 1 for 15
+  const t = S.tick + it.id * 23, bob = Math.sin(t * .07) * 1.2, pulse = .6 + .4 * Math.sin(t * .12) + big * .15;
   const cy = y - 7 + bob;
   ctx.save();
   const g = ctx.createRadialGradient(x, y, 0, x, y, 9);
@@ -889,12 +891,14 @@ function drawStarItem(it, x, y) {
   ctx.translate(x, cy);
   ctx.strokeStyle = `rgba(255,110,199,${.5 + .4 * pulse})`; ctx.lineWidth = .5; ctx.setLineDash([2, 2.2]);
   ctx.lineDashOffset = -t * .2; ctx.beginPath(); ctx.arc(0, 0, 6.3, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
-  ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(4 + 4 * pulse);
-  shuriken(4.6, t * .12, '#ffd1ec', NEON.magenta);
+  ctx.shadowColor = NEON.magenta; ctx.shadowBlur = blur(4 + 4 * pulse + 3 * big);
+  shuriken(4.6 * (1 + .22 * big), t * .12, '#ffd1ec', NEON.magenta);
   ctx.shadowBlur = 0;
-  // the count it gives, small
-  ctx.font = '800 3.6px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(249,248,113,.85)';
-  ctx.fillText('+3', 0, -6.6);
+  // the count it gives, small, in the status bar's star colours (yellow on a dark outline)
+  ctx.font = '800 4.2px ui-monospace, Menlo, Consolas, monospace'; ctx.textAlign = 'center';
+  const label = '+' + n, ly = -7.4 - 1.2 * big;
+  ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(5,3,10,.9)'; ctx.strokeText(label, 0, ly);
+  ctx.shadowColor = '#b026ff'; ctx.shadowBlur = blur(3); ctx.fillStyle = '#f9f871'; ctx.fillText(label, 0, ly);
   ctx.restore();
 }
 // A star in flight: spinning fast, with a short fading trail behind it (along -vx).

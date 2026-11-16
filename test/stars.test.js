@@ -1,11 +1,12 @@
-// Ninja stars (SPEC §5.2) in shared/sim.js: pickups (cadence, the max, shared item points, +3 and
-// the carry cap), throwing (edge trigger, cooldown, stun, spawn protection), flight (speed, range,
+// Ninja stars (SPEC §5.2) in shared/sim.js: pickups (cadence, the max, shared item points, bundles
+// of 5/10/15 at 6:3:2, the carry cap of 30, partial pickups, the snapshot packing of the amount), throwing (edge trigger, cooldown, stun, spawn protection), flight (speed, range,
 // solid tiles but not planks), hits (first player only, never the thrower, not the invulnerable,
 // damage, knockback, stun, kill credit), loss on death and leave, determinism.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as S from '../shared/sim.js';
-import { KEY, DEFAULTS, STAR_HAND } from '../shared/constants.js';
+import { KEY, DEFAULTS, STAR_HAND, STAR_BUNDLES } from '../shared/constants.js';
 import { LEVEL } from '../shared/level.js';
 
 const FLOOR_Y = 272 - 13;
@@ -70,31 +71,89 @@ test('stars: item points are shared with long swords (a point holds one pickup o
   assert.deepEqual(of(ev, 'item').map(e => [e.kind, e.x, e.y]), [['long', b.x, b.y]]);
 });
 
-test('stars: a pickup gives 3, carrying at most 9; at 9 the pickup stays', () => {
+test('stars: a pickup gives its bundle, carrying at most 30; at 30 the pickup stays; a part-full player leaves the rest', () => {
+  assert.equal(DEFAULTS.starCarry, 30);
   const w = world(2);
   const p = place(w, 1, 300), q = place(w, 2, 60);
-  w.items.push({ id: 5, x: 305, y: 272, kind: 'star' });
+  w.items.push({ id: 5, x: 305, y: 272, kind: 'star', n: 10 });
   let ev = S.step(w, {});
-  assert.deepEqual(of(ev, 'pickup'), [{ type: 'pickup', tick: 1, id: 1, item: 5, kind: 'star', x: 305, y: 272, stars: 3 }]);
-  assert.equal(p.stars, 3); assert.equal(w.items.length, 0);
-  p.stars = 7;
-  w.items.push({ id: 6, x: 305, y: 272, kind: 'star' });
+  assert.deepEqual(of(ev, 'pickup'), [{ type: 'pickup', tick: 1, id: 1, item: 5, kind: 'star', x: 305, y: 272, stars: 10, gain: 10 }]);
+  assert.equal(p.stars, 10); assert.equal(w.items.length, 0);
+  // 27 + a 10: 3 fit, 7 stay lying on the same pickup
+  p.stars = 27;
+  w.items.push({ id: 6, x: 305, y: 272, kind: 'star', n: 10 });
   ev = S.step(w, {});
-  assert.equal(p.stars, 9, 'capped at 9');
-  w.items.push({ id: 7, x: 305, y: 272, kind: 'star' });
+  assert.deepEqual(of(ev, 'pickup').map(e => [e.item, e.gain, e.stars, e.left]), [[6, 3, 30, 7]]);
+  assert.equal(p.stars, 30, 'capped at 30');
+  assert.deepEqual(w.items.map(i => [i.id, i.n]), [[6, 7]], 'the rest stays as a smaller pickup');
   ev = run(w, 20);
   assert.equal(of(ev, 'pickup').length, 0, 'a full player leaves it');
-  assert.deepEqual(w.items.map(i => i.id), [7]);
+  assert.deepEqual(w.items.map(i => [i.id, i.n]), [[6, 7]]);
   place(w, 2, 300);                                   // a player with room takes it (contact, 2 is pushed out a bit)
   ev = run(w, 2);
-  assert.deepEqual(of(ev, 'pickup').map(e => [e.id, e.item, e.stars]), [[2, 7, 3]]);
-  assert.equal(q.stars, 3);
+  assert.deepEqual(of(ev, 'pickup').map(e => [e.id, e.item, e.gain, e.stars, 'left' in e]), [[2, 6, 7, 7, false]]);
+  assert.equal(q.stars, 7); assert.equal(w.items.length, 0);
+  // exactly filling up removes the pickup; a pickup made before bundles (no n) gives 3
+  const w1 = world(1);
+  const f = place(w1, 1, 300); f.stars = 15;
+  w1.items.push({ id: 1, x: 305, y: 272, kind: 'star', n: 15 });
+  assert.deepEqual(of(S.step(w1, {}), 'pickup').map(e => [e.gain, e.stars, 'left' in e]), [[15, 30, false]]);
+  assert.equal(w1.items.length, 0);
+  f.stars = 0;
+  w1.items.push({ id: 2, x: 305, y: 272, kind: 'star' });
+  S.step(w1, {});
+  assert.equal(f.stars, 3, 'legacy pickup: 3');
   // a long sword holder can still take stars, and a star carrier a long sword
   const w2 = world(1);
   const r = place(w2, 1, 300); r.long = true;
-  w2.items.push({ id: 1, x: 305, y: 272, kind: 'star' });
+  w2.items.push({ id: 1, x: 305, y: 272, kind: 'star', n: 5 });
   S.step(w2, {});
-  assert.equal(r.stars, 3);
+  assert.equal(r.stars, 5);
+});
+
+test('stars: bundles of 5, 10 and 15 with odds 6 : 3 : 2 (inversely proportional to the amount)', () => {
+  assert.deepEqual(STAR_BUNDLES.map(b => b.n), [5, 10, 15]);
+  assert.deepEqual(STAR_BUNDLES.map(b => b.w), [6, 3, 2]);
+  // the draw itself, over many seeds: each share within 1.5 points of 6/11, 3/11, 2/11
+  const N = 66000, count = { 5: 0, 10: 0, 15: 0 };
+  const w = S.createWorld({ seed: 12345 });
+  for (let i = 0; i < N; i++) {
+    const before = w.rng, n = S.drawStarAmount(w);
+    assert.notEqual(w.rng, before, 'one RNG draw');
+    count[n]++;
+  }
+  assert.equal(count[5] + count[10] + count[15], N, 'only 5, 10 or 15');
+  for (const [n, share] of [[5, 6 / 11], [10, 3 / 11], [15, 2 / 11]]) assert.ok(Math.abs(count[n] / N - share) < .015, `${n}: ${count[n] / N}`);
+  // the same draw is what real spawns get: 4 pickups x 300 seeds, each with its n on the item and event
+  const real = { 5: 0, 10: 0, 15: 0 };
+  for (let seed = 1; seed <= 300; seed++) {
+    const ws = S.createWorld({ seed });
+    const ev = of(run(ws, 2500), 'item').filter(e => e.kind === 'star');
+    for (const e of ev) { real[e.n]++; assert.equal(ws.items.find(i => i.id === e.id).n, e.n); }
+  }
+  const tot = real[5] + real[10] + real[15];
+  assert.ok(tot >= 1000, 'enough spawns: ' + tot);
+  for (const [n, share] of [[5, 6 / 11], [10, 3 / 11], [15, 2 / 11]]) assert.ok(Math.abs(real[n] / tot - share) < .05, `spawned ${n}: ${real[n] / tot}`);
+  assert.ok(real[5] > real[10] && real[10] > real[15], 'bigger bundles are rarer');
+});
+
+test('stars: the snapshot packs a star pickup amount and net.js unpacks it (absent from an old server: 3)', async () => {
+  const { Arena } = await import('../server/arena.js');
+  const arena = new Arena({ now: () => 0, seed: 3, heartbeatMs: 0 });
+  arena.state.items.push({ id: 1, x: 305, y: 272, kind: 'star', n: 15 }, { id: 2, x: 72, y: 208, kind: 'long' }, { id: 3, x: 40, y: 272, kind: 'star' });
+  const msgs = [];
+  arena.connect({ ip: 'test', send: m => msgs.push(JSON.parse(m)), close: () => {} });   // a lobby viewer
+  arena.snapshot();
+  const it = msgs.filter(m => m.t === 'snapshot').at(-1).it;
+  assert.deepEqual(it, [[1, 305, 272, 1, 15], [2, 72, 208, 0], [3, 40, 272, 1, 3]]);
+  // public/net.js's unpackItems (a module-private helper: evaluated from its source)
+  const src = readFileSync(new URL('../public/net.js', import.meta.url), 'utf8');
+  const def = src.match(/^const unpackItems = [\s\S]*?\n(?=\S)/m);
+  assert.ok(def, 'unpackItems found in net.js');
+  const unpackItems = new Function(def[0] + 'return unpackItems;')();
+  const items = unpackItems([[1, 305, 272, 1, 15], [2, 72, 208, 0], [9, 40, 272, 1]]);
+  assert.deepEqual(items, [{ id: 1, x: 305, y: 272, kind: 'star', n: 15 }, { id: 2, x: 72, y: 208, kind: 'long' }, { id: 9, x: 40, y: 272, kind: 'star' }]);
+  assert.deepEqual(items.map(S.starAmount), [15, 3, 3]);
 });
 
 test('throw: edge-triggered, one star per press, short cooldown, needs a star', () => {
@@ -293,13 +352,14 @@ test('determinism with stars in play (same inputs -> identical serialized state 
   assert.equal(a.state, b.state);
   assert.equal(a.events, b.events);
   assert.ok(of(a.log, 'pickup').filter(e => e.kind === 'star').length >= 3, 'star pickups happened');
+  assert.ok(of(a.log, 'item').filter(e => e.kind === 'star').every(e => [5, 10, 15].includes(e.n)), 'star bundles drawn');
   assert.ok(of(a.log, 'throw').length >= 5, 'stars were thrown');
   assert.ok(of(a.log, 'hit').some(e => e.move === 'star'), 'stars hit');
   assert.notEqual(play(22).state, a.state);
   // resuming from a deserialized mid-flight state continues identically
   const w = S.createWorld({ seed: 4 });
   for (let i = 1; i <= 4; i++) S.addPlayer(w, i, { cfg });
-  for (const p of w.players) p.stars = 9;
+  for (const p of w.players) p.stars = 30;
   const r = lcg(3), inputs = Array.from({ length: 2000 }, () => [1, 2, 3, 4].map(() => Math.floor(r() * 64)));
   const feed = (st, from, to) => { for (let t = from; t < to; t++) S.step(st, { 1: inputs[t][0], 2: inputs[t][1], 3: inputs[t][2], 4: inputs[t][3] }, { cfg }); };
   let mid = 0;

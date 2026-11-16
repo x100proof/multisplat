@@ -125,9 +125,12 @@ ARCHITECTURE.md    the code as implemented
   dropped. They respawn with the standard sword. Leaving the arena also discards it.
 - **Protocol:** snapshots carry a `long` flag per player and the list of pickups (id, x, y).
   New events: `item` (a pickup appeared) and `pickup` (who took which).
-- **Look and sound:** the pickup is a glowing, slowly bobbing blade in the neon style. A held
-  long sword is drawn visibly longer with a brighter trail, so opponents can read the threat.
-  Pickup has its own SFX, and the kill feed marks long-sword kills.
+- **Look and sound:** the pickup is a glowing, slowly bobbing blade in the neon style. As in
+  NinjaRunner, Pip has no sword in hand between attacks: the sword is drawn only during a
+  swing. A long sword keeps that rule, and its swing is drawn visibly longer (blade and arc
+  scaled to the real reach) with a brighter trail. So that opponents can read the threat
+  before the swing, a holder gets a small sword icon beside their name tag. Pickup has its
+  own SFX, and the kill feed marks long-sword kills.
 - **Prediction:** the client predicts its own longer reach only after the server confirms the
   pickup; the pickup itself is not predicted.
 

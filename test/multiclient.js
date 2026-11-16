@@ -3,7 +3,9 @@
 // report read back through tools/debug.js, prediction error under NET_SIM=120,2, and a long-sword
 // pickup (ITEM_SECS / ITEM_POINTS shorten the spawn timer and keep pickups on the floor) that
 // every page sees, that lengthens the holder's reach in a scripted check and is lost on death.
-// Also AI players, and spectator mode (watchTest, SPEC §16).
+// Also AI players, and spectator mode (watchTest, SPEC §16), and rooms (SPEC §17: create, join, admin
+// transfer, leaving as admin, renames, the 10-room limit). Every section runs in a room: its first
+// player creates one (openPlayer opts.create), later ones select it in the list (opts.room).
 //
 //   node test/multiclient.js            (Chromium from $PLAYWRIGHT_CHROMIUM or playwright's cache)
 import assert from 'node:assert/strict';
@@ -11,26 +13,62 @@ import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startServer, launchChromium, waitFor, sleep, tempDir, removeDir, ROOT } from './lib.js';
+import WebSocket from 'ws';
 import { installBot, stopBot } from './bot.js';
 
 const log = (...a) => console.log('multiclient:', ...a);
 const errors = [];
 let browser, servers = [], dirs = [];
 
-async function openPlayer(srv, name, color) {
-  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
+// A fresh browser context and page on the lobby, connected. Resolves to { page, name }.
+async function openPage(srv, name, viewport = { width: 960, height: 576 }) {
+  const ctx = await browser.newContext({ viewport });
   const page = await ctx.newPage();
   page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
   page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
   await page.goto(srv.url);
   await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
-  await page.fill('#lName', name);
-  await page.click(`#lColors .sw:nth-child(${color + 1})`);
-  await page.click('#lFight');
-  await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
-  const id = await page.evaluate(() => __mp.net.id);
-  return { page, name, id };
+  return { page, name };
 }
+// Click room `id` in the lobby's list and wait for the server to say we look at it.
+async function selectRoom(p, id) {
+  await p.page.click(`#lRoomList button[data-room="${id}"]`);
+  await p.page.waitForFunction(id => __mp.net.lobby.room === id, id, { timeout: 5000 });
+}
+// Create a room from the lobby (`rname`: its name or '' for "<name>'s room"): the creator is in it as
+// admin at once and the lobby stays open on it. Resolves to the room id.
+async function createRoom(p, name, color, rname = '') {
+  await p.page.fill('#lName', name);
+  await p.page.click(`#lColors .sw:nth-child(${color + 1})`);
+  if (rname) await p.page.fill('#lRoomName', rname);
+  await p.page.click('#lCreate');
+  await p.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.lobby.room, null, { timeout: 10000 });
+  return p.page.evaluate(() => __mp.net.lobby.room);
+}
+// opts.create (true, or the room's name): this page creates a room and FIGHT then closes the lobby;
+// opts.room (an id): select that room, then FIGHT. Returns { page, name, id, room }.
+async function openPlayer(srv, name, color, opts = {}) {
+  const p = await openPage(srv, name);
+  if (opts.room) { await p.page.fill('#lName', name); await p.page.click(`#lColors .sw:nth-child(${color + 1})`); await selectRoom(p, opts.room); p.room = opts.room; }
+  else p.room = await createRoom(p, name, color, typeof opts.create === 'string' ? opts.create : '');
+  await p.page.click('#lFight');
+  await p.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive && !__mp.lobbyOpen, null, { timeout: 10000 });
+  p.id = await p.page.evaluate(() => __mp.net.id);
+  return p;
+}
+// A lobby viewer looking at room `id` (snapshots and events, no slot).
+async function openViewer(srv, name, id) {
+  const p = await openPage(srv, name);
+  await selectRoom(p, id);
+  return p;
+}
+// Rooms the server has open (admin /state), and a wait for the old ones to go: a room closes when
+// its admin leaves or its record's 5 s grace runs out, and at most 2 rooms per address may be open.
+const stateOf = async srv => (await fetch(`http://127.0.0.1:${srv.adminPort}/state`)).json();
+const roomsOpen = async srv => (await stateOf(srv)).rooms.length;
+const noRooms = srv => waitFor(async () => (await roomsOpen(srv)) === 0, { timeout: 12000, what: 'every room closed' });
+const debugCli = (srv, ...args) => new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), ...args],
+  (e, so, se) => (e ? rej(new Error(se || e.message)) : res(so))));
 
 const pageState = (p, ids) => p.page.evaluate(ids => ({
   kills: __mp.events.filter(e => e.type === 'kill'),
@@ -43,7 +81,7 @@ async function fightTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
   log(`server on port ${srv.port}, admin on ${srv.adminPort}`);
-  const A = await openPlayer(srv, 'Ash', 0), B = await openPlayer(srv, 'Bea', 1), C = await openPlayer(srv, 'Cy', 2);
+  const A = await openPlayer(srv, 'Ash', 0, { create: 'Dojo' }), B = await openPlayer(srv, 'Bea', 1, { room: A.room }), C = await openPlayer(srv, 'Cy', 2, { room: A.room });
   const all = [A, B, C], ids = all.map(p => p.id);
   assert.equal(new Set(ids).size, 3);
   // every page sees all three names
@@ -195,7 +233,7 @@ async function fightTest() {
   assert.ok(!stored.includes(token), 'resume token never stored');
   const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
     (e, so) => (e ? rej(e) : res(so))));
-  assert.match(st, /players \(3\)/);
+  assert.match(st, /rooms \(1\/10\):/); assert.match(st, /room \d+ "Dojo" admin=\d+ "Ash" players=3 bots=0 queue=0/);
   log(`debug report ${id} stored with the server view; tools/debug.js state ok`);
 
   // --- streamed client log (SPEC §13.5): the word id is in the lobby footer and in reports, and
@@ -227,7 +265,7 @@ async function predictionTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir, NET_SIM: '120,2' }); servers.push(srv);
   const P = await openPlayer(srv, 'Walker', 4);
-  const Q = await openPlayer(srv, 'Other', 5);       // a second player, so there is a remote to interpolate
+  const Q = await openPlayer(srv, 'Other', 5, { room: P.room });       // a second player, so there is a remote to interpolate
   await installBot(P.page, { mode: 'pace' });
   await installBot(Q.page, { mode: 'pace' });
   await sleep(2500);
@@ -258,13 +296,9 @@ async function predictionTest() {
 async function longSwordTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir, ITEM_SECS: '1,2', ITEM_POINTS: '0,1' }); servers.push(srv);
-  const H = await openPlayer(srv, 'Hold', 3), O = await openPlayer(srv, 'Opp', 6);
-  // a third page that only watches from the lobby (spectators get the same snapshots and events)
-  const wctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
-  const W = { page: await wctx.newPage(), name: 'Watch' };
-  W.page.on('pageerror', e => errors.push(`Watch: ${e.message}`));
-  await W.page.goto(srv.url);
-  await W.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const H = await openPlayer(srv, 'Hold', 3), O = await openPlayer(srv, 'Opp', 6, { room: H.room });
+  // a third page that only watches the room from the lobby (viewers of a room get the same snapshots and events)
+  const W = await openViewer(srv, 'Watch', H.room);
   const all = [H, O, W];
   const drawn = (p, id) => p.page.evaluate(id => {
     const q = __mp.state.players.find(p => p.id === id);
@@ -340,10 +374,9 @@ async function longSwordTest() {
   log(`holder died (${death.move}) and is back to the standard sword on all 3 pages`);
 
   // admin state lists pickups and holders
-  const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
-    (e, so) => (e ? rej(e) : res(so))));
-  assert.match(st, /long-sword pickups \(\d\): #\d+ at/);
-  log('tools/debug.js state: ' + st.split('\n').find(l => l.startsWith('long-sword')));
+  const st = await debugCli(srv, 'state');
+  assert.match(st, /^ +long-sword pickups \(\d\): #\d+ at/m);
+  log('tools/debug.js state: ' + st.split('\n').find(l => l.trim().startsWith('long-sword')).trim());
   for (const p of all) await p.page.context().close();
   await srv.stop();
 }
@@ -352,7 +385,8 @@ async function longSwordTest() {
 async function leaveTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const A = await openPlayer(srv, 'Quit', 2), B = await openPlayer(srv, 'Stay', 5);
+  // Stay creates the room and is its admin (the admin cannot leave while another human is there)
+  const B = await openPlayer(srv, 'Stay', 5), A = await openPlayer(srv, 'Quit', 2, { room: B.room });
   const ui = p => p.page.evaluate(() => ({ menu: __mp.leaveOpen, lobby: __mp.lobbyOpen, id: __mp.net.id, mode: __mp.net.mode,
     ids: __mp.state.players.map(q => q.id), shown: !document.getElementById('leave').classList.contains('hidden') }));
   await waitFor(async () => (await ui(B)).ids.length === 2, { what: 'both players in the arena' });
@@ -374,7 +408,7 @@ async function leaveTest() {
   assert.ok(!(await ui(A)).menu, 'Escape does nothing in the lobby');
   await A.page.click('#lFight');                    // and the leaver can join again on the same connection
   await waitFor(async () => { const v = await ui(A); return !v.lobby && v.id != null && v.id !== A.id; }, { what: 'rejoin after leaving' });
-  log('escape menu: stay keeps the slot, leave frees it and returns to the lobby, rejoin works');
+  log('escape menu: stay keeps the slot, leave frees it and returns to the lobby (still looking at the room), rejoin works');
   for (const p of [A, B]) await p.page.context().close();
   await srv.stop();
 }
@@ -385,12 +419,9 @@ async function leaveTest() {
 async function chatTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const A = await openPlayer(srv, 'Talker', 3), B = await openPlayer(srv, 'Listen', 6);
-  const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
-  const V = { page: await ctx.newPage(), name: 'Viewer' };
-  V.page.on('pageerror', e => errors.push(`Viewer: ${e.message}`));
-  await V.page.goto(srv.url);
-  await V.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open' && window.__mp.lobbyOpen);
+  const A = await openPlayer(srv, 'Talker', 3), B = await openPlayer(srv, 'Listen', 6, { room: A.room });
+  const V = await openViewer(srv, 'Viewer', A.room);      // looks at the room from its lobby
+  await V.page.waitForFunction(() => __mp.lobbyOpen);
   const ui = p => p.page.evaluate(() => ({ chat: __mp.chat, help: __mp.helpOpen, leave: __mp.leaveOpen, mute: document.getElementById('muteBtn').classList.contains('on'),
     fs: !!document.fullscreenElement, debug: !document.getElementById('dbg').classList.contains('hidden'),
     boxShown: !document.getElementById('chatbox').classList.contains('hidden'), val: document.getElementById('chatIn').value }));
@@ -458,12 +489,8 @@ async function chatTest() {
 async function starTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir, STAR_SECS: '1,1', ITEM_SECS: '900,900', ITEM_POINTS: '0,1' }); servers.push(srv);
-  const T = await openPlayer(srv, 'Thrower', 4), V = await openPlayer(srv, 'Target', 0);
-  const wctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
-  const W = { page: await wctx.newPage(), name: 'Watch' };
-  W.page.on('pageerror', e => errors.push(`Watch: ${e.message}`));
-  await W.page.goto(srv.url);
-  await W.page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
+  const T = await openPlayer(srv, 'Thrower', 4), V = await openPlayer(srv, 'Target', 0, { room: T.room });
+  const W = await openViewer(srv, 'Watch', T.room);
   const all = [T, V, W];
   // the target waits on the left half of the floor, out of the way
   await installBot(V.page, { mode: 'goto', x: 40 });
@@ -531,10 +558,9 @@ async function starTest() {
   assert.equal(swishes, held, `a swish for each of ${held} quick throws (heard ${swishes})`);
   log(`stars: rapid fire of ${held}, ${swishes} swishes (count ${burst.me})`);
   // admin state and the CLI list star pickups, stars in flight and counts
-  const st = await new Promise((res, rej) => execFile(process.execPath, [join(ROOT, 'tools/debug.js'), '--port', String(srv.adminPort), 'state'],
-    (e, so) => (e ? rej(e) : res(so))));
+  const st = await debugCli(srv, 'state');
   assert.match(st, /star pickups \(\d\)/); assert.match(st, /stars in flight \(\d\)/); assert.match(st, /stars=\d/);
-  for (const c of [T.page.context(), V.page.context(), wctx]) await c.close();
+  for (const c of [T.page.context(), V.page.context(), W.page.context()]) await c.close();
   await srv.stop();
 }
 
@@ -545,7 +571,7 @@ async function starTest() {
 async function heartbeatTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const A = await openPlayer(srv, 'Afk', 3), B = await openPlayer(srv, 'Bee', 4);
+  const B = await openPlayer(srv, 'Bee', 4), A = await openPlayer(srv, 'Afk', 3, { room: B.room });   // Bee is the admin; Afk is the one frozen
   const vctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
   const V = await vctx.newPage();
   V.on('pageerror', e => errors.push(`viewer: ${e.message}`));
@@ -597,7 +623,7 @@ async function heartbeatTest() {
 // Full screen (SPEC §9): the button top right shows in the lobby and in the game, toggles full screen
 // (a stubbed Fullscreen API: headless Chromium cannot really go full screen), reacts to F (not while
 // typing a name), follows a change made elsewhere (Escape), and that Escape does not also open the
-// leave menu. The score strip stops short of the button.
+// leave menu. The score strip stops short of the button. (The game is in a room its page creates.)
 async function fullscreenTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
@@ -636,8 +662,9 @@ async function fullscreenTest() {
   await page.click('#fsBtn');
   await waitFor(async () => !(await fs()).on, { what: 'full screen off' });
   // join; in the game the button is still there and the strip stops short of it
-  await page.fill('#lName', 'Full'); await page.click('#lFight');
-  await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive);
+  await createRoom({ page }, 'Full', 0);
+  await page.click('#lFight');
+  await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive && !__mp.lobbyOpen);
   await waitFor(async () => (await fs()).stripRight > 0, { what: 'the strip' });
   f = await fs();
   assert.ok(f.shown, 'visible in the game');
@@ -721,6 +748,8 @@ async function phoneTest() {
     assert.equal(await page.evaluate(() => { const e = new Event('gesturestart', { cancelable: true, bubbles: true }); document.body.dispatchEvent(e); return e.defaultPrevented; }), true, `${v.name}: Safari gesture events are cancelled`);
     // lobby: type a name, tap FIGHT (not clicks)
     await page.tap('#lName'); await page.keyboard.type('Phone');
+    await page.tap('#lCreate');                    // a room of its own; FIGHT (in the room panel) then closes the lobby
+    await page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.lobby.room, null, { timeout: 10000 });
     const f = await centre('lFight');
     assert.ok(f.y > 0 && f.b <= v.h, `${v.name}: FIGHT is on screen`);
     await page.touchscreen.tap(f.x, f.y);
@@ -799,7 +828,9 @@ async function phoneTest() {
     await waitFor(() => page.evaluate(() => !__mp.leaveOpen), { timeout: 2000, what: 'leave menu closes' });
     assert.equal(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), !v.fine, `${v.name}: pointer media as set up`);
     log(`phone: ${v.name}: buttons in view and >= 44 px, hold, jump, second finger, slide, cancel, slash, ?, x all work`);
+    await page.evaluate(() => __mp.net.leave());   // the admin alone: the room closes at once (2 rooms per address at most)
     await ctx.close();
+    await noRooms(srv);
   }
 }
 
@@ -826,112 +857,117 @@ async function staleBuildTest() {
   await ctx.close(); await srv.stop();
 }
 
-// AI players (SPEC §15): two lobby viewers; − / + on one updates the count on both; bots fight in the
-// arena wearing the reserved colour, which is not among the swatches; + stops at slots − 1; a human
-// still joins the last free slot, after which + is disabled; − then removes the newest bot.
+// AI players (SPEC §15, §17): the admin's − / + change the count live for everyone looking at the room;
+// the other page sees the buttons hidden and disabled and "(the admin sets this)", and a forced bots
+// message from it is refused without a kick; bots fight in the room wearing the reserved colour, which
+// is not among the swatches; + stops at 7 (8 slots with the admin); a human arriving at the full room
+// is queued and gets the slot when − frees one, and − removes the newest bot.
 async function botTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const open = async name => {
-    const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
-    const page = await ctx.newPage();
-    page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
-    page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
-    await page.goto(srv.url);
-    await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
-    return { page, name };
-  };
-  const V = await open('V'), W = await open('W');
+  const V = await openPage(srv, 'V');
+  const room = await createRoom(V, 'Boss', 0);           // V is the admin and stays on its lobby
+  const W = await openViewer(srv, 'W', room);            // a plain lobby viewer of the room
   const ui = p => p.page.evaluate(() => ({ n: document.getElementById('lBotN').textContent,
     dec: document.getElementById('lBotDec').disabled, inc: document.getElementById('lBotInc').disabled,
-    bots: (__mp.net.lobby.players || []).filter(q => q.bot), swatches: document.querySelectorAll('#lColors .sw').length,
+    hid: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).classList.contains('hidden2') && getComputedStyle(document.getElementById(id)).display === 'none'),
+    ro: document.getElementById('lBotRO').textContent, err: document.getElementById('lErr').textContent,
+    bots: (__mp.net.lobby.players || []).filter(q => q.bot), botMax: __mp.net.lobby.botMax, swatches: document.querySelectorAll('#lColors .sw').length,
     inArena: __mp.state.players.map(q => q.id) }));
   const both = (n, what) => waitFor(async () => (await ui(V)).n === String(n) && (await ui(W)).n === String(n), { what });
   await both(0, 'count 0 on both pages');
-  assert.ok((await ui(V)).dec, '− disabled with no bots');
+  let u = await ui(V);
+  assert.ok(u.dec && !u.inc && !u.hid[0] && !u.hid[1] && u.ro === '', 'the admin has − (nothing to remove) and + shown');
+  u = await ui(W);
+  assert.ok(u.dec && u.inc && u.hid[0] && u.hid[1], '− / + are hidden and disabled for the other page');
+  assert.match(u.ro, /the admin sets this/);
+  assert.equal(u.botMax, 7, 'at most 7 AI players (8 slots)');
+  // a forced bots message from the non-admin is refused (no kick), nothing changes
+  await W.page.evaluate(() => __mp.net.bots(1));
+  await waitFor(async () => /admin/.test((await ui(W)).err), { what: 'the refusal text on the non-admin' });
+  await sleep(400);
+  assert.equal((await ui(V)).n, '0'); assert.equal(await W.page.evaluate(() => __mp.net.state), 'open', 'no kick');
   await V.page.click('#lBotInc'); await V.page.click('#lBotInc');
   await both(2, '+ + shows 2 on both pages');
-  await W.page.click('#lBotDec');
-  await both(1, '− on the other page shows 1 on both');
+  await V.page.click('#lBotDec');
+  await both(1, '− shows 1 on both');
   await V.page.click('#lBotInc');
   await both(2, 'back to 2');
-  // the bots are in the arena, in the reserved colour, named AI n, and that colour is not a swatch
+  // the bots are in the room, in the reserved colour, named AI n, and that colour is not a swatch
   const hex = await V.page.evaluate(async () => (await import('/shared/constants.js')).BOT.hex);
-  await waitFor(async () => { const u = await ui(W); return u.bots.length === 2 && u.bots.every(b => u.inArena.includes(b.id)); }, { what: 'bots in the arena' });
-  const u = await ui(W);
+  await waitFor(async () => { const u = await ui(W); return u.bots.length === 2 && u.bots.every(b => u.inArena.includes(b.id)); }, { what: 'bots in the room' });
+  u = await ui(W);
   assert.equal(u.swatches, 12, 'twelve human swatches, none for bots');
   for (const b of u.bots) { assert.equal(b.color, 12); assert.match(b.name, /^AI \d+$/); }
-  const dot = await W.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => [li.querySelector('.nm').textContent, getComputedStyle(li.querySelector('.dot')).backgroundColor]));
+  const dot = await W.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => [li.querySelector('.nm').textContent, getComputedStyle(li.querySelector('.dot')).backgroundColor]).filter(([n]) => n.startsWith('AI')));
   const rgb = `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
   assert.ok(dot.length === 2 && dot.every(([, c]) => c === rgb), `bot dots ${JSON.stringify(dot)} in ${rgb}`);
-  // up to slots − 1 (rate-limited: a short pause between presses)
-  for (let i = 0; i < 12; i++) { if (!(await ui(V)).inc) await V.page.click('#lBotInc'); await sleep(300); }
-  await both(11, 'eleven bots at most');
+  // up to 7 (rate-limited: a short pause between presses)
+  for (let i = 0; i < 8; i++) { if (!(await ui(V)).inc) await V.page.click('#lBotInc'); await sleep(300); }
+  await both(7, 'seven bots at most');
   assert.ok((await ui(V)).inc, '+ disabled at the limit');
-  // a human still gets the free slot
+  await waitFor(async () => (await ui(V)).inArena.length === 8, { what: '8 in the room' });
+  // the room is full (admin + 7): a human is queued, and takes the slot freed by −
   await W.page.fill('#lName', 'Human');
   await W.page.click('#lFight');
-  await W.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
-  await waitFor(async () => (await ui(V)).inArena.length === 12, { what: '12 in the arena' });
-  assert.ok((await ui(V)).inc, '+ disabled with the arena full');
+  await W.page.waitForFunction(() => __mp.net.mode === 'queue', null, { timeout: 10000 });
   await V.page.click('#lBotDec');
-  await waitFor(async () => (await ui(V)).n === '10', { what: '− removes one' });
+  await waitFor(async () => (await ui(V)).n === '6', { what: '− removes one' });
+  await W.page.waitForFunction(() => __mp.net.mode === 'play' && __mp.net.me && __mp.net.me.alive, null, { timeout: 10000 });
   // (read on V, which got the lobby at once; other pages get it with the next coalesced broadcast)
-  assert.ok(!(await V.page.evaluate(() => __mp.net.lobby.players.some(q => q.name === 'AI 11'))), 'the newest bot went first');
-  log('bots: − / + live on both lobby pages, reserved colour in the arena, at most 11, a human still joins');
+  assert.ok(!(await V.page.evaluate(() => __mp.net.lobby.players.some(q => q.name === 'AI 7'))), 'the newest bot went first');
+  log('bots: − / + admin-only and live on both pages, refused without a kick for others, reserved colour, at most 7, a queued human gets the freed slot');
   for (const p of [V, W]) await p.page.context().close();
   await srv.stop();
 }
 
-// Names (SPEC §9): two "Sean"s; when the first leaves, the second becomes "Sean" for itself and others.
+// Names (SPEC §9): two "Sean"s in one room; when the first leaves, the second becomes "Sean" for itself
+// and others. De-duplication is per room: a "Sean" in another room is not "Sean#2".
 async function renameTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const A = await openPlayer(srv, 'Sean', 1), B = await openPlayer(srv, 'Sean', 4), C = await openPlayer(srv, 'Other', 7);
+  // Other is the admin (so Sean, who leaves, is not); the Seans join in order
+  const C = await openPlayer(srv, 'Other', 7), A = await openPlayer(srv, 'Sean', 1, { room: C.room }), B = await openPlayer(srv, 'Sean', 4, { room: C.room });
+  const D = await openPlayer(srv, 'Sean', 5);            // creates a room of its own
   const nameIn = (p, id) => p.page.evaluate(id => (__mp.net.meta.get(id) || {}).name, id);
   assert.equal(await nameIn(C, B.id), 'Sean#2');
+  assert.equal(await nameIn(D, D.id), 'Sean', 'names are de-duplicated per room');
   await A.page.keyboard.press('Escape');
   await A.page.click('#lvYes');
   await waitFor(async () => await nameIn(B, B.id) === 'Sean' && await nameIn(C, B.id) === 'Sean', { what: 'Sean#2 renamed to Sean everywhere' });
   await waitFor(async () => (await A.page.evaluate(id => (__mp.net.lobby.players.find(p => p.id === id) || {}).name, B.id)) === 'Sean', { what: 'the lobby list shows the new name' });
-  log('names: a freed name passes to its #2 holder for everyone');
-  for (const p of [A, B, C]) await p.page.context().close();
+  log('names: a freed name passes to its #2 holder for everyone, per room');
+  for (const p of [A, B, C, D]) await p.page.context().close();
   await srv.stop();
 }
 
-// Spectator mode (SPEC §16): with the arena full (11 bots + a human) and someone queued, Watch on a
-// fresh page closes the lobby without taking a slot or a queue place, follows the leader, follows the
-// ninja clicked on screen, ← → switch, Esc goes back to the lobby, and Fight from there still queues.
+// Spectator mode (SPEC §16, §17): with the room full (the admin + 7 bots) and someone queued, Watch on a
+// fresh page that selected the room closes the lobby without taking a slot or a queue place, follows
+// the leader, follows the ninja clicked on screen, ← → switch, Esc goes back to the lobby, and Fight
+// from there still queues.
 async function watchTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
-  const open = async name => {
-    const ctx = await browser.newContext({ viewport: { width: 960, height: 576 } });
-    const page = await ctx.newPage();
-    page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
-    page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
-    await page.goto(srv.url);
-    await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
-    return { page, name };
-  };
   const H = await openPlayer(srv, 'Host', 0);
-  for (let i = 0; i < 11; i++) {   // fill the arena with bots (rate-limited: a short pause between presses)
+  for (let i = 0; i < 7; i++) {   // fill the room with bots (rate-limited: a short pause between presses)
     await H.page.evaluate(() => __mp.net.bots(1)); await sleep(300);
   }
-  await waitFor(() => H.page.evaluate(() => __mp.state.players.length === 12), { what: 'a full arena' });
-  const Q = await open('Q');
-  await Q.page.fill('#lName', 'Queued'); await Q.page.click('#lFight');
+  await waitFor(() => H.page.evaluate(() => __mp.state.players.length === 8), { what: 'a full room' });
+  const Q = await openPage(srv, 'Q');
+  await Q.page.fill('#lName', 'Queued'); await selectRoom(Q, H.room); await Q.page.click('#lFight');
   await Q.page.waitForFunction(() => __mp.net.mode === 'queue');
-  const W = await open('W');
+  const W = await openPage(srv, 'W');
   const st = () => W.page.evaluate(() => ({ lobby: __mp.lobbyOpen, w: __mp.watching, mode: __mp.net.mode, id: __mp.net.id,
     players: __mp.net.lobby.players.length, queue: __mp.net.lobby.queue.length, ids: __mp.state.players.map(p => p.id),
     bar: document.getElementById('watch').classList.contains('hidden') ? null : document.getElementById('watch').textContent }));
-  assert.ok(!(await W.page.isDisabled('#lWatch')), 'Watch is open to a lobby viewer with a full arena');
+  assert.ok(await W.page.isDisabled('#lWatch') || await W.page.isHidden('#lWatch'), 'Watch needs a selected room');
+  await selectRoom(W, H.room);
+  assert.ok(!(await W.page.isDisabled('#lWatch')), 'Watch is open to a lobby viewer of a full room with a queue');
   await W.page.click('#lWatch');
   await waitFor(async () => (await st()).w.id != null, { what: 'watching follows someone' });
   let s = await st();
   assert.equal(s.lobby, false); assert.equal(s.w.on, true); assert.equal(s.mode, 'viewer'); assert.equal(s.id, null);
-  assert.equal(s.players, 12); assert.equal(s.queue, 1, 'the watcher took no slot and no queue place');
+  assert.equal(s.players, 8); assert.equal(s.queue, 1, 'the watcher took no slot and no queue place');
   assert.equal(s.w.chosen, null, 'the default is the leader');
   assert.match(s.bar, /WATCHING/); assert.match(s.bar, /Click a ninja to follow them/); assert.match(s.bar, /\(the leader\)/);
   // click a living ninja on screen (not the one followed now) and the camera follows it
@@ -964,17 +1000,216 @@ async function watchTest() {
   await W.page.keyboard.press('ArrowDown');
   s = await st(); assert.equal(s.w.chosen, null, '↓ back to the leader');
   // input from the watching page reaches nobody: still a viewer with no player
-  assert.equal(s.mode, 'viewer'); assert.equal(s.players, 12);
-  // Esc: back to the lobby, and Fight from there still queues
+  assert.equal(s.mode, 'viewer'); assert.equal(s.players, 8);
+  // Esc: back to the lobby (still on the room), and Fight from there still queues
   await W.page.keyboard.press('Escape');
   await waitFor(async () => (await st()).lobby, { what: 'Esc returns to the lobby' });
   s = await st(); assert.equal(s.w.on, false); assert.equal(s.bar, null);
   assert.ok(await W.page.isVisible('#lobby'));
   await W.page.fill('#lName', 'Watcher'); await W.page.click('#lFight');
   await W.page.waitForFunction(() => __mp.net.mode === 'queue' && __mp.net.queuePos === 2, null, { timeout: 5000 });
-  log('watch: no slot with a full arena and a queue, leader by default, click follows, ← → ↓, Esc to the lobby, Fight still queues');
+  log('watch: no slot with a full room and a queue, leader by default, click follows, ← → ↓, Esc to the lobby, Fight still queues');
   for (const p of [H, Q, W]) await p.page.context().close();
   await srv.stop();
+}
+
+// ---------- rooms (SPEC §17) ----------
+const listOf = p => p.page.evaluate(() => [...document.querySelectorAll('#lRoomList button')].map(b => ({ id: +b.dataset.room, text: b.textContent, pressed: b.getAttribute('aria-pressed') })));
+const rosterOf = p => p.page.evaluate(() => [...document.querySelectorAll('#lPlayers li')].map(li => ({ name: li.querySelector('.nm').firstChild.textContent, admin: !!li.querySelector('.adm'), mk: !!li.querySelector('button.mkadm') })));
+
+// Create, list, join, isolation: the empty list says so; a created room shows up on another page with
+// its name, its admin and 1/8; a second page joins it (select + FIGHT) and both see each other; a page
+// in another room never gets this room's players in its snapshots.
+async function roomsTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const E = await openPage(srv, 'E');
+  await waitFor(() => E.page.evaluate(() => document.querySelector('#lRoomList li.empty') && document.querySelector('#lRoomList li.empty').textContent === 'No rooms yet — create one.'), { what: 'the empty-state text' });
+  assert.ok(await E.page.isHidden('#lRoom'), 'no room panel while none is selected');
+  const A = await openPlayer(srv, 'Ann', 0, { create: 'Lair' });
+  await waitFor(async () => (await listOf(E)).some(r => r.id === A.room), { what: 'the new room in the other page\'s list' });
+  let r = (await listOf(E)).find(r => r.id === A.room);
+  assert.ok(r.text.includes('Lair') && r.text.includes('Ann') && r.text.includes('1/8'), 'name, admin and 1/8: ' + r.text);
+  assert.equal(r.pressed, 'false');
+  await selectRoom(E, A.room);
+  assert.equal((await listOf(E)).find(r => r.id === A.room).pressed, 'true', 'the selected room is pressed');
+  assert.equal(await E.page.textContent('#lRoomTitle'), 'Lair');
+  assert.deepEqual(await rosterOf(E), [{ name: 'Ann', admin: true, mk: false }]);
+  const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
+  for (const p of [A, B]) await waitFor(async () => (await rosterOf(p)).length === 2, { what: `both in the roster on ${p.name}` });
+  assert.deepEqual((await rosterOf(E)).map(x => x.name).sort(), ['Ann', 'Bob']);
+  assert.ok((await listOf(E)).find(r => r.id === A.room).text.includes('2/8'));
+  // a third page creates another room (2 per address are allowed): its snapshots hold only its own player
+  const C = await openPlayer(srv, 'Cat', 2, { create: 'Elsewhere' });
+  assert.notEqual(C.room, A.room);
+  await waitFor(() => A.page.evaluate(() => __mp.state.players.length === 2), { what: 'two players in Lair' });
+  await sleep(600);
+  const seen = p => p.page.evaluate(() => ({ ids: __mp.state.players.map(q => q.id), room: __mp.net.lobby.room, names: __mp.net.lobby.players.map(q => q.name) }));
+  let s = await seen(C);
+  assert.deepEqual(s.ids, [C.id], 'Elsewhere sees only itself');
+  assert.deepEqual(s.names, ['Cat']);
+  s = await seen(A);
+  assert.deepEqual(s.ids.sort(), [A.id, B.id].sort(), 'Lair sees Ann and Bob only');
+  assert.ok(!s.ids.includes(C.id));
+  await waitFor(async () => (await listOf(E)).length === 2, { what: 'two rooms in the list' });
+  log('rooms: empty state, created room listed with name/admin/1 of 8, a joiner in its roster, other rooms isolated');
+  for (const p of [E, A, B, C]) await p.page.context().close();
+  await srv.stop();
+}
+
+// Admin transfer: "Make admin" only next to other humans (not self, not a bot), the confirm dialog
+// (right text, Cancel focused, Cancel and Esc do nothing, Confirm transfers); the new admin gets the
+// buttons and the enabled AI controls, the old one loses them. Then the Esc menu: Leave is blocked for
+// the admin with another human present, the transfer works from the menu, the old admin leaves; the
+// sole admin's menu reads "Leave and close" and a watcher of that room is sent back to the list.
+async function adminTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPage(srv, 'A');
+  A.room = await createRoom(A, 'Ann', 0, 'Keep');        // admin, lobby still open
+  const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
+  const aId = await A.page.evaluate(() => __mp.net.id);
+  await A.page.click('#lBotInc');
+  await waitFor(() => A.page.evaluate(() => __mp.net.lobby.bots === 1), { what: 'one bot' });
+  await waitFor(async () => (await rosterOf(A)).length === 3, { what: 'three rows' });
+  const rows = await rosterOf(A);
+  assert.deepEqual(rows.filter(x => x.mk).map(x => x.name), ['Bob'], 'Make admin next to the joiner only: ' + JSON.stringify(rows));
+  assert.ok(rows.find(x => x.name.startsWith('Ann')).admin && !rows.find(x => x.name === 'Bob').admin);
+  assert.equal(await B.page.evaluate(() => document.querySelectorAll('#lPlayers button.mkadm').length), 0, 'no buttons for a non-admin');
+  const adminOf = p => p.page.evaluate(() => __mp.net.lobby.admin);
+  const dlg = p => p.page.evaluate(() => ({ open: !document.getElementById('adm').classList.contains('hidden'), text: document.getElementById('admText').textContent,
+    focus: document.activeElement && document.activeElement.id, target: __mp.admDialog }));
+  const ask = async (p, sel = '#lPlayers button.mkadm') => { await p.page.click(sel); await waitFor(async () => (await dlg(p)).open, { what: 'the confirm dialog' }); };
+  await ask(A);
+  let d = await dlg(A);
+  assert.equal(d.text, 'Make Bob the admin of Keep? You will lose admin.');
+  assert.equal(d.focus, 'admNo', 'Cancel has the focus'); assert.deepEqual(d.target, { id: B.id, name: 'Bob' });
+  await A.page.click('#admNo');
+  assert.ok(!(await dlg(A)).open && (await dlg(A)).target === null);
+  await ask(A);
+  await A.page.keyboard.press('Escape');
+  assert.ok(!(await dlg(A)).open, 'Esc closes the dialog');
+  await sleep(700);
+  assert.equal(await adminOf(A), aId); assert.equal(await adminOf(B), aId, 'nothing changed after Cancel and Esc');
+  await ask(A);
+  await A.page.click('#admYes');
+  await waitFor(async () => (await adminOf(A)) === B.id && (await adminOf(B)) === B.id, { what: 'admin moved to Bob on both pages' });
+  // the new admin has the buttons and the AI controls, the old one has neither
+  const ctl = p => p.page.evaluate(() => ({ mk: [...document.querySelectorAll('#lPlayers button.mkadm')].map(b => b.dataset.name),
+    hid: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).classList.contains('hidden2')),
+    dis: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).disabled), rename: !document.getElementById('lRenameRow').classList.contains('hidden2') }));
+  await waitFor(async () => (await ctl(B)).mk.length === 1, { what: 'Make admin on the new admin' });
+  assert.deepEqual(await ctl(B), { mk: ['Ann'], hid: [false, false], dis: [false, false], rename: true });
+  await waitFor(async () => (await ctl(A)).mk.length === 0, { what: 'Make admin gone from the old admin' });
+  assert.deepEqual(await ctl(A), { mk: [], hid: [true, true], dis: [true, true], rename: false });
+  log('admin: Make admin beside humans only, the dialog (Cancel and Esc do nothing, Confirm transfers), controls follow the role');
+
+  // --- Esc menu. Ann (not admin now) closes her lobby and plays on; Bob is the admin.
+  await A.page.click('#lFight');
+  await waitFor(() => A.page.evaluate(() => !__mp.lobbyOpen), { what: 'lobby closed' });
+  await B.page.keyboard.press('Escape');
+  const menu = p => p.page.evaluate(() => ({ open: __mp.leaveOpen, yes: document.getElementById('lvYes').disabled, yesText: document.getElementById('lvYes').textContent,
+    note: document.getElementById('lvNote').textContent, mk: document.querySelectorAll('#lvPlayers button.mkadm').length }));
+  await waitFor(async () => (await menu(B)).open, { what: 'Esc menu' });
+  let m = await menu(B);
+  assert.ok(m.yes, 'Leave is disabled for an admin with another human in the room');
+  assert.match(m.note, /Make someone admin first/); assert.equal(m.mk, 1);
+  await B.page.click('#lvPlayers button.mkadm');
+  await waitFor(async () => (await dlg(B)).open, { what: 'confirm dialog from the Esc menu' });
+  assert.equal((await dlg(B)).text, 'Make Ann the admin of Keep? You will lose admin.');
+  await B.page.click('#admYes');
+  await waitFor(async () => (await adminOf(B)) === aId && !(await menu(B)).yes, { what: 'Leave enabled after the transfer' });
+  assert.equal((await menu(B)).yesText, 'Leave');
+  await B.page.click('#lvYes');
+  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && __mp.net.mode === 'viewer' && __mp.net.id == null), { what: 'Bob back in the lobby as a viewer' });
+  // --- Ann is the only human and the admin: "Leave and close". Bob watches the room meanwhile.
+  await B.page.click('#lWatch');
+  await waitFor(() => B.page.evaluate(() => __mp.watching.on), { what: 'Bob watching' });
+  await A.page.keyboard.press('Escape');
+  await waitFor(async () => (await menu(A)).open, { what: 'Ann\'s Esc menu' });
+  await waitFor(async () => (await menu(A)).yesText === 'Leave and close', { what: 'Leave and close' });
+  m = await menu(A);
+  assert.ok(!m.yes); assert.match(m.note, /closes the room/);
+  await A.page.click('#lvYes');
+  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && /has closed/.test(document.getElementById('lErr').textContent)), { what: 'the watcher is back at the list with the closed message' });
+  assert.match(await B.page.textContent('#lErr'), /The room "Keep" has closed\./);
+  assert.equal(await B.page.evaluate(() => __mp.net.lobby.room), null);
+  await waitFor(async () => (await listOf(B)).length === 0, { what: 'the room is gone from the list' });
+  assert.equal(await roomsOpen(srv), 0);
+  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves and closes, a watcher gets the closed message');
+  for (const p of [A, B]) await p.page.context().close();
+  await srv.stop();
+}
+
+// Renames: the admin renames from the lobby field and from the Esc menu; the other pages' room title,
+// the list and net.lobby.rname follow; the non-admin has no rename row.
+async function renameRoomTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPage(srv, 'A');
+  A.room = await createRoom(A, 'Ann', 0, 'Old');
+  const B = await openPlayer(srv, 'Bob', 1, { room: A.room });
+  const V = await openViewer(srv, 'V', A.room);
+  const seen = (p, name) => waitFor(() => p.page.evaluate(n => __mp.net.lobby.rname === n && document.getElementById('lRoomTitle').textContent === n &&
+    [...document.querySelectorAll('#lRoomList button .rn')].some(e => e.textContent === n), name), { what: `room named ${name} on ${p.name}` });
+  assert.ok(await B.page.evaluate(() => document.getElementById('lRenameRow').classList.contains('hidden2')), 'no rename row for a non-admin');
+  await A.page.fill('#lRenameIn', 'New Name'); await A.page.click('#lRenameBtn');
+  for (const p of [A, B, V]) await seen(p, 'New Name');
+  assert.equal(await A.page.inputValue('#lRenameIn'), '', 'the field is cleared');
+  // from the Esc menu (Ann closes her lobby first)
+  await A.page.click('#lFight');
+  await A.page.keyboard.press('Escape');
+  await waitFor(() => A.page.evaluate(() => __mp.leaveOpen), { what: 'Esc menu' });
+  assert.equal(await A.page.textContent('#lvRName'), 'New Name');
+  await A.page.fill('#lvRenameIn', "Third's-Try"); await A.page.click('#lvRenameBtn');
+  for (const p of [A, B, V]) await seen(p, "Third's-Try");
+  await waitFor(async () => (await A.page.textContent('#lvRName')) === "Third's-Try", { what: 'the menu shows the new name' });
+  // a bad name is refused with its rule and changes nothing
+  await A.page.fill('#lvRenameIn', 'a<b>'); await A.page.click('#lvRenameBtn');
+  await sleep(300);
+  assert.equal(await B.page.evaluate(() => __mp.net.lobby.rname), "Third's-Try");
+  log('rooms: renames from the lobby and from the Esc menu show on every page, list included');
+  for (const p of [A, B, V]) await p.page.context().close();
+  await srv.stop();
+}
+
+// The 10-room limit. Rooms 1-8 come from raw WebSocket clients, each with its own X-Real-IP (the server
+// trusts it here: at most 2 rooms per address), kept alive with pings; rooms 9 and 10 from two browser
+// pages. A fresh page then has CREATE ROOM disabled with the explanation, a forced create gets the
+// refusal, and when a room closes the button comes back.
+async function limitTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir, TRUST_PROXY: '1' }); servers.push(srv);
+  const raw = [];
+  const rawRoom = (n) => new Promise((res, rej) => {
+    const ws = new WebSocket(srv.wsUrl, { origin: srv.origin, headers: { 'X-Real-IP': `fd00::${n + 1}` } });
+    const timer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'ping', id: 0, ct: 0 })); }, 500);
+    ws.on('close', () => clearInterval(timer)); ws.on('error', rej);
+    ws.on('message', d => { const m = JSON.parse(d); if (m.t === 'welcome' && m.id) res({ ws, room: m.room }); });
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'create', name: `Raw${n}`, color: n % 12, room: `Raw room ${n}` })));
+  });
+  try {
+    for (let n = 0; n < 8; n++) raw.push(await rawRoom(n));
+    const A = await openPlayer(srv, 'Ann', 0, { create: 'Nine' }), B = await openPlayer(srv, 'Bob', 1, { create: 'Ten' });
+    assert.equal(await roomsOpen(srv), 10);
+    const F = await openPage(srv, 'F');
+    await waitFor(async () => (await listOf(F)).length === 10, { what: 'ten rooms in the list' });
+    assert.ok(await F.page.isDisabled('#lCreate'), 'CREATE ROOM is disabled at 10 rooms');
+    assert.match(await F.page.textContent('#lCreateNote'), /10 rooms are open, the most there can be/);
+    await F.page.fill('#lName', 'Late');
+    await F.page.evaluate(() => __mp.createRoom());          // forced: the server still says no
+    await waitFor(() => F.page.evaluate(() => /10 rooms are open/.test(document.getElementById('lErr').textContent)), { what: 'the refusal text' });
+    assert.equal(await F.page.evaluate(() => __mp.net.mode), 'viewer'); assert.equal(await roomsOpen(srv), 10);
+    // a raw admin alone leaves: its room closes at once and the button is back
+    raw[0].ws.send(JSON.stringify({ t: 'leave' }));
+    await waitFor(async () => !(await F.page.isDisabled('#lCreate')), { what: 'CREATE ROOM enabled again' });
+    assert.equal(await F.page.textContent('#lCreateNote'), '');
+    log('limit: 10 rooms (8 raw + 2 browser), CREATE ROOM disabled with its note, a forced create refused, back to enabled after one closes');
+    for (const p of [A, B, F]) await p.page.context().close();
+  } finally {
+    for (const r of raw) r.ws.close();
+    await srv.stop();
+  }
 }
 
 async function main() {
@@ -993,6 +1228,10 @@ async function main() {
     await staleBuildTest();
     await botTest();
     await watchTest();
+    await roomsTest();
+    await adminTest();
+    await renameRoomTest();
+    await limitTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');
   } finally {

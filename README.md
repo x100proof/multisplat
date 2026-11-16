@@ -1,7 +1,7 @@
 # multisplat
 
-An online multiplayer ninja arena for the browser. Up to 12 players fight in one
-neon-lit arena with swords and ninja stars. Cutting another ninja down scores
+An online multiplayer ninja arena for the browser. Up to 8 players per room fight
+in a neon-lit arena with swords and ninja stars; anyone can open a room. Cutting another ninja down scores
 a point, and you respawn 2 seconds after dying. The server is
 Node with [`ws`](https://www.npmjs.com/package/ws), the client is vanilla
 Canvas, and there is no build step. The character is Kanbei.
@@ -10,9 +10,10 @@ Canvas, and there is no build step. The character is Kanbei.
 
 ## Features
 
-- One arena for up to 12 fighters. Further players wait in a queue and are let
-  in as slots free up.
-- Drop-in play: pick a name and a colour in the lobby and press Fight.
+- Rooms: up to 10 at once, 8 fighters each (AI players included). Whoever
+  creates a room is its admin: names it, adds AI players and can hand the role
+  on. Further players wait in the room's queue and are let in as slots free up.
+- Drop-in play: pick a name, a colour and a room in the lobby and press Fight.
 - Sword combat with a chop and a follow-up sweep.
 - Long swords: a pickup that lengthens your reach until you die. The sword
   drops where its holder fell, anyone can take it, and a slash smashes one

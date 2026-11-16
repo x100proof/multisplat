@@ -140,10 +140,12 @@ test('stars: bundles of 5, 10 and 15 with odds 6 : 3 : 2 (inversely proportional
 test('stars: the snapshot packs a star pickup amount and net.js unpacks it (absent from an old server: 3)', async () => {
   const { Arena } = await import('../server/arena.js');
   const arena = new Arena({ now: () => 0, seed: 3, heartbeatMs: 0 });
-  arena.state.items.push({ id: 1, x: 305, y: 272, kind: 'star', n: 15 }, { id: 2, x: 72, y: 208, kind: 'long' }, { id: 3, x: 40, y: 272, kind: 'star' });
+  const room = arena.createRoom('Test');
+  room.state.items.push({ id: 1, x: 305, y: 272, kind: 'star', n: 15 }, { id: 2, x: 72, y: 208, kind: 'long' }, { id: 3, x: 40, y: 272, kind: 'star' });
   const msgs = [];
-  arena.connect({ ip: 'test', send: m => msgs.push(JSON.parse(m)), close: () => {} });   // a lobby viewer
-  arena.snapshot();
+  const v = arena.connect({ ip: 'test', send: m => msgs.push(JSON.parse(m)), close: () => {} });   // a lobby viewer
+  arena.onMessage(v, JSON.stringify({ t: 'view', room: room.id }));                             // who selected the room
+  room.snapshot();
   const it = msgs.filter(m => m.t === 'snapshot').at(-1).it;
   assert.deepEqual(it, [[1, 305, 272, 1, 15], [2, 72, 208, 0], [3, 40, 272, 1, 3]]);
   // public/net.js's unpackItems (a module-private helper: evaluated from its source)

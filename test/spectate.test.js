@@ -2,6 +2,7 @@
 // watcher relies on (a lobby viewer gets every snapshot and event, takes no slot, and its input is
 // ignored), checked on the socket-less Arena with fake connections and a fake clock.
 import test from 'node:test';
+import { roomOf, withRoom } from './lib.js';
 import assert from 'node:assert/strict';
 import { Arena } from '../server/arena.js';
 import { KEY, TICK_MS, PW, PH } from '../shared/constants.js';
@@ -51,31 +52,33 @@ test('a watcher (lobby viewer) gets snapshots and events with a full arena, take
   const conn = () => {
     const c = { msgs: [] };
     c.conn = arena.connect({ ip: 'test', send: s => c.msgs.push(JSON.parse(s)), close: (code) => { c.closed = code; } });
-    c.say = m => arena.onMessage(c.conn, JSON.stringify(m));
+    c.say = m => arena.onMessage(c.conn, JSON.stringify(withRoom(arena, m)));
     return c;
   };
   const tick = n => { for (let i = 0; i < n; i++) { t += TICK_MS; arena.tick(); } };
   const a = conn(), b = conn(), q = conn();
   a.say({ t: 'hello', name: 'Ann', color: 0 });
+  const w = conn();                                   // pressed Watch: no hello at all,
+  w.say({ t: 'view', room: 1 });                      // only the room selected (SPEC §17)
   b.say({ t: 'hello', name: 'Bo', color: 1 });
   q.say({ t: 'hello', name: 'Cy', color: 2 });
   assert.equal([...q.msgs].reverse().find(m => m.t === 'welcome').state, 'queue', 'the arena is full: a queue');
-  const w = conn();                                   // pressed Watch: no hello at all
   tick(60);
   const snaps = w.msgs.filter(m => m.t === 'snapshot');
   assert.ok(snaps.length >= 25, 'snapshots at 30 Hz');
   assert.equal(snaps.at(-1).seq, -1); assert.equal(snaps.at(-1).me, undefined, 'no own player');
   assert.deepEqual(snaps.at(-1).p.map(p => p[0]).sort(), [1, 2], 'every fighter, positions included');
   assert.ok(w.msgs.some(m => m.t === 'event' && m.ev.some(e => e.type === 'spawn')), 'events too');
-  assert.equal(arena.activeCount(), 2);
+  assert.equal(roomOf(arena).activeCount(), 2);
   const lob = [...w.msgs].reverse().find(m => m.t === 'lobby');
   assert.equal(lob.players.length, 2); assert.equal(lob.queue.length, 1, 'the watcher is in neither list');
+  assert.equal(lob.rooms[0].watch, 1, 'the room list counts the watcher');
   // input from a watcher is ignored (not a kick: a well-formed message), and moves nobody
-  const before = arena.state.players.map(p => [p.id, p.x]);
+  const before = roomOf(arena).state.players.map(p => [p.id, p.x]);
   for (let s = 1; s <= 30; s++) { w.say({ t: 'input', seq: s, keys: KEY.RIGHT | KEY.RUN }); tick(1); }
   assert.equal(w.closed, undefined, 'still connected');
-  assert.deepEqual(arena.state.players.map(p => [p.id, p.x]), before, 'nobody moved');
-  assert.equal(arena.activeCount(), 2);
+  assert.deepEqual(roomOf(arena).state.players.map(p => [p.id, p.x]), before, 'nobody moved');
+  assert.equal(roomOf(arena).activeCount(), 2);
   // chat from a watcher is ignored too
   const chats = () => [a, b, q, w].flatMap(c => c.msgs).filter(m => m.t === 'event' && m.ev.some(e => e.type === 'chat')).length;
   const n = chats(); w.say({ t: 'chat', text: 'hi' }); tick(1);

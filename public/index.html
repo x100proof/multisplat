@@ -278,6 +278,62 @@
   #lFoot a { color: #9ad8ff; padding: 6px 0; display: inline-block; }
   #lFoot .touchhelp, body.touchui #lFoot .keyshelp { display: none; }
   body.touchui #lFoot .touchhelp { display: inline; }
+  /* rooms (SPEC §17): the list, Create room, the selected room's panel */
+  #lRoomList { list-style: none; margin: 0; padding: 0; max-height: 24vh; overflow-y: auto; }
+  #lRoomList li.empty { color: #9ad8ff; font-size: 13px; padding: 6px 0; }
+  #lRoomList button { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px; margin: 2px 0; padding: 6px 9px; box-sizing: border-box;
+    font: inherit; font-size: 14px; color: #d1f7ff; text-align: left; background: rgba(0,0,0,.4); border: 1px solid rgba(5,217,232,.35); border-radius: 6px; cursor: pointer; touch-action: manipulation; }
+  #lRoomList button:hover { background: rgba(5,217,232,.12); }
+  #lRoomList button[aria-pressed="true"] { border-color: #f9f871; box-shadow: 0 0 10px rgba(249,248,113,.45); }
+  #lRoomList .rn { flex: 1; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lRoomList .ra { color: #9ad8ff; font-size: 12px; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lRoomList .rc { color: #f9f871; font-weight: 700; white-space: nowrap; }
+  #lRoomList .rw { color: #9ad8ff; font-size: 12px; white-space: nowrap; }
+  .rowin { display: flex; gap: 6px; margin-top: 6px; }
+  .rowin input { touch-action: manipulation; flex: 1; min-width: 0; box-sizing: border-box; font: inherit; font-size: 16px; padding: 7px 9px; color: #fff;
+    background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.3); border-radius: 5px; outline: none; }
+  .rowin input:focus { border-color: #05d9e8; box-shadow: 0 0 8px rgba(5,217,232,.6); }
+  .rowin button { min-height: 44px; padding: 0 12px; font: inherit; font-weight: 800; letter-spacing: .05em; color: #05d9e8; background: rgba(0,0,0,.45);
+    border: 2px solid #05d9e8; border-radius: 6px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
+  .rowin button:disabled { opacity: .35; cursor: not-allowed; }
+  #lCreateNote, #lRoomsNote { font-size: 12px; color: #9ad8ff; margin-top: 4px; }
+  #lCreateNote.full { color: #ff6ec7; font-weight: 700; }
+  #lRoom { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(5,217,232,.3); }
+  #lRoom.hidden, .hidden2 { display: none !important; }
+  #lRoomHead { display: flex; align-items: center; gap: 8px; }
+  #lRoomTitle { flex: 1; font-size: 18px; font-weight: 800; color: #f9f871; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lBack { min-height: 36px; font: inherit; font-size: 12px; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.4); border-radius: 6px; cursor: pointer; padding: 0 10px; }
+  #lBotRO, #lvBotRO { font-size: 12px; color: #9ad8ff; }
+  /* the admin's marker and the small "Make admin" button next to other humans in a roster */
+  .adm { color: #f9f871; font-size: 11px; font-weight: 800; letter-spacing: .04em; margin-left: 4px; }
+  button.mkadm { flex: none; font: inherit; font-size: 11px; font-weight: 700; padding: 2px 7px; min-height: 26px; color: #f9f871; background: transparent;
+    border: 1px solid rgba(249,248,113,.55); border-radius: 5px; cursor: pointer; touch-action: manipulation; }
+  body.touchui button.mkadm { min-height: 36px; padding: 2px 10px; }
+  button.mkadm:hover { background: rgba(249,248,113,.12); }
+  /* the Esc menu's room panel (SPEC §17) */
+  #lvRoom { text-align: left; margin: 0 0 12px; font-size: 13px; max-height: 50vh; overflow-y: auto; }
+  #lvRoom .rt { color: #9ad8ff; } #lvRoom .rt b { color: #f9f871; }
+  #lvRoom ul { list-style: none; margin: 6px 0 0; padding: 0; }
+  #lvRoom li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  #lvRoom li .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  #lvRoom li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #lvBots { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+  #lvBots button { margin: 0; width: 44px; height: 44px; padding: 0; font-size: 22px; font-weight: 800; }
+  #lvBots button:disabled { opacity: .3; cursor: not-allowed; }
+  #lvBotN { min-width: 2ch; text-align: center; font-weight: 800; color: #fff; }
+  #lvErr { color: #ff6ec7; font-size: 12px; min-height: 1.2em; margin: 0 0 8px; }
+  #leave #lvYes:disabled { opacity: .35; cursor: not-allowed; }
+  #leave .rowin button { margin: 0; }
+  /* the confirm dialog for an admin transfer: above everything, Cancel focused, 44 px targets */
+  #adm { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 9; background: rgba(5,3,14,.7); touch-action: none; }
+  #adm.hidden { display: none; }
+  #adm .box { width: min(380px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px; border: 2px solid #f9f871; border-radius: 10px; background: rgba(13,8,32,.97);
+    box-shadow: 0 0 24px rgba(249,248,113,.35); text-align: center; color: #d1f7ff; font: 15px ui-monospace, Menlo, Consolas, monospace; }
+  #adm p { margin: 0 0 14px; } #adm p b { color: #f9f871; }
+  #adm button { min-height: 44px; min-width: 110px; margin: 0 6px; padding: 8px 16px; border-radius: 6px; border: 2px solid #05d9e8; background: transparent;
+    color: #d1f7ff; font: inherit; font-weight: 800; cursor: pointer; touch-action: manipulation; }
+  #adm #admYes { border-color: #f9f871; color: #f9f871; }
+  #adm button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   @media (max-height: 460px) { #lobby { align-items: flex-start; } #lobby .card { padding: 10px 14px; } #lobby h1 { font-size: 26px; margin-bottom: 4px; } }
 </style>
 </head>
@@ -310,7 +366,7 @@
 <div id="howto" class="hidden" role="dialog" aria-modal="true" aria-labelledby="hwTitle">
   <div class="box">
     <h2 id="hwTitle">How to play</h2>
-    <p>Everyone fights in one arena. Cut another ninja down to score a point. The scores for everyone are along the top. You respawn 2 seconds after dying.</p>
+    <p>Fights happen in rooms of up to 8 ninjas. Cut another ninja down to score a point. The scores for everyone are along the top. You respawn 2 seconds after dying.</p>
     <h3>Controls</h3>
     <table>
       <tr class="keysonly"><td>← →</td><td>Move. Hold Shift to run.</td></tr>
@@ -336,8 +392,10 @@
     <p>A glowing blade sometimes appears in the arena. Walk into it to take it: your sword reaches further until you die. A ninja with a long sword carries a longer, glowing scabbard. When they are killed the sword drops where they fell, and anyone can take it. Slash a sword lying on the ground to smash it.</p>
     <h3>Ninja stars</h3>
     <p>Spinning stars appear often. Each pickup gives 5, 10 or 15 (the number floats over it; big bundles are rarer), and you can carry 30. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
+    <h3>Rooms</h3>
+    <p>The lobby lists the open rooms (at most 10). Pick one to see who is in it, then press Fight or Watch. If it is full you wait in its queue. Create room makes a new one and you are its admin: you can name it, add or remove AI players (they take slots: 8 in all) and, with the small Make admin button next to a player, hand the role to someone else (it asks first). The admin can't leave while others are in the room without making someone admin first. If the admin's connection is lost for good, the player who has been there longest takes over. A room closes when its last player leaves.</p>
     <h3>Watching</h3>
-    <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the arena is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, and the Leader button to go back to following the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
+    <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the room is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, and the Leader button to go back to following the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
     <h3>Privacy</h3>
     <p>To help fix problems, the server keeps the last hour of diagnostic logs from your browser (no keystrokes or chat text), with your IP address, your name and the id shown in the lobby.</p>
     <div class="foot"><span>The fight carries on while this is open.</span><button id="hwClose">Close</button></div>
@@ -347,7 +405,20 @@
   <div class="box">
     <h2 id="lvTitle">Leave the fight?</h2>
     <p id="lvNote">Your score will be lost.</p>
+    <div id="lvRoom">
+      <div class="rt">Room: <b id="lvRName"></b></div>
+      <div id="lvRenameRow" class="rowin"><input id="lvRenameIn" type="text" maxlength="20" autocomplete="off" spellcheck="false" placeholder="room name" aria-label="Room name"><button id="lvRenameBtn" type="button">RENAME</button></div>
+      <div id="lvBots"><span>AI players</span><span id="lvBotRO"></span><span class="ctl"><button id="lvBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lvBotN">0</span><button id="lvBotInc" type="button" aria-label="More AI players">+</button></span></div>
+      <ul id="lvPlayers"></ul>
+    </div>
+    <div id="lvErr"></div>
     <button id="lvYes">Leave</button><button id="lvNo">Stay</button>
+  </div>
+</div>
+<div id="adm" class="hidden" role="alertdialog" aria-modal="true" aria-labelledby="admText">
+  <div class="box">
+    <p id="admText">Make <b id="admWho"></b> the admin of <b id="admRoom"></b>? You will lose admin.</p>
+    <button id="admNo" type="button">Cancel</button><button id="admYes" type="button">Confirm</button>
   </div>
 </div>
 <div id="lobby">
@@ -357,14 +428,23 @@
     <input id="lName" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="ninja name">
     <label>Colour</label>
     <div id="lColors"></div>
-    <div id="lActs"><button id="lFight">FIGHT</button><button id="lWatch" type="button">WATCH</button></div>
-    <div id="lWatchNote">Watch: no name needed and it takes no slot, even when the arena is full. Click or tap a ninja to follow them.</div>
+    <label id="lRoomsLabel">Rooms</label>
+    <div id="lRoomsNote">Pick a room to see who is in it, then Fight or Watch. Or create your own: you will be its admin (name it, add AI players, hand admin on).</div>
+    <ul id="lRoomList"></ul>
+    <div id="lCreateRow" class="rowin"><input id="lRoomName" type="text" maxlength="20" autocomplete="off" spellcheck="false" placeholder="room name (optional)" aria-label="New room name"><button id="lCreate" type="button">CREATE ROOM</button></div>
+    <div id="lCreateNote"></div>
     <div id="lErr"></div>
-    <div id="lInfo"></div>
-    <div id="lBots"><label><span class="dot"></span>AI players</label><div class="ctl"><button id="lBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lBotN" aria-live="polite">0</span><button id="lBotInc" type="button" aria-label="More AI players">+</button></div></div>
-    <label>In the arena</label>
-    <ul id="lPlayers"></ul>
-    <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
+    <div id="lRoom" class="hidden">
+      <div id="lRoomHead"><span id="lRoomTitle"></span><button id="lBack" type="button">ALL ROOMS</button></div>
+      <div id="lRenameRow" class="rowin"><input id="lRenameIn" type="text" maxlength="20" autocomplete="off" spellcheck="false" placeholder="room name" aria-label="Room name"><button id="lRenameBtn" type="button">RENAME</button></div>
+      <div id="lActs"><button id="lFight">FIGHT</button><button id="lWatch" type="button">WATCH</button></div>
+      <div id="lWatchNote">Watch: no name needed and it takes no slot, even when the room is full. Click or tap a ninja to follow them.</div>
+      <div id="lInfo"></div>
+      <div id="lBots"><label><span class="dot"></span>AI players</label><span id="lBotRO"></span><div class="ctl"><button id="lBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lBotN" aria-live="polite">0</span><button id="lBotInc" type="button" aria-label="More AI players">+</button></div></div>
+      <label>In the room</label>
+      <ul id="lPlayers"></ul>
+      <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
+    </div>
     <div id="lStatus"></div>
     <div id="lFoot"><span class="keyshelp">← → move · ↑ jump · Shift run · Space slash · X throw star · Tab scores · C chat · F full screen · Esc leave</span><span class="touchhelp">◀ ▶ move · ⤒ jump · ⚔ slash · ✦ throw star · » run on/off · 💬 chat</span><span><a href="#" id="lHelp">How to play</a><span id="lId" title="Your id in the diagnostic log: quote it when you report a problem"></span></span></div>
   </div>

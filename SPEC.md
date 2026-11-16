@@ -413,6 +413,12 @@ Write it for a stranger hosting their own copy:
   report from a page and asserts it is stored with the server's view of that connection and is
   readable through `tools/debug.js`. It also checks the word id in the lobby and in the report,
   and that `tools/debug.js log <word>` prints that page's streamed entries (§13.5).
+- `test/rooms.test.js` (§17): create and its limits (10 rooms, 2 per address, the create bucket,
+  names), one room per connection, hello needs a room, `view`, 8 slots per room, isolation of
+  snapshots, events and chat, per-room names and colours, admin transfer validation, the admin's
+  leave rule and the closing room, the grace-expiry hand-over (and a resume keeping the role), rename,
+  and the admin views, events and logs carrying room ids. `test/multiclient.js` creates and joins
+  rooms in every section and has browser sections for rooms (§17).
 - `test/logs.test.js`: word ids (assignment, validation, persistence via the URL and `hello`),
   `log` validation and rate limits, the one-hour pruning on a fake clock, the memory caps, admin
   lookup by word, name or IP, and that the IP is never taken from the payload.
@@ -564,12 +570,14 @@ tests passing and a commit.
 Server-side bots that fight like players, added and removed from the lobby.
 
 - **Lobby control:** an "AI players" row with − / count / + buttons (44 px touch targets).
-  Anyone in the lobby, viewer or player, may press them. The count is server state: a press
+  **Only the room's admin (§17) may press them** (in the lobby and in the Esc menu); everyone else
+  sees the count read-only, and the server refuses (`refused`, no kick) a non-admin's request.
+  Bots are per room. The count is server state: a press
   sends a request and the shown number is always the server's, live on every page (it rides in
   every `lobby` message as `bots` with the limit `botMax`). − is disabled at 0; + at the limit or
-  when the arena is full.
-- **Slots:** a bot holds an arena slot exactly like a human, so every bot is one human fewer in
-  the arena. At most **slots − 1** (11) bots, so a human can always get in once a slot frees. +
+  when the room is full.
+- **Slots:** a bot holds a room slot exactly like a human, so every bot is one human fewer in
+  the room. At most **slots − 1** (7) bots, so a human can always get in once a slot frees. +
   is refused when no slot is free: bots never queue, and humans never evict bots (a human who
   finds the arena full queues as usual). − removes the most recently added bot, and its slot goes
   to the first queued human.
@@ -599,11 +607,11 @@ Server-side bots that fight like players, added and removed from the lobby.
 - **Security (a public write path that spends tick time):** the message goes through the usual
   10/s bucket, then a per-connection bucket (burst 4, one more every 250 ms; an empty bucket drops
   the message and counts toward the flood kick), then an arena-wide budget charged per bot
-  actually added or removed (burst 12, then 8 a second), so many connections together cannot
-  churn spawns. The number of bots is capped at 11, so their per-tick cost is bounded. Bots have
+  actually added or removed in any room (burst 12, then 8 a second, server-wide), so many admins together cannot
+  churn spawns. The number of bots is capped at 7 per room (70 in all), so their per-tick cost is bounded. Bots have
   no socket, no IP and no resume token: they never count toward `MAX_PER_IP`/`MAX_CONN` or the
   per-IP record cap, and nothing a client sends can address one.
-- **Debugging:** `adminState` carries `bots` (the count) and lists bots with `bot: true`, state
+- **Debugging:** each room in `adminState` carries `bots` (the count) and lists bots with `bot: true`, state
   `play (bot)` and `conn: null`; `tools/debug.js state` shows them. Logs: `bot-add` and `leave …
   reason=bot removed`.
 - **Tests:** `test/bots.test.js` (limits, the reserved colour, slots, the brain's inputs, a 60 s
@@ -615,12 +623,12 @@ Server-side bots that fight like players, added and removed from the lobby.
 Watch the fight without joining, and follow any ninja.
 
 - **Lobby:** a **Watch** button beside Fight (same row, the quieter outline style, both at least 48 px
-  tall), with a line under them: "Watch: no name needed and it takes no slot, even when the arena is
-  full. Click or tap a ninja to follow them." Watch needs no name, is open with a full arena or a
-  queue, and is disabled only for a page that is already in the arena or the queue.
-- **No protocol change.** A watcher is an ordinary lobby viewer with the lobby closed: it sends no
-  `hello`, has no record, takes no slot and no queue place, and is not in the roster. The server
-  already sends every viewer each snapshot and event; a viewer's `input` (well-formed) and `chat`
+  tall), with a line under them: "Watch: no name needed and it takes no slot, even when the room is
+  full. Click or tap a ninja to follow them." Watch applies to the selected room (§17), needs no name, is open with a full room or a
+  queue, and is disabled only for a page that is already in a room or its queue.
+- **Protocol.** A watcher is an ordinary lobby viewer with the lobby closed: it sends no
+  `hello`, has no record, takes no slot and no queue place, and is not in the roster. Its `view`
+  (§17) already makes the server send it each snapshot and event of that room; a viewer's `input` (well-formed) and `chat`
   are ignored, never kicked. A watcher counts toward `MAX_CONN` / `MAX_PER_IP` like any open
   connection (the existing caps), and must keep pinging like one (§6.4).
 - **Screen:** the arena fills the screen as in play. There are no movement buttons, no chat, no HP,
@@ -650,3 +658,70 @@ Watch the fight without joining, and follow any ninja.
   `leaderOf`, `followTarget`, `cycleTarget`); `test/spectate.test.js` covers them and the server
   facts above on the socket-less arena; `watchTest` in `test/multiclient.js` watches a full arena
   with a queue, clicks a ninja, switches with the keys and goes back with Esc.
+
+## 17. Rooms
+
+Players fight in rooms instead of one global arena. (This replaces "one global arena, no rooms" in §1.)
+
+- **Rooms and limits.** Anyone can create a room; **at most 10** are open at once. Each has **8 slots**,
+  AI players included, its own FIFO queue, scores, pickups, stars, bots, chat, events and snapshots. There
+  is no permanent room: a room exists while it has a human. Room ids count up from 1 and are never reused.
+- **Lobby.** The lobby lists the open rooms (name, admin's name, fighters/8, queue, watchers) and has a
+  **Create room** field and button (name optional). With 10 rooms the button is disabled with an
+  explanation; with none the list says "No rooms yet — create one." Selecting a room shows its roster,
+  queue, AI row, Fight and Watch, which apply to that room; "All rooms" goes back to the plain list. A
+  lobby visitor sees the arena of the room it selected behind the lobby (and none without one).
+- **Creating.** The creator joins the new room at once as a player and is its **admin**; the lobby stays
+  open on the room so the admin can name it and add AI players, then Fight goes in. A blank name gives
+  "<admin name>'s room". Room names use the player-name rules (trimmed, double spaces collapsed, allowlist
+  `[A-Za-z0-9 _-]`) plus the apostrophe, **1–20 characters**, checked on both sides. Names need not be
+  unique (the list shows the admin too).
+- **The admin** (one per room, always a human in it, playing or queued):
+  - adds and removes the room's AI players (§15) and **renames** the room, from the lobby (while the room
+    is selected) or the Esc menu;
+  - **hands the role on** with a small "Make admin" button next to every other human's name (not bots,
+    not oneself) in the room roster in the lobby and in the Esc menu, visible to the admin only. Every tap
+    opens a confirmation dialog: "Make <name> the admin of <room>? You will lose admin." with Cancel
+    (focused, so a stray Enter does nothing; Esc also cancels) and Confirm, 44 px targets. Only Confirm
+    sends the request. The server accepts it only from the current admin, for another human record of
+    the same room (playing, queued, or away inside its resume grace). Everyone in the room is told
+    (event `admin`) and the new admin's controls appear at once;
+  - **cannot leave for good without handing over** while another human is in the room: the Esc menu then
+    says "Make someone admin first", lists the room's humans with Make admin buttons and disables Leave
+    (the server refuses such a `leave` too). An admin who is the only human is warned that leaving closes
+    the room; confirming closes it.
+  - If the admin's connection drops, the role stays through the 5 s resume grace (§6.4). When the admin
+    is gone for good (the grace ran out, a kick, or replaced), the role passes automatically to the human
+    who has been in the room longest, preferring connected ones (event `admin` with `why: 'auto'`).
+- **Closing.** A room closes when its last human is gone for good (leave, kick or grace expiry; a human
+  away inside the grace keeps it open). Its bots are removed. Everyone looking at it (watchers, lobby
+  visitors who selected it) gets `closed` and goes back to the room list with a short message.
+- **Per room:** name de-duplication and passing a freed name on (§9), colour uniqueness (§9), the queue
+  and promotion, chat (§9), the AI players (§15), watching (§16). **Global:** connection caps
+  (`MAX_PER_IP`, `MAX_CONN`), the per-address record cap, resume tokens (a resume returns to the right
+  room), the heartbeat, the input and message buckets, the bots' server-wide budget. One server timer steps
+  every room once per tick, so all rooms share one tick number.
+- **Abuse limits (public write paths).** A connection plays in at most one room, so it is admin of at
+  most one (a `create` or `hello` from a connection already in a room is a `protocol` kick). At most **2
+  open rooms created from one address** (the client IP as in §10, `TRUST_PROXY` included). Creating is
+  limited per connection (burst 2, then one per 15 s); renames and admin transfers share another bucket
+  (burst 4, then one per 2 s); a request over a bucket is refused and counts toward the flood kick.
+- **Protocol** (version 2; an older page reloads through the build check, §10):
+  - client → server: `{t:'create', name, color, room}` (create a room named `room`, '' for the default,
+    and join it as admin); `{t:'hello', name, color, room: id}` (join; a resume `hello` with its token
+    needs no room); `{t:'view', room: id|0}` (the room a lobby visitor looks at; 0 for none);
+    `{t:'rename', name}`; `{t:'admin', id}`; `bots` and `leave` as before with the admin rules above.
+    Wrong types are `malformed` kicks (a missing or non-integer `room` in a fresh `hello` is `bad hello`);
+  - server → client: `lobby` carries `rooms: [{id, name, admin, n, cap, bots, q, watch}]`, `maxRooms`, and
+    for the room the connection plays in or selected `room`, `rname`, `admin` (the admin's player id) plus
+    the existing roster fields; the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
+    what, why}` turns a request down without a kick (`create`: `full` | `ip` | `rate` | `name`; `join`:
+    `gone`; `leave`: `admin`; `rename`: `admin` | `name` | `rate`; `admin`: `admin` | `target` | `rate`;
+    `bots`: `admin`); `{t:'closed', room, name, why}`; events `{type:'admin', id, from, why}` and
+    `{type:'room', id, name}`.
+- **Debugging.** `/state` and `tools/debug.js state` show every room (id, name, admin, players, bots,
+  queue, watchers, pickups, its share of the tick); ring events and log lines of a room carry its id
+  (`room-create`, `room-rename`, `admin`, `room-close`, `refused-req` …); streamed client log entries are
+  tagged with the room (§13.5). The admin listener stays loopback-only.
+- **Help.** How to play has a "Rooms" section; the lobby explains rooms in one line above the list.
+- **CPU.** 10 rooms × 8 fighters (one human and 7 bots each) must stay well inside the 16.7 ms tick.

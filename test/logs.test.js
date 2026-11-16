@@ -2,6 +2,7 @@
 // {t:'log'} validation and rate limits, the one-hour pruning (fake clock), the memory caps, and the
 // admin lookup by word, name or IP. The IP is always the server's view, never the payload's.
 import test from 'node:test';
+import { roomOf, withRoom } from './lib.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { Arena, KICK } from '../server/arena.js';
@@ -18,7 +19,7 @@ function setup({ caps = {} } = {}) {
   const conn = (ip = 'ip-a', word) => {
     const c = { msgs: [], closed: null };
     c.conn = arena.connect({ ip, word, send: s => c.msgs.push(JSON.parse(s)), close: (code, reason) => { c.closed = { code, reason }; } });
-    c.say = m => arena.onMessage(c.conn, typeof m === 'string' ? m : JSON.stringify(m));
+    c.say = m => arena.onMessage(c.conn, typeof m === 'string' ? m : JSON.stringify(withRoom(arena, m)));
     c.word = c.msgs.find(m => m.t === 'welcome').w;
     return c;
   };

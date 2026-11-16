@@ -88,3 +88,14 @@ export async function waitFor(fn, { timeout = 10000, every = 50, what = 'conditi
     await sleep(every);
   }
 }
+
+// Unit-test shim for rooms (SPEC §17). The arena tests were written for the single global arena and
+// send a bare hello; withRoom() gives such a hello the id of the newest open room, creating one
+// ("Test", no admin yet) when none is open, so the first human to join it becomes its admin (as the
+// creator would). roomOf(arena) is that newest room.
+export const roomOf = arena => [...arena.rooms.values()].at(-1);
+export function withRoom(arena, m) {
+  if (!m || typeof m !== 'object' || m.t !== 'hello' || 'room' in m) return m;
+  const r = roomOf(arena) || arena.createRoom('Test');
+  return { ...m, room: r.id };
+}

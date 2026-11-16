@@ -345,7 +345,18 @@ const sfx = {
   item: (v = 1) => { tone(1568, .5, 'sine', 2093, .035 * v); tone(2349, .4, 'sine', null, .02 * v, .12); },
   // ninja stars (SPEC §5.2). Throw: a short airy whip with a rising whistle; hit: a hard metallic
   // tick and a dull thud; pickup: three quick bright clinks (steel on steel)
-  throw: (v = 1) => { noise(.09, .14 * v, 0, 7000); tone(900, .1, 'triangle', 2200, .04 * v); },
+  // a ninja star leaving the hand: a "swish" of air, band-passed noise sweeping up and back down
+  throw: (v = 1) => {
+    if (!AC || muted || QS.has('nosfx')) return;
+    const d = .24, t = AC.currentTime, n = AC.sampleRate * d | 0, buf = AC.createBuffer(1, n, AC.sampleRate), ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = Math.random() * 2 - 1;
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
+    src.buffer = buf; f.type = 'bandpass'; f.Q.value = 1.6;
+    f.frequency.setValueAtTime(700, t); f.frequency.exponentialRampToValueAtTime(5200, t + .09); f.frequency.exponentialRampToValueAtTime(1400, t + d);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(.55 * v, t + .05); gn.gain.exponentialRampToValueAtTime(.0001, t + d);
+    src.connect(f).connect(gn).connect(audioOut()); src.start(t);
+    tone(1500, .12, 'triangle', 3200, .03 * v);
+  },
   starHit: (v = 1) => { tone(2600, .05, 'square', 1200, .05 * v); noise(.08, .22 * v, 0, 4500); tone(180, .1, 'square', 60, .06 * v, .01); },
   starPickup: (v = 1) => { [2093, 2637, 3136].forEach((f, i) => { tone(f, .09, 'square', null, .025 * v, i * .05); tone(f * 1.5, .07, 'sine', null, .03 * v, i * .05 + .01); }); noise(.06, .06 * v, 0, 8000); },
   starWall: (v = 1) => { tone(3200, .04, 'square', 1800, .025 * v); noise(.04, .08 * v, 0, 6000); },
@@ -651,7 +662,7 @@ function playFx(p) {
   if (p.fx & FX.SLASH) sfx.slash();
   if (p.fx & FX.BONK) sfx.bonk();
   if (p.fx & FX.LAND && p.standOn != null) sfx.stomp();
-  if (p.fx & FX.THROW) { sfx.throw(p.id === ME ? 1 : .6); throwAnims.set(p.id, S.tick); }
+  if (p.fx & FX.THROW) { sfx.throw(p.id === ME ? 1 : .7); throwAnims.set(p.id, S.tick); dbg('audio', 'throw swish', { id: p.id }); }
 }
 
 // Online: sample input, predict our player and queue the input for the server (sent per frame).

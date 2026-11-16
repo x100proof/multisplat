@@ -8,7 +8,7 @@ Status: **M6** (in progress). This covers:
 - client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3),
 - long-sword pickups (M5, SPEC §5.1): sim, item points, protocol, client art and SFX,
 - M6 changes: leaving with Escape, no spike traps in the arena (§3), the 5 s heartbeat and resume
-  window (§6.4).
+  window (§6.4), scores for everyone along the top (§9).
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -640,7 +640,18 @@ editable physics.
     the shipped arena has none, so spike drawing and stains never show) / `✕ B (left)` without a
     killer, last 5, held 5 s then faded over 1.5 s;
   - the scoreboard while Tab is held: every player by kills, with deaths and the queue length;
-  - on touch screens a small always-visible top 3, top right (the feed moves above the buttons).
+  - **the score strip** (`#strip`, `stripRows`): every player in the arena as a chip (colour dot,
+    name, score), ordered by score (then fewer deaths, then id), our own chip highlighted (cyan) and
+    away players dimmed. It sits across the top of `#stage` (the whole screen, so on a wide phone it
+    also uses the bars beside the arena) and shows whenever the lobby is closed, on desktop and touch,
+    online and offline. Chips share the width equally up to 13em each, and names ellipsize, so 12
+    fit at 960×576 and 844×390. Names go in with `textContent` (`span()`). The standings are checked
+    every 100 ms and the strip is rebuilt only when the key (ids, names, colours, scores, order, away,
+    our id) changed (`__mp.strip.builds` counts rebuilds). It replaced the phones' top-3 widget.
+  - the top of the screen is laid out with CSS variables on `#stage`: `--sh` (strip height), `--hf`
+    (status bar font) and `--top` (below the status bar). The status bar `#hud` (HP left, score right)
+    sits under the strip, and the kill feed (desktop) and the touch `#tbar` start at `--top`; on touch
+    the feed sits above the buttons.
 
   The lobby's info line turns pink when the arena is full ("you will be #n in the queue"), and a
   numbered queue list marks our own place.
@@ -757,6 +768,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - asserts the kill feed shows `killer ✂ victim` on all pages (`⚔` if a fighter had picked up a long
     sword on the way),
   - asserts the kill (same seed), the score and the respawn on all pages,
+  - asserts the score strip on all pages: three chips, the killer first with its point, our own chip
+    the only highlighted one, text-only names, the strip above the HP, score and feed, and no
+    rebuilds without data changes,
   - waits until the kill's gore has settled on every page and asserts the same gore fingerprint
     everywhere (and that over 100 landings went into it),
   - drops the killer's socket and asserts the resume keeps id and score on every page,

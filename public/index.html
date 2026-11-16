@@ -20,8 +20,27 @@
   #stage.rot { inset: auto; top: 0; transform-origin: 0 0; transform: rotate(90deg); }
   #wrap { position: relative; }
   canvas { display: block; }
-  #hud { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: space-between;
-         padding: .4em .8em; font-weight: 700; font-size: clamp(11px, 2.2vw, 20px);
+  /* The top of the screen, from the top down: the score strip (every player, across the whole
+     stage, so on a wide phone it also uses the bars beside the arena), then the status bar (HP left,
+     score right), then the kill feed on the right. --sh is the strip's height, --hf the status bar's
+     font size, --top where the things under the status bar start. */
+  #stage { --sh: clamp(17px, 2.6vw, 24px); --hf: clamp(11px, 2.2vw, 20px); --top: calc(var(--sh) + var(--hf) * 1.3 + 10px); }
+  /* scores for everyone along the top (SPEC §9): colour dot, name, score; ordered by score. Chips
+     share the width equally (up to a cap), so a short name is never cut for a long one's sake. */
+  #strip { position: absolute; left: 0; right: 0; top: 0; height: var(--sh); display: none; justify-content: center; gap: 3px;
+           padding: 2px 4px 0; box-sizing: border-box; pointer-events: none; font-weight: 700; z-index: 2;
+           font-size: clamp(9px, 1.3vw, 13px); text-shadow: 1px 1px 0 #000; }
+  body:not(.inlobby) #strip:not(:empty) { display: flex; }
+  #strip .chip { display: flex; align-items: center; gap: .25em; min-width: 0; flex: 1 1 0; max-width: 13em; padding: 0 .35em;
+                 box-sizing: border-box; background: rgba(5,3,10,.55); border: 1px solid rgba(255,255,255,.12); border-radius: 4px;
+                 color: #cfd8e6; white-space: nowrap; }
+  #strip .chip.me { background: rgba(5,217,232,.22); border-color: #05d9e8; color: #fff; box-shadow: 0 0 6px rgba(5,217,232,.6); }
+  #strip .chip.away { opacity: .55; }
+  #strip .dot { width: .6em; height: .6em; border-radius: 50%; flex: none; }
+  #strip .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #strip .sc { color: #f9f871; flex: none; }
+  #hud { position: absolute; left: 0; right: 0; top: var(--sh); display: flex; justify-content: space-between;
+         padding: .3em .8em; font-weight: 700; font-size: var(--hf);
          color: #d1f7ff; text-shadow: 0 0 6px #05d9e8, 2px 2px 0 #000; pointer-events: none; }
   #hHp.low { color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d, 2px 2px 0 #000; }
   #msg { position: absolute; left: 0; right: 0; top: 38%; text-align: center; pointer-events: none;
@@ -30,7 +49,7 @@
   #msgSub { position: absolute; left: 0; right: 0; top: calc(38% + clamp(22px, 5.5vw, 54px)); text-align: center; pointer-events: none;
             font-weight: 700; font-size: clamp(11px, 2vw, 18px); color: #d1f7ff; text-shadow: 0 0 6px #05d9e8, 2px 2px 0 #000; }
   /* kill feed (SPEC §9): top right under the score, last 5, fading out */
-  #feed { position: absolute; right: .8em; top: 2.4em; display: flex; flex-direction: column; align-items: flex-end; gap: .15em;
+  #feed { position: absolute; right: .8em; top: var(--top); display: flex; flex-direction: column; align-items: flex-end; gap: .15em;
           pointer-events: none; font-weight: 700; font-size: clamp(9px, 1.6vw, 15px); text-shadow: 0 0 4px #000, 1px 1px 0 #000; }
   #feed > div { background: rgba(5,3,10,.55); padding: .1em .5em; border-radius: 4px; white-space: nowrap; }
   #feed .x { color: #ff1f1f; } #feed .how { color: #999; font-weight: 400; }
@@ -40,18 +59,14 @@
            background: rgba(10,6,18,.86); border: 1px solid rgba(5,217,232,.5); border-radius: 8px; padding: .5em .8em;
            font-size: clamp(10px, 1.8vw, 16px); pointer-events: none; box-shadow: 0 0 18px rgba(176,38,255,.4); }
   #board.hidden { display: none; }
-  #board .row, #mini .row { display: flex; align-items: center; gap: .6em; padding: .1em 0; }
+  #board .row { display: flex; align-items: center; gap: .6em; padding: .1em 0; }
   #board .head { color: #9ad8ff; font-size: .75em; letter-spacing: .08em; border-bottom: 1px solid rgba(255,255,255,.15); margin-bottom: .2em; }
-  #board .me, #mini .me { color: #fff; font-weight: 800; }
-  #board .dot, #mini .dot { width: .7em; height: .7em; border-radius: 50%; flex: none; }
-  #board .nm, #mini .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .me { color: #fff; font-weight: 800; }
+  #board .dot { width: .7em; height: .7em; border-radius: 50%; flex: none; }
+  #board .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board .sc, #board .dt { width: 4.5em; text-align: right; }
-  #board .sc, #mini .sc { color: #f9f871; font-weight: 700; } #board .dt { color: #ff6ec7; }
+  #board .sc { color: #f9f871; font-weight: 700; } #board .dt { color: #ff6ec7; }
   #board .q { display: block; color: #bbb; font-size: .8em; margin-top: .3em; }
-  /* phones: a small always-visible top 3, top right */
-  #mini { position: absolute; right: .6em; top: 2.2em; display: none; min-width: 8em; font-size: 11px; pointer-events: none;
-          background: rgba(5,3,10,.5); border-radius: 5px; padding: .2em .5em; text-shadow: 1px 1px 0 #000; }
-  body.touchui:not(.inlobby) #mini:not(:empty) { display: block; }
   body.touchui #feed { top: auto; bottom: calc(clamp(64px, 21vmin, 100px) + 22px); right: .6em; }
   /* touch controls (NinjaRunner): big round buttons in the bottom corners */
   #touch { position: absolute; left: 0; right: 0; bottom: 0; display: none; justify-content: space-between; align-items: flex-end;
@@ -65,7 +80,7 @@
   #touch button.on { background: rgba(5,217,232,.35); border-color: #05d9e8; }
   #touch #tJ { width: clamp(64px, 21vmin, 100px); height: clamp(64px, 21vmin, 100px); }
   #touch #tRun.on { background: rgba(255,42,109,.4); border-color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d; }
-  #tbar { position: absolute; left: .5em; top: 2.3em; display: none; gap: 8px; z-index: 3; }
+  #tbar { position: absolute; left: .5em; top: var(--top); display: none; gap: 8px; z-index: 3; }
   #tbar button { width: 38px; height: 38px; border-radius: 8px; border: 2px solid rgba(209,247,255,.4); padding: 0;
                  background: rgba(5,3,10,.4); color: #d1f7ff; font: 700 18px system-ui, sans-serif; touch-action: none; }
   #tbar button.off { opacity: .45; }
@@ -150,13 +165,13 @@
 </head>
 <body>
 <div id="stage">
+<div id="strip"></div>
 <div id="wrap">
   <canvas id="c"></canvas>
   <div id="hud"><span id="hHp"></span><span id="hScore"></span></div>
   <div id="msg"></div>
   <div id="msgSub"></div>
   <div id="feed"></div>
-  <div id="mini"></div>
   <div id="board" class="hidden"></div>
   <div id="tbar"><button id="tMute" aria-label="Sound">♪</button><button id="tFull" aria-label="Full screen">⛶</button><button id="tLeave" aria-label="Leave">✕</button></div>
   <div id="help">← → move · ↑ / Z jump · Shift / X run · Space slash · Tab scores · D debug · M mute · Esc leave</div>

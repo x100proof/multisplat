@@ -953,8 +953,8 @@ function render() {
 
 // ---------- kill feed and scoreboard (both modes) ----------
 const FEED_HOLD = 5000, FEED_FADE = 1500;
-const feedEl = document.getElementById('feed'), boardEl = document.getElementById('board'), miniEl = document.getElementById('mini');
-let boardHeld = false, boardKey = '', miniKey = '';
+const feedEl = document.getElementById('feed'), boardEl = document.getElementById('board'), stripEl = document.getElementById('strip');
+let boardHeld = false, boardKey = '', stripKey = '', stripBuilds = 0;
 function board(on) { if (boardHeld !== on) { boardHeld = on; boardEl.classList.toggle('hidden', !on); boardKey = ''; } }
 const span = (text, color, cls) => { const e = document.createElement('span'); e.textContent = text; if (color) e.style.color = color; if (cls) e.className = cls; return e; };
 function feedRow(f) {
@@ -984,8 +984,7 @@ function hudCommon() {
   while (feed.length && now - feed[0].t > FEED_HOLD + FEED_FADE) { feed.shift(); feedDirty = true; }
   if (feedDirty) { feedDirty = false; feedEl.textContent = ''; for (const f of feed) feedEl.appendChild(feedRow(f)); }
   feed.forEach((f, i) => { const el = feedEl.children[i]; if (el) el.style.opacity = String(Math.max(0, Math.min(1, 1 - (now - f.t - FEED_HOLD) / FEED_FADE))); });
-  if (!boardHeld && !TOUCH_UI) return;
-  if (now - (hudCommon.at || 0) < 250) return;
+  if (now - (hudCommon.at || 0) < 100) return;   // standings are checked 10 times a second; the DOM changes only with the data
   hudCommon.at = now;
   const rows = standings().sort((a, b) => b.score - a.score || (a.deaths ?? 0) - (b.deaths ?? 0) || a.id - b.id);
   if (boardHeld) {
@@ -998,9 +997,21 @@ function hudCommon() {
       if (ONLINE && net.lobby.queue && net.lobby.queue.length) boardEl.appendChild(span(`${net.lobby.queue.length} waiting in the queue`, null, 'q'));
     }
   }
-  if (TOUCH_UI && !lobbyOpen) {
-    const top = rows.slice(0, 3), k = JSON.stringify(top.map(r => [r.id, r.name, r.score]));
-    if (k !== miniKey) { miniKey = k; boardRows(miniEl, top, false); }
+  // the strip along the top: rebuilt only when a name, colour, score, order, away flag or our own id changed
+  const k = JSON.stringify([ME, rows.map(r => [r.id, r.name, r.col || r.color, r.score, !!r.away])]);
+  if (k !== stripKey) { stripKey = k; stripRows(rows); stripBuilds++; }
+}
+// Scores for everyone along the top (SPEC §9): one chip per player (colour dot, name, score) in
+// score order, our own highlighted. Names go in through textContent only (span()).
+function stripRows(rows) {
+  stripEl.textContent = '';
+  for (const p of rows) {
+    const c = document.createElement('div');
+    c.className = 'chip' + (p.id === ME ? ' me' : '') + (p.away ? ' away' : '');
+    c.dataset.id = String(p.id);
+    const dot = span('', null, 'dot'); dot.style.background = p.col || COLORS[p.color] || '#fff';
+    c.append(dot, span(p.name, null, 'nm'), span(String(p.score), null, 'sc'));
+    stripEl.appendChild(c);
   }
 }
 
@@ -1492,6 +1503,7 @@ window.__mp = {
     G, fingerprint: key => fingerprint(G, key), settled: key => settled(G, key), keys: () => [...G.kills.keys()],
     get counts() { return { parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, bloody: G.bloody.size, ...G.stats, layerRebuilds: GL.rebuilds, layerMs: GL.lastMs }; },
   },
+  get strip() { return { builds: stripBuilds, chips: [...stripEl.children].map(c => ({ id: +c.dataset.id, me: c.classList.contains('me'), text: c.textContent })) }; },
   get feed() { return [...feedEl.children].map(e => e.textContent); },
   get perf() { return { renderMs, goreMs, fps }; },
   get music() { return music; }, analyzeLoop, startAudio: initAudio,

@@ -104,6 +104,30 @@ async function fightTest() {
   }
   log('kill, score and respawn seen on all 3 pages');
 
+  // the score strip along the top: every player, the killer first with its point, our own chip
+  // highlighted, visible below nothing, and rebuilt only when the data changes
+  for (const p of all) {
+    const st = await waitFor(async () => {
+      const st = await p.page.evaluate(() => ({ ...__mp.strip, shown: getComputedStyle(document.getElementById('strip')).display !== 'none' }));
+      return st.chips.length === 3 && st.chips[0].id === killer.id && st.chips[0].text.endsWith('1') ? st : null;
+    }, { timeout: 3000, what: `score strip on ${p.name}` });
+    assert.ok(st.shown, 'strip visible');
+    assert.deepEqual(st.chips.filter(c => c.me).map(c => c.id), [p.id], 'own chip highlighted');
+    assert.deepEqual(new Set(st.chips.map(c => c.id)), new Set(ids));
+    assert.ok(st.chips[0].text.startsWith(killer.name));
+    const html = await p.page.evaluate(() => document.getElementById('strip').innerHTML);
+    assert.ok(!/<script|<img|on\w+=/i.test(html), 'names are text only');
+  }
+  const lay = await A.page.evaluate(() => Object.fromEntries(['strip', 'hHp', 'hScore', 'feed'].map(id => {
+    const r = document.getElementById(id).getBoundingClientRect(); return [id, { top: r.top, bottom: r.bottom }];
+  })));
+  for (const id of ['hHp', 'hScore', 'feed']) assert.ok(lay.strip.bottom <= lay[id].top + 0.5, `the strip does not cover ${id}: ${JSON.stringify(lay)}`);
+  const b0 = await A.page.evaluate(() => __mp.strip.builds);
+  await sleep(1500);
+  const b1 = await A.page.evaluate(() => __mp.strip.builds);
+  assert.ok(b1 - b0 <= 3, `the strip is rebuilt on changes only, not every frame (${b1 - b0} builds in 1.5 s)`);
+  log(`score strip: ${(await A.page.evaluate(() => __mp.strip.chips.map(c => c.text).join(' | ')))} on all 3 pages`);
+
   // gore: every page simulated the same spatter from the kill seed (same fingerprint once settled)
   const key = `${kill.tick}:${kill.victim}`;
   const fps = [];

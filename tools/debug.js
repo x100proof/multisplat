@@ -72,7 +72,7 @@ async function main() {
       if (s.items) {
         const longs = s.items.filter(i => i.kind !== 'star'), stars = s.items.filter(i => i.kind === 'star');
         out(`long-sword pickups (${longs.length}): ${longs.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.itemInS}s when there is room`);
-        out(`star pickups (${stars.length}): ${stars.map(i => `#${i.id} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.starInS ?? '?'}s when there is room`);
+        out(`star pickups (${stars.length}): ${stars.map(i => `#${i.id} x${i.n ?? 3} at ${i.x},${i.y}`).join(' ') || '-'} · next in ${s.starInS ?? '?'}s when there is room`);
       }
       if (s.stars) out(`stars in flight (${s.stars.length}): ${s.stars.map(f => `#${f.id} by ${f.owner} at ${f.x},${f.y} ${f.vx > 0 ? '→' : '←'} ${f.dist}u`).join(' ') || '-'}`);
       out(`queue (${s.queue.length}):`);

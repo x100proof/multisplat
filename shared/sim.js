@@ -5,7 +5,7 @@
 //
 // Movement and the sword are ported from NinjaRunner (updatePlay, moveBody, swordBoxOf).
 import { T, KEY, KEY_MASK, FX, PW, PH, ATK_LEN, ATK_CD, COMBO_T, DEFAULTS, HISTORY_TICKS, LONG_REACH, ITEM_W, ITEM_H,
-  STAR_W, STAR_H, STAR_HAND } from './constants.js';
+  STAR_W, STAR_H, STAR_HAND, STAR_BUNDLES, STAR_LEGACY_N } from './constants.js';
 import { LEVEL, isSolid, isPlat, tileAt, pickSpawn, spawnPos } from './level.js';
 
 export { KEY, FX, DEFAULTS, LEVEL };
@@ -21,8 +21,8 @@ export function nextRand(state) {
 export function createWorld({ seed = 1 } = {}) {
   let s = Math.floor(Math.abs(seed)) % RNG_M;
   if (s === 0) s = 1;
-  // items: pickups lying in the arena [{id, x, y, kind: 'long'|'star'}] (a long sword or ninja
-  // stars; one per item point); itemT / starT: ticks until the next long sword / star pickup may
+  // items: pickups lying in the arena [{id, x, y, kind: 'long'|'star', n}] (a long sword or a
+  // bundle of n ninja stars; one per item point); itemT / starT: ticks until the next long sword / star pickup may
   // appear (-1 = not drawn yet; drawn on the first step); itemSeq: the last pickup id used.
   // stars: ninja stars in flight [{id, owner, x, y, vx, dist}] (x, y = centre); starSeq: last id.
   return { tick: 0, rng: s, players: [], items: [], itemT: -1, itemSeq: 0, starT: -1, stars: [], starSeq: 0 };
@@ -423,6 +423,14 @@ export function freeItemPoints(state, cfg = DEFAULTS, L = LEVEL) {
 const drawItemT = (state, cfg) => cfg.itemMinTicks + Math.floor(nextRand(state) * (cfg.itemMaxTicks - cfg.itemMinTicks + 1));
 
 export const itemKind = it => (it.kind === 'star' ? 'star' : 'long');   // pre-M6 items are long swords
+// How many stars a star pickup holds (one made before bundles holds STAR_LEGACY_N).
+export const starAmount = it => (it.n > 0 ? it.n : STAR_LEGACY_N);
+// A new star pickup's bundle size: 5, 10 or 15 with weights 6 : 3 : 2 (SPEC §5.2), one rng draw.
+export function drawStarAmount(state) {
+  let r = nextRand(state) * STAR_BUNDLES.reduce((a, b) => a + b.w, 0);
+  for (const b of STAR_BUNDLES) if ((r -= b.w) < 0) return b.n;
+  return STAR_BUNDLES[STAR_BUNDLES.length - 1].n;
+}
 const drawStarT = (state, cfg) => cfg.starMinTicks + Math.floor(nextRand(state) * (cfg.starMaxTicks - cfg.starMinTicks + 1));
 
 function stepItems(state, cfg, L, events) {
@@ -442,14 +450,20 @@ function stepItems(state, cfg, L, events) {
     state.drops = [];
   }
   // pickups: each lying item, in list order, goes to the lowest-id living toucher who can take it:
-  // a long sword to one without one; stars (+starGive, up to starCarry) to one below starCarry
+  // a long sword to one without one; stars to one below starCarry, who takes as many of the
+  // pickup's n as fit (`gain`); any rest stays lying as a smaller pickup (`left`)
   for (let i = 0; i < state.items.length; i++) {
     const it = state.items[i], box = itemBox(it), kind = itemKind(it);
     const p = state.players.find(q => q.alive && (kind === 'star' ? (q.stars | 0) < cfg.starCarry : !q.long) && overlap(q, box));
     if (!p) continue;
-    if (kind === 'star') p.stars = Math.min(cfg.starCarry, (p.stars | 0) + cfg.starGive); else p.long = true;
-    state.items.splice(i--, 1);
-    events.push({ type: 'pickup', tick: state.tick, id: p.id, item: it.id, kind, x: it.x, y: it.y, ...(kind === 'star' ? { stars: p.stars } : {}) });
+    let star = {};
+    if (kind === 'star') {
+      const n = starAmount(it), gain = Math.min(n, cfg.starCarry - (p.stars | 0));
+      p.stars = (p.stars | 0) + gain;
+      star = { stars: p.stars, gain, ...(n > gain ? { left: n - gain } : {}) };
+      if (n > gain) it.n = n - gain; else state.items.splice(i--, 1);
+    } else { p.long = true; state.items.splice(i--, 1); }
+    events.push({ type: 'pickup', tick: state.tick, id: p.id, item: it.id, kind, x: it.x, y: it.y, ...star });
   }
   // spawning, per kind: the countdown is drawn when a pickup of that kind appears (and on the first
   // step) and runs only while there is room for another of that kind; when it is due and no point
@@ -469,9 +483,10 @@ function spawnKind(state, cfg, L, events, kind, key, max, draw) {
   if (!free.length) return;
   const pt = free[Math.floor(nextRand(state) * free.length) % free.length];
   const it = { id: ++state.itemSeq, x: pt.x, y: pt.y, kind };
+  if (kind === 'star') it.n = drawStarAmount(state);
   state.items.push(it);
   state[key] = draw(state, cfg);
-  events.push({ type: 'item', tick: state.tick, id: it.id, kind, x: it.x, y: it.y });
+  events.push({ type: 'item', tick: state.tick, id: it.id, kind, x: it.x, y: it.y, ...(kind === 'star' ? { n: it.n } : {}) });
 }
 
 // Re-simulate only one player for client prediction: its own movement, then collisions against

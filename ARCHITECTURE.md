@@ -51,12 +51,15 @@ from `/shared/*.js`.
   `hitStun 10`, `stunMoveMul .25`, `spawnIframes 90`, `respawnTicks 120`, `creditTicks 300`,
   `spawnMinDist 64`) and the pickup tunables `itemMinTicks 1200`, `itemMaxTicks 2400` (20–40 s),
   `itemMax 2`, `itemClear 32`, and the ninja-star tunables (SPEC §5.2): `starMinTicks 300`,
-  `starMaxTicks 600` (5–10 s), `starMax 4`, `starGive 3`, `starCarry 9`, `throwCd 15`, `starSpeed 6`,
+  `starMaxTicks 600` (5–10 s), `starMax 4`, `starCarry 30`, `throwCd 15`, `starSpeed 6`,
   `starDmg 20`, `starKnockX 1.6`, `starKnockY -1.6` (a small knockback).
 - `LONG_REACH = 1.6` (the holder's sword-box length factor) is a separate constant, not in `DEFAULTS`,
   because the offline debug panel edits `cfg` and reach must always match the server.
   `ITEM_W 8`, `ITEM_H 14` is a pickup's body (both kinds). `STAR_W 4`, `STAR_H 4` is a flying star's
-  box (centred on its x, y) and `STAR_HAND 6` its height below the thrower's top.
+  box (centred on its x, y) and `STAR_HAND 6` its height below the thrower's top. `STAR_BUNDLES`
+  (`[{n: 5, w: 6}, {n: 10, w: 3}, {n: 15, w: 2}]`) are the star-pickup amounts and their weights
+  (odds inversely proportional to the amount); `STAR_LEGACY_N 3` is the amount of a star pickup
+  without `n` (made before bundles).
 - `NET` holds the netcode values:
   - `historyMs 200`, `rewindCapMs 150`,
   - `snapshotHz 30`, `maxInputBatch 3`,
@@ -100,8 +103,9 @@ plain JSON:
 
 ```js
 state = { tick, rng, players: [player…],   // players kept sorted by numeric id
-          items: [{id, x, y, kind: 'long'|'star'}…],  // pickups lying in the arena (x, y = their item
-                                 // point; one pickup of either kind per point; no kind = 'long')
+          items: [{id, x, y, kind: 'long'|'star', n?}…],  // pickups lying in the arena (x, y = their item
+                                 // point; one pickup of either kind per point; no kind = 'long';
+                                 // n = the stars a star pickup holds, 5|10|15 or a rest left lying)
           itemT, starT,          // ticks until the next long sword / star pickup may appear (-1: drawn on the first step)
           itemSeq,               // last pickup id used (shared by both kinds)
           stars: [{id, owner, x, y, vx, dist}…],   // ninja stars in flight (x, y = centre)
@@ -110,7 +114,7 @@ player = { id, x, y, w, h, vx, vy, px, py, face, onGround, coyote, buf, walk,
            atk, atkCd, atkType: 'chop'|'sweep', combo, swing, hitSet: [ids],
            hp, alive, iframes, stun, respawn, lastHitBy, lastHitTick, score, deaths,
            keys /* previous tick's bitmask */, fx, standOn, long /* holds a long sword */,
-           stars /* ninja stars carried, 0-9 */, throwCd }
+           stars /* ninja stars carried, 0-30 */, throwCd }
 ```
 
 Randomness comes from NinjaRunner's Park–Miller generator, with its seed stored in `state.rng`.
@@ -132,6 +136,7 @@ pickup countdown and point.
 | `swordBoxOf(p)` | NinjaRunner's box. With `p.long` its length is ×`LONG_REACH` (chop 18 → 28.8, sweep 22 → 35.2); height, y and the near edge (2 units inside the body on the facing side) stay, so it grows outward in the facing direction only. |
 | `itemBox(it)`, `freeItemPoints(state, cfg, level)` | A pickup's body (centred on x, resting on y); the item points with no pickup (of either kind) and no living player's feet within `itemClear`. |
 | `itemKind(it)`, `starBox(st)` | `'star'` or `'long'` (an item without `kind` is a long sword); a flying star's box. |
+| `starAmount(it)`, `drawStarAmount(state)` | The stars a star pickup holds (`n`, or `STAR_LEGACY_N` 3 without one); a new bundle's amount, 5/10/15 with weights 6:3:2, from one RNG draw. |
 | `createHistory()`, `recordHistory(hist, state)`, `positionsAt(hist, tick)` | A position ring of 200 ms (12 ticks). `positionsAt` interpolates for fractional ticks and clamps to the oldest or newest frame. |
 | `killPlayer(state, id, cause)` → events | Kills a player from outside the rules (for example on disconnect). Last-hitter credit still applies. |
 | `serialize`, `deserialize`, `cloneState` | JSON. |
@@ -171,10 +176,12 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
    `freeItemPoints`; if none is free it retries every tick without using the RNG. `item` event.
 
    **Ninja-star pickups** use the same list, points and rule: a star pickup goes to the first living
-   player in id order who touches it and carries fewer than `starCarry` (9): `stars = min(9, stars + 3)`,
-   `pickup` event with `kind: 'star'` and the new count; a player at 9 leaves it. Their own countdown
+   player in id order who touches it and carries fewer than `starCarry` (30). It takes
+   `gain = min(n, 30 − stars)`; if stars are left over the pickup stays with `n − gain` (taken from the
+   next tick on, by the same rule), else it is removed. `pickup` event with `kind: 'star'`, the new
+   count `stars`, `gain` and `left` (only when some stay); a player at 30 leaves it. Their own countdown
    (`starT`, `starMinTicks`–`starMaxTicks`, 5–10 s) runs while fewer than `starMax` (4) star pickups
-   lie. Each tick the long-sword countdown runs first, then the stars'.
+   lie. A new star pickup draws its point, then its amount (`drawStarAmount`), then the next countdown. Each tick the long-sword countdown runs first, then the stars'.
 
 **Ninja stars (SPEC §5.2).**
 - **Throw.** In step 1, before a living player moves, a throw is due if `THROW` went 0→1 against the
@@ -209,8 +216,9 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
                  seed /* uint31 from the state RNG, for identical gore everywhere */, x, y, vx, vy, face,
                  long? /* true: the killing blow was a holder's chop or sweep */,
                  held? /* true: the victim held a long sword (lost now) */ }
-{ type: 'item',   tick, id /* pickup id */, kind: 'long'|'star', x, y }   // a pickup appeared
-{ type: 'pickup', tick, id /* player */, item, kind, x, y, stars? /* star pickups: the new count */ }
+{ type: 'item',   tick, id /* pickup id */, kind: 'long'|'star', x, y, n? /* star: its amount */ }   // a pickup appeared
+{ type: 'pickup', tick, id /* player */, item, kind, x, y, stars?, gain?, left? }
+     // star pickups: the new count, the stars gained, and the stars still lying there (only if any)
 { type: 'throw',  tick, id /* thrower */, star, x, y, face, stars /* left */ }
 { type: 'hit',    tick, attacker, victim, move: 'star', star, dmg: 20, hp, x, y, dir }   // a star hit
 { type: 'starEnd', tick, star, x, y, wall }                // a star stopped by a wall (true) or its range
@@ -265,11 +273,11 @@ Server → client:
   tick, queuePos, players: [roster], queue: [{id, name, color, away}], cap }   // reply to hello
 { t: 'snapshot', tick, seq /* last input processed for you, -1 if none */, me? /* your full sim
   player object, only while you play */, p: [[id, x, y, vx, vy, face, hp, atk, flags, iframes, stun, fx, stars], …],
-  it: [[id, x, y, kind], …], st: [[id, x, y, vx, owner], …] }
+  it: [[id, x, y, kind, n?], …], st: [[id, x, y, vx, owner], …] }
      // 30 Hz; positions rounded to 0.01; flags = alive 1 | onGround 2 | sweep 4 | long sword 8;
      // it = the long-sword pickups lying in the arena (so a joiner or resumer learns them, and the
      // holders from the flags, from one snapshot); `me` carries `long` and `stars` for the local player;
-     // kind 1 = ninja stars, 0 = long sword; st = the ninja stars in flight; stars = the count carried
+     // kind 1 = ninja stars (with its amount n; absent from an older server = 3), 0 = long sword; st = the ninja stars in flight; stars = the count carried
      // fx = the FX bits OR-ed over the ticks since the last snapshot (for remote sounds)
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
 { t: 'lobby', players: [roster], queue: [...], cap, bots, botMax }   // on connect and on roster/score change (≤ 2/s);
@@ -386,7 +394,8 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   seconds until the next may appear (`itemInS`), queue, tick time and connections. `tools/debug.js
   state` prints a `long-sword pickups` line and marks holders `LONG`. For ninja stars, `adminState()`
   also has each item's `kind`, `starInS`, the stars in flight (`stars`: id, owner, x, y, vx, dist) and
-  each player's `stars`; the CLI prints `star pickups`, `stars in flight` and `stars=n` per player.
+  each player's `stars`; the CLI prints `star pickups` (each with its amount, `#id xN at x,y`),
+  `stars in flight` and `stars=n` per player.
   `PRESS_BITS` (carried over a skipped input) includes `THROW`; the input-mask check is `KEY_MASK` (63).
   `viewByToken(token)` returns the server's view of one connection for a report. Neither contains
   a token. Log word ids and the `log` message (SPEC §13.5) are under server/logs.js below.
@@ -536,7 +545,7 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
   with `long` (flag bit 8) and `items` (from `it`; a snapshot without it, e.g. from a pre-M5 server,
   means none). `items` are those of the newest snapshot at or before the render tick, minus pickups
   we took ourselves (our `pickup` event is released at once and hides it before the timeline
-  catches up).
+  catches up; not when it says stars are `left` there).
   - Remote players are drawn at `renderTick = arrival clock − 6 ticks` (100 ms), interpolated
     between the two snapshots around it. Discrete fields switch at the midpoint. There is no
     blending across teleports (respawns) or deaths.
@@ -667,7 +676,9 @@ editable physics.
 - **Ninja stars (§5.2).**
   - `drawStarItem`: a star pickup is a spinning four-pointed neon shuriken (`shuriken()`, white-pink
     with a magenta glow and a hole) hovering over a magenta light pool, inside a turning dashed violet
-    ring, with a small `+3`: unlike the long sword's upright cyan blade.
+    ring, with its amount (`+5`, `+10`, `+15`, from `Sim.starAmount`) above it in the status bar's
+    yellow-on-violet: unlike the long sword's upright cyan blade. A bigger bundle's shuriken is a
+    little bigger and brighter.
   - `drawFlyingStar`: a star in flight spins fast with a short magenta trail behind it; drawn from
     `state.stars` (online the interpolated view, offline the sim state), after the players.
   - `drawThrowFlick`: for 8 ticks after `FX.THROW` (ours at once from `localTick`, others from the
@@ -862,7 +873,10 @@ editable physics.
 - `spikelevel.js` (a helper, not a test): `SPIKE_LEVEL`, the arena with spike strips, used by the
   spike tests in `sim.test.js`, `items.test.js` and `gore.test.js`.
 - `stars.test.js` (SPEC §5.2): spawn cadence 5–10 s and max 4 (30 seeds), points shared with long
-  swords both ways, +3 and the cap of 9 (and a full player leaving it), edge trigger and the 15-tick
+  swords both ways, bundles of 5/10/15 at 6:3:2 (statistically, over many seeded draws and real
+  spawns), the cap of 30 (a full player leaving it, a part-full one taking what fits and leaving the
+  rest), a legacy pickup without `n` giving 3, the snapshot packing and `net.js` unpacking of the
+  amount, edge trigger and the 15-tick
   cooldown, no throw without stars or in hit-stun, throwing ending spawn protection, 6 units a tick
   from hand height and gone after 240, stopped by a block but not a plank, first player only, never the
   thrower (point blank), invulnerable and dead players passed through, no rewind, 20 damage with its
@@ -1070,7 +1084,8 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   per tick). `botKeys` picks a target (nearest by |dx| + 1.5|dy|, +160 if spawn-protected,
   re-judged every 20 ticks with a 0.7 hysteresis), turns and slashes in reach (`18 × reach + 6`
   units, |dy| < 15), throws when on the same level with no solid tile between (`clearRow`),
-  else walks to a pickup or the target: same surface → walk; other surface → the nearest takeoff
+  else walks to a pickup (a star pickup only while it has room for the whole bundle or at least
+  5) or the target: same surface → walk; other surface → the nearest takeoff
   of the first hop, where each tick within 40 units it simulates the jump from its live state and
   jumps (holding the keys in `brain.air` until it lands) when that lands on the next surface. A
   bot walking but not moving for 12–25 ticks hops. Client: `net.bots(d)`; `net.lobby.bots/botMax`;

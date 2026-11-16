@@ -478,8 +478,9 @@ async function starTest() {
     const u = await T.page.evaluate(() => ({ hint: __mp.throwHint, hud: document.getElementById('hStars').textContent,
       shown: getComputedStyle(document.getElementById('hStars')).display !== 'none', me: __mp.net.me && __mp.net.me.stars,
       life: __mp.debug.entries().filter(e => e.cat === 'life').map(e => e.msg) }));
-    return u.me === 3 && u.hud === '★ 3' ? u : null;
+    return u.me === pick.stars && u.hud === `★ ${pick.stars}` ? u : null;   // the count the pickup gave (5, 10 or 15)
   }, { timeout: 3000, what: 'the star count after the pickup' });
+  assert.ok([5, 10, 15].includes(pick.gain) && pick.stars === pick.gain, `a first pickup gives a whole bundle: ${pick.gain}`);
   assert.equal(ui.hint, 'X to throw', 'the reminder above our Kanbei');
   assert.ok(ui.shown); assert.ok(ui.life.includes('stars gained'));
   for (const p of all) await waitFor(() => p.page.evaluate(([id, item]) => __mp.events.some(e => e.type === 'pickup' && e.id === id && e.item === item && e.kind === 'star'), [T.id, pick.item]),

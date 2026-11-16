@@ -23,8 +23,11 @@ function unpack(a) {
 }
 // Long-sword pickups lying in the arena, from a snapshot's `it` ([[id, x, y]]). A snapshot from a
 // pre-M5 server has none.
-// a[3] is the kind (1 = ninja stars; absent or 0 = long sword).
-const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => ({ id: a[0], x: a[1], y: a[2], kind: a[3] === 1 ? 'star' : 'long' })) : []);
+// a[3] is the kind (1 = ninja stars; absent or 0 = long sword); a[4] a star pickup's amount (absent
+// from an older server: n is left out and Sim.starAmount gives the old 3).
+const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => (a[3] === 1
+  ? { id: a[0], x: a[1], y: a[2], kind: 'star', ...(a[4] > 0 ? { n: a[4] } : {}) }
+  : { id: a[0], x: a[1], y: a[2], kind: 'long' })) : []);
 // Ninja stars in flight, from a snapshot's `st` ([[id, x, y, vx, owner]]); none from an older server.
 const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).map(a => [a[0], { id: a[0], x: a[1], y: a[2], vx: a[3], owner: a[4] }]) : []);
 
@@ -289,8 +292,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.stars) dbg('life', 'stars lost', { n: e.stars, cause: 'death' });
       }
       if (e.type === 'pickup' && e.id === net.id) {
-        taken.add(e.item);
-        if (e.kind === 'star') dbg('life', 'stars gained', { item: e.item, now: e.stars, x: e.x, y: e.y });
+        if (!e.left) taken.add(e.item);            // a star pickup with stars left over stays
+        if (e.kind === 'star') dbg('life', 'stars gained', { item: e.item, gain: e.gain, now: e.stars, x: e.x, y: e.y, ...(e.left ? { left: e.left } : {}) });
         else dbg('life', 'long sword taken', { item: e.item, x: e.x, y: e.y });
       }
       if (e.type === 'throw' && e.id === net.id) dbg('life', 'star thrown', { star: e.star, left: e.stars });

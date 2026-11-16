@@ -156,7 +156,7 @@ ARCHITECTURE.md    the code as implemented
   already at 9 leaves the pickup where it is.
 - **Throwing:** **X** on the keyboard throws one star in the facing direction (X no longer
   means run; run is Shift only). There is a throw button on touch and a gamepad button. Throw is
-  a new input bit, edge-triggered like slash, with a short cooldown (15 ticks). A player in
+  a new input bit, edge-triggered like slash, with a very short cooldown (5 ticks), so three quick presses throw three stars. A player in
   hit-stun can't throw. Throwing ends spawn invulnerability, like attacking.
 - **Flight:** a star flies fast (6 units per tick) in a straight horizontal line from hand
   height. It stops at the first solid tile (planks don't stop it) or after 240 units. It hits

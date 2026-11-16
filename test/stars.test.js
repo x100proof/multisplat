@@ -97,14 +97,14 @@ test('stars: a pickup gives 3, carrying at most 9; at 9 the pickup stays', () =>
   assert.equal(r.stars, 3);
 });
 
-test('throw: edge-triggered, one star per press, 15-tick cooldown, needs a star', () => {
+test('throw: edge-triggered, one star per press, short cooldown, needs a star', () => {
   const w = world(1);
   const p = place(w, 1, 60); p.stars = 5;
   // held for 30 ticks: one throw
   let ev = run(w, 30, () => ({ 1: KEY.THROW }));
   assert.equal(of(ev, 'throw').length, 1);
   assert.equal(p.stars, 4);
-  // released, then pressed again at once: blocked by the cooldown until 15 ticks after the throw
+  // released, then pressed again at once: blocked by the cooldown until it runs out
   const w2 = world(1);
   const p2 = place(w2, 1, 60); p2.stars = 5;
   const at = [];
@@ -112,7 +112,7 @@ test('throw: edge-triggered, one star per press, 15-tick cooldown, needs a star'
   for (const e of of(ev, 'throw')) at.push(e.tick);
   assert.ok(at.length >= 2);
   for (let i = 1; i < at.length; i++) assert.ok(at[i] - at[i - 1] >= DEFAULTS.throwCd, 'cooldown ' + (at[i] - at[i - 1]));
-  assert.equal(at[1] - at[0], 16, 'the first tap after the cooldown throws (taps land on even ticks)');
+  assert.equal(at[1] - at[0], DEFAULTS.throwCd + 1, 'the first tap after the cooldown throws (taps land on even ticks)');
   // no stars: nothing happens
   const w3 = world(1);
   place(w3, 1, 60);

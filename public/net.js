@@ -46,6 +46,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   const rtts = [];
   let seq = 0, pending = [], unsent = [];
   let prevKeys = 0, localThrowCd = 0;                  // the local throw's immediate sound/animation
+  let localThrows = [];   // seq numbers of our recent throws (see localTick)
   const snaps = [];                                    // [{tick, at, players: Map}]
   const taken = new Set();                             // ids of pickups we took (hidden before the snapshots catch up)
   let arrOff = null, lastSnapAt = 0, lastFxTick = 0;
@@ -357,8 +358,12 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       // sound and arm flick play at once: the FX bit is set when the press would be accepted.
       localThrowCd = Math.max(0, localThrowCd - 1);
       const me = net.me;
-      if ((keys & KEY.THROW) && !(prevKeys & KEY.THROW) && me.alive && (me.stars | 0) > 0 && me.stun <= 0 && localThrowCd <= 0 && (me.throwCd | 0) <= 0) {
-        me.fx |= FX.THROW; localThrowCd = DEFAULTS.throwCd;
+      // The server's own cooldown and star count reach us late (they are a snapshot old), so they
+      // must not gate the sound: a quick second or third throw would stay silent. We count our own
+      // cooldown, and take off the stars we threw in the last 20 ticks that the count may not show yet.
+      localThrows = localThrows.filter(t => seq - t < 20);
+      if ((keys & KEY.THROW) && !(prevKeys & KEY.THROW) && me.alive && (me.stars | 0) - localThrows.length > 0 && me.stun <= 0 && localThrowCd <= 0) {
+        me.fx |= FX.THROW; localThrowCd = DEFAULTS.throwCd; localThrows.push(seq);
       }
     }
     prevKeys = keys;

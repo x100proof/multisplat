@@ -1,0 +1,45 @@
+// Tunables shared by the server and the client. Plain data, no side effects.
+// Physics values are NinjaRunner's DEFAULTS; combat values are SPEC §5.
+
+export const TICK_HZ = 60;               // fixed simulation rate
+export const VW = 320, VH = 192, T = 16; // view size and tile size, in world units
+
+// Per-player input bitmask, sampled once per tick (level-triggered: a bit is set while held).
+// Jump and slash presses are detected inside the sim as 0 -> 1 edges against the previous tick.
+export const KEY = Object.freeze({ LEFT: 1, RIGHT: 2, JUMP: 4, RUN: 8, SLASH: 16 });
+export const KEY_MASK = 31;
+
+// Cosmetic per-tick flags the sim sets on a player (player.fx) so a client can play sounds.
+export const FX = Object.freeze({ JUMP: 1, SLASH: 2, BONK: 4, LAND: 8 });
+
+// Player body (NinjaRunner Pip) and sword timing.
+export const PW = 10, PH = 13;
+export const ATK_LEN = 12;     // ticks a swing lasts
+export const ATK_CD = 16;      // ticks between swings
+export const COMBO_T = 40;     // ticks after a chop in which the next swing is a sweep
+
+// The full tunable set. The sim reads everything through a cfg object of this shape, so a client
+// debug panel can edit a copy; the server always uses these defaults.
+export const DEFAULTS = Object.freeze({
+  // NinjaRunner movement
+  gravity: .27, jumpVel: 7.2, jumpSpeedBonus: .25, releaseGravity: .8, maxFall: 7,
+  walkSpeed: 1.6, runSpeed: 2.6, groundAccel: .22, airAccel: .14, groundFriction: .78, airFriction: .96,
+  coyote: 6, jumpBuffer: 8,
+  // player-player collision
+  pushDamp: .5,            // velocity multiplier on side contact when moving into the other body
+  // combat (SPEC §5)
+  maxHp: 100, chopDmg: 34, sweepDmg: 25,
+  knockX: 3.5, knockY: -3, killKnockMul: 1.4,
+  hitStun: 10, stunMoveMul: .25,
+  spawnIframes: 90, respawnTicks: 120, creditTicks: 300,
+  spawnMinDist: 64,
+});
+
+// Netcode values the server will use (M2). Lag-compensation history and rewind cap.
+export const NET = Object.freeze({
+  historyMs: 200, rewindCapMs: 150, snapshotHz: 30, maxInputBatch: 3,
+});
+export const HISTORY_TICKS = Math.ceil(NET.historyMs * TICK_HZ / 1000);
+
+// The 8 lobby colours (SPEC §9). The first six are NinjaRunner's NEON palette.
+export const COLORS = Object.freeze(['#ff2a6d', '#05d9e8', '#f9f871', '#b026ff', '#39ff14', '#ff6ec7', '#ff8c1a', '#ffffff']);

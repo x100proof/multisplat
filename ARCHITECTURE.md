@@ -227,27 +227,36 @@ the hitter gets the point.
 
 ## server/arena.js
 
-`new Arena({cfg, now, log, event, maxPlayers, graceMs, idleMs, seed})`. It has no sockets: tests
+`new Arena({cfg, now, log, event, maxPlayers, graceMs, idleMs, maxPerIp, seed})`. It has no sockets: tests
 drive it with fake connections and call `tick()` themselves, and `start()` runs the real loop.
 
 - **Records.** `hello` creates a record `{id, name, color, token, conn, state: 'play'|'queue',
-  inputs, lastSeq, lastKeys, lastActive, discAt}`. Ids count up from 1 and are never reused.
+  ip, inputs, lastSeq, lastKeys, lastActive, discAt}`. Ids count up from 1 and are never reused.
   Names are de-duplicated case-insensitively with `#2`, `#3`, and so on. The token is 16 random
-  bytes in hex.
+  bytes in hex. One address may hold at most `maxPerIp` records (the server passes `MAX_PER_IP`;
+  the class default is unlimited): a new `hello` past that releases the address's oldest
+  *disconnected* record (`leave` with reason `replaced`), so churning connect + hello + close
+  cannot fill the slots with records waiting out their grace period.
 - **Slots and queue.** Up to `maxPlayers` records play. The rest wait in a FIFO queue and receive
   snapshots and events as spectators. When a slot frees, the first *connected* queued record is
   promoted (`join` event, then its `spawn`).
 - **Resume.** When a socket closes, the record keeps its slot (or queue place) for `graceMs`
   (15 s), and the sim player stays in the world, idle. A `hello` with its token within that time
   rebinds the record (`resumed: true`, same id, score kept). An open socket holding the same token
-  is kicked with `replaced`. After the grace period the record is released (`leave`) and the token
+  is kicked with `replaced`. A queued record that resumes is promoted at once if a slot is free
+  (it was skipped while away). After the grace period the record is released (`leave`) and the token
   stops working. A kick always releases at once.
 - **Idle kick.** A playing record with no non-zero input for `idleMs` (120 s) is kicked with
   `idle`, and the client goes back to the lobby.
 - **Inputs.** They are queued per record, at most 12, with older ones dropped. Each tick takes
   one input per playing record. If none is queued, the last keys repeat for up to 8 ticks, then 0.
-  A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Inputs with `seq` ≤ the
-  highest seen are ignored.
+  A repeat cannot re-fire a jump or slash, because those need a 0→1 edge. Every starved tick
+  leaves the late inputs, when they arrive, queued one tick further behind, so the queue is also
+  drained (`drainBacklog`): if it never fell below `min` over a 30-tick window, the `min - 1`
+  oldest inputs are skipped (`lastSeq` moves past them), keeping one as a cushion against jitter.
+  A fresh jump or slash press in a skipped input is carried into the next tick, so a one-tick tap
+  survives. Without the drain, input latency ratcheted up to the worst stall seen, up to the
+  12-input cap. Inputs with `seq` ≤ the highest seen are ignored.
 - **Tick.** Each tick runs, in order:
   1. grace expiry and idle kicks,
   2. input selection,
@@ -274,9 +283,9 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   - top-level keys must be among `v, kind, reason, ts, env, net, player, entries, token, reportId`,
   - `entries` ≤ 300,
   - strings are cut to 300 characters, line breaks become spaces, and other control characters
-    are removed,
+    (C0, DEL, C1, U+2028/2029 and the bidi controls) are removed,
   - depth ≤ 5 and ≤ 60 keys per object, plain JSON only.
-- `createDebug({dir, allowedOrigins, clientIp, arena, events})` gives:
+- `createDebug({dir, allowedOrigins, clientIp, arena, events, keepBytes})` gives:
   - `handleReport`, which checks in this order:
     - `POST` only (405),
     - the Origin (403),
@@ -291,8 +300,10 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
     last 30 ring events. The id is 8 random `[a-z0-9]` characters.
 
     Lines are appended to `DEBUG_DIR/reports-YYYY-MM-DD.jsonl` (UTC, mode 600). At start and then
-    every 10 min, the directory is pruned to 14 days and 50 MB, oldest first, never touching
-    today's file. If a write fails, or today's file alone is over 50 MB, the answer is 503.
+    every 10 min, the directory is pruned to 14 days and 50 MB (`keepBytes`), oldest first, never
+    touching today's file. The prune's total plus every append since is kept as a running count,
+    and an append that would take it over 50 MB is refused, so today's file cannot grow past the
+    cap between prunes. If a write fails or the cap is reached, the answer is 503.
   - `adminHandler` / `listenAdmin(port)`: GET-only JSON on `127.0.0.1` (hard-coded). Routes:
     `/state`, `/events?n=`, `/reports?n=` (summaries, newest first) and `/reports/<id>`.
 
@@ -300,6 +311,8 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
 
 `node tools/debug.js [--port N] state | events [n] | reports [n] | report <id> | tail`. The port is
 `--port` or `DEBUG_PORT`. It prints `# UNTRUSTED INPUT: …` above report listings and bodies.
+Every line it prints has C0 (except newline), DEL, C1 and bidi control characters replaced with
+U+FFFD, so a stored report cannot drive the terminal even if intake cleaning were bypassed.
 `tail` polls every 2 s.
 
 ## public/net.js
@@ -329,6 +342,10 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   - A second clock, the *arrival clock*, follows the early envelope of `snapshot.tick − now`.
     Late snapshots count as jitter (`stats.jitter`, an EMA in ms).
 - **Prediction (§6.2).**
+  - No input is produced on a socket until its player `welcome` has arrived (`seq` restarts at 1
+    there). Inputs sent between the socket opening and the welcome would carry the old session's
+    seq numbers, which the server, having restarted at the hello, would accept and then ignore
+    every restarted seq below them as stale: the player froze after a resume.
   - `localTick(keys)` runs each 60 Hz client tick. It numbers the input (`seq`) and keeps it in
     `pending`. It runs `Sim.predictStep` on `me` against the other players' newest snapshot
     positions, which stay fixed. Then it queues the input for `flush()`, which sends at most 3

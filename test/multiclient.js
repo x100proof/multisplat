@@ -579,6 +579,12 @@ async function phoneTest() {
       const mm = window.matchMedia.bind(window);
       window.matchMedia = q => /pointer:\s*coarse/.test(q) ? { matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} } : mm(q);
     });
+    // let the browser zoom if it wants to (the real page forbids it in its meta tag; the page's own
+    // touch-action and gesture handling must hold even where the meta tag is ignored, as on iOS)
+    await ctx.addInitScript(() => new MutationObserver(() => {
+      const m = document.querySelector('meta[name=viewport]');
+      if (m && m.content.includes('maximum-scale')) m.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+    }).observe(document, { subtree: true, childList: true, attributes: true }));
     const page = await ctx.newPage();
     page.on('pageerror', e => errors.push(`${v.name}: ${e.message}`));
     page.on('console', m => { if (m.type() === 'error') errors.push(`${v.name}: console: ${m.text()}`); });
@@ -587,6 +593,17 @@ async function phoneTest() {
     const cdp = await ctx.newCDPSession(page);
     const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts });
     const centre = id => page.evaluate(id => { const r = document.getElementById(id).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, r: r.right, b: r.bottom, l: r.left, t: r.top }; }, id);
+    // a two-finger spread must not zoom the page: on the lobby, the arena and the buttons
+    const pinch = async (cx, cy, what) => {
+      await touch('touchStart', [{ x: cx - 15, y: cy, id: 1 }, { x: cx + 15, y: cy, id: 2 }]);
+      for (let i = 1; i <= 12; i++) { await touch('touchMove', [{ x: cx - 15 - i * 6, y: cy, id: 1 }, { x: cx + 15 + i * 6, y: cy, id: 2 }]); await sleep(16); }
+      await touch('touchEnd', []);
+      await sleep(250);
+      assert.equal(await page.evaluate(() => visualViewport.scale), 1, `${v.name}: pinch on ${what} did not zoom`);
+    };
+    await pinch(v.w / 2, v.h / 2, 'the lobby');
+    assert.ok(await page.evaluate(() => parseFloat(getComputedStyle(document.getElementById('lName')).fontSize) >= 16), `${v.name}: the name field is at least 16px (no iOS focus zoom)`);
+    assert.equal(await page.evaluate(() => { const e = new Event('gesturestart', { cancelable: true, bubbles: true }); document.body.dispatchEvent(e); return e.defaultPrevented; }), true, `${v.name}: Safari gesture events are cancelled`);
     // lobby: type a name, tap FIGHT (not clicks)
     await page.tap('#lName'); await page.keyboard.type('Phone');
     const f = await centre('lFight');
@@ -607,6 +624,7 @@ async function phoneTest() {
       const a = rects[ids[i]], b = rects[ids[j]];
       assert.ok(a.r <= b.l + 0.5 || b.r <= a.l + 0.5 || a.b <= b.t + 0.5 || b.b <= a.t + 0.5, `${v.name}: ${ids[i]} and ${ids[j]} do not overlap`);
     }
+    await pinch(v.w / 2, v.h / 2, 'the arena');
     // sample the local player every frame: did it jump, did it swing
     await page.evaluate(() => {
       window.__ph = { jump: false, slash: false };
@@ -620,6 +638,12 @@ async function phoneTest() {
     const X = () => page.evaluate(() => __mp.net.me.x);
     const grounded = () => waitFor(() => page.evaluate(() => __mp.net.me.onGround), { timeout: 5000, every: 50, what: 'on the ground' });
     await grounded();
+    // the spawn can be by the right wall: walk left first so there is room to go right
+    if (await X() > 150) {
+      await touch('touchStart', [{ x: rects.tL.x, y: rects.tL.y, id: 9 }]);
+      await sleep(1500);
+      await touch('touchEnd', []); await grounded();
+    }
     // hold ▶, the player moves right; release, it stops
     const x0 = await X();
     await touch('touchStart', [{ x: rects.tR.x, y: rects.tR.y, id: 1 }]);
@@ -629,9 +653,8 @@ async function phoneTest() {
     // second finger: ⤒ while ▶ is still held
     await touch('touchStart', [{ x: rects.tR.x, y: rects.tR.y, id: 1 }, { x: rects.tJ.x, y: rects.tJ.y, id: 2 }]);
     await waitFor(() => page.evaluate(() => __ph.jump), { timeout: 3000, every: 30, what: 'jump with a second finger' });
-    const x2 = await X();
-    await sleep(300);
-    assert.ok(await X() > x2, `${v.name}: still moving right after the jump tap`);
+    await sleep(600);
+    assert.ok(await X() > x1 + 10, `${v.name}: still moving right while jumping with the second finger`);
     await touch('touchEnd', []);
     await grounded();
     // a finger sliding from ▶ onto ◀ turns around
@@ -643,12 +666,13 @@ async function phoneTest() {
     assert.ok(await X() < xs, `${v.name}: sliding ▶ to ◀ turned the player round`);
     // touchcancel lets go of everything
     await touch('touchCancel', []);
-    await sleep(300);
-    const xc = await X(); await sleep(300);
+    await sleep(700);
+    const xc = await X(); await sleep(400);
     assert.ok(Math.abs(await X() - xc) < 2, `${v.name}: touchcancel stopped the player`);
     // slash
     await touch('touchStart', [{ x: rects.tS.x, y: rects.tS.y, id: 3 }]); await sleep(80); await touch('touchEnd', []);
     await waitFor(() => page.evaluate(() => __ph.slash), { timeout: 3000, every: 30, what: 'slash from the ⚔ button' });
+    await pinch(rects.tL.x, rects.tL.y, 'the buttons');
     // ? opens the how-to-play card (a real tap), ✕ opens the leave menu, both close again
     await page.touchscreen.tap(rects.tHelp.x, rects.tHelp.y);
     await waitFor(() => page.evaluate(() => __mp.helpOpen), { timeout: 2000, what: 'help opens' });

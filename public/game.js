@@ -443,6 +443,10 @@ let touchRun = false, touchHeld = 0;
 const pad = document.getElementById('touch');
 if (TOUCH_UI) document.body.classList.add('touchui');
 addEventListener('pointerdown', e => { if (e.pointerType === 'touch') enableTouchUI(); }, true);
+// No zoom, ever: two fingers must not pinch the page (iOS Safari ignores user-scalable=no and
+// max-scale). Two fingers on two buttons are still two pointers, so presses are unaffected.
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault(), { passive: false });
+document.addEventListener('touchmove', e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
 addEventListener('touchstart', enableTouchUI, { capture: true, passive: true });
 function btnAt(x, y) {
   const b = document.elementFromPoint(x, y)?.closest?.('#touch button');

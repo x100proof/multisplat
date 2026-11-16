@@ -116,7 +116,9 @@
   #howto { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 8;
     background: rgba(5,3,14,.72); }
   #howto.hidden { display: none; }
-  #howto .box { width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); overflow: auto; box-sizing: border-box;
+  #howto { touch-action: none; }
+  #leave { touch-action: none; }
+  #howto .box { touch-action: pan-y; width: min(640px, calc(100vw - 24px)); max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); overflow: auto; box-sizing: border-box;
     padding: 16px 20px; border: 2px solid #05d9e8; border-radius: 10px; background: rgba(13,8,32,.96);
     box-shadow: 0 0 24px rgba(5,217,232,.4); color: #d1f7ff; font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace; }
   #howto h2 { margin: 0 0 8px; font-size: 20px; color: #05d9e8; text-shadow: 0 0 10px #05d9e8; }
@@ -167,7 +169,7 @@
   #dbg canvas.graph { width: 100%; height: 48px; border: 1px solid rgba(255,255,255,.15); border-radius: 3px; }
 
   /* lobby (SPEC §9): drawn over the live arena */
-  #lobby { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 5;
+  #lobby { touch-action: pan-y; position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 5;
            background: radial-gradient(ellipse at center, rgba(5,3,10,.55), rgba(5,3,10,.88)); overflow-y: auto; }
   #lobby.hidden { display: none; }
   #lobby .card { width: min(420px, calc(100vw - 32px)); padding: 18px 20px; margin: 16px; box-sizing: border-box;
@@ -176,7 +178,7 @@
   #lobby h1 { margin: 0 0 12px; text-align: center; font-size: clamp(28px, 7vw, 44px); letter-spacing: .04em; color: #ff2a6d;
               text-shadow: 0 0 10px #ff2a6d, 0 0 26px #b026ff, 3px 3px 0 #000; font-style: italic; }
   #lobby label { display: block; font-size: 12px; color: #9ad8ff; margin: 8px 0 4px; text-transform: uppercase; letter-spacing: .06em; }
-  #lName { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 7px 9px; color: #fff;
+  #lName { touch-action: manipulation; width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 7px 9px; color: #fff;
            background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.3); border-radius: 5px; outline: none; }
   #lName:focus { border-color: #05d9e8; box-shadow: 0 0 8px rgba(5,217,232,.6); }
   #lColors { display: flex; gap: 7px; flex-wrap: wrap; }

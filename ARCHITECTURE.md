@@ -668,7 +668,11 @@ editable physics.
     The buttons hide while the lobby is open and live in `#stage`, so they turn with it (in the rotated
     portrait stage the safe-area insets are swapped: the screen's top is the game's left). The ♪ ? ✕ bar
     is 46 px, the full-screen button has a 52x46 hit area, and audio is also unlocked from `touchend` and
-    `click` (iOS Safari). `test/multiclient.js` `phoneTest` drives all of this with real CDP touches
+    `click` (iOS Safari). No zoom: `touch-action: none` on html/body and the overlays (`pan-y` on the
+    lobby and the how-to box, `manipulation` on the name field, which is 16 px so iOS does not zoom on
+    focus), `preventDefault()` on `gesture*` events and on multi-finger `touchmove` (both
+    `{ passive: false }`; pointer events are unaffected, so two fingers on two buttons are two presses),
+    plus the viewport meta (`maximum-scale=1`, which iOS Safari ignores). `test/multiclient.js` `phoneTest` drives all of this with real CDP touches
     in portrait, landscape and a fine-pointer context.
     Fight calls `goLandscape()` (full screen + orientation lock where allowed), as NinjaRunner's
     start does; a phone held upright still gets the rotated stage.

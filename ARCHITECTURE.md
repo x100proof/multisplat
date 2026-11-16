@@ -1,12 +1,13 @@
 # multisplat: architecture (as implemented)
 
-Status: **M2**. This covers:
+Status: **M3**. This covers:
 - the shared simulation and the arena (M1),
 - the authoritative WebSocket server, with lobby, queue, resume and lag compensation,
 - the online client, with prediction and interpolation,
-- the remote-debugging pipeline.
+- the remote-debugging pipeline (M2),
+- client-side gore, the combat music, the kill feed, the scoreboard and touch controls (M3).
 
-Gore, music, the kill feed, the scoreboard and touch controls are M3 (see `SPEC.md` §14).
+M3 changed nothing in the protocol, the server or `shared/`.
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -16,12 +17,14 @@ server/server.js      config, static files, /ws upgrade (origin, caps, limits), 
 server/arena.js       authoritative world: protocol, tick loop, slots/queue, resume, idle kick, lag comp
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
 public/index.html     markup + CSS (lobby, HUD, respawn message, debug panel)
-public/game.js        client: rendering, input, SFX, camera, lobby, HUD, debug panel; offline sandbox
+public/game.js        client: rendering, input (keys, pad, touch), SFX, camera, lobby, HUD, debug panel; offline sandbox
+public/gore.js        gore simulation (DOM-free, seeded by kill.seed): particles, gibs, fountains, decals, pools
+public/music.js       the combat score as data, its offline pre-render into two loops, the live player
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
 public/debug.js       client log ring (dbg), debug report builder and sender
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, level, server, arena, hygiene)
-test/multiclient.js   headless Chromium: 3 players, fight, resume, debug report, NET_SIM prediction
+test/*.test.js        node:test unit tests (sim, level, server, arena, gore, music, hygiene)
+test/multiclient.js   headless Chromium: 3 players, fight, kill feed, gore fingerprint, resume, debug report, NET_SIM prediction
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
 test/lib.js, bot.js   test helpers (spare ports, server process, Chromium lookup) and the scripted player
@@ -348,7 +351,87 @@ drive it with fake connections and call `tick()` themselves, and `start()` runs 
   Events about us (we hit, are hit or spawn) and events without a position (`join`, `leave`,
   `score`) are released at once.
 
-## public/debug.js
+## public/gore.js (SPEC §7)
+
+NinjaRunner's blood system (`blood`, `L.decals`, `L.pools`, `L.bloody`, `bleedEnemy`, `spray`,
+`updateBlood`) rebuilt as a module with no DOM access. `game.js` creates one world `G =
+createGore(level)`, feeds it events and calls `stepGore(G)` once per 60 Hz `update()`. The server
+never runs it.
+
+**Determinism.** Every client must draw the same spatter for a kill:
+- all randomness is a Park–Miller `prng(seed)`: `kill.seed` for a kill, `hitSeed(e)` (an FNV hash of
+  the hit event's tick, ids, damage, hp and position) for a hit spurt. Randomness inside a step comes
+  from a generator seeded by the kill and the kill's own age, never the client's clock;
+- no `Math.random` and no trig. Pieces turn as a unit vector `(c, s)` with a small-angle step and a
+  `sqrt` renormalisation; the fountain's heartbeat uses `sinp` (Bhaskara's approximation). A unit
+  test enforces this;
+- a kill's particles and pieces collide only with the level (`tileAt`), never with each other or
+  the players, so its outcome does not depend on other gore in flight or on when it started.
+
+**API.**
+
+| | |
+|---|---|
+| `createGore(level, opts?)`, `clearGore(G)` | `G = {t, parts, gibs, decals, pools: Map, bloody: Map, kills: Map, newDecals, newPools, dirty, stats, onCap}` |
+| `goreHit(G, e, dir)` | a spurt of 16–25 drops from the victim's centre along `dir` (±1; game.js passes the side the attacker is on, as it sees it) |
+| `goreKill(G, e, {meta})` | cuts the body up, launches the pieces, 240 drops of radial spatter (320 on spikes), starts the fountains. `meta` (the victim's colour) rides on the pieces |
+| `stepGore(G)` | one tick: pieces, then drops, then the decal cap, and every 64 ticks expiry |
+| `fingerprint(G, key)`, `settled(G, key)`, `killKey(e)` | key = `tick:victim`. The fingerprint is `count:hash`, where the hash is a commutative sum over every landing (decal or pool, position and colour) plus each piece's position at age 180 ticks |
+| `fadeOf(G, t)` | 1 → 0 over the last 90 s of the 4 min life |
+
+**Pieces** (Pip's local space, clip polygons with a centroid, a cut face with an outward normal and
+a collision radius):
+- `chop`: a vertical split, slanted by the seed. Left and right halves `L`/`R`, the hood cap `H`
+  (everything above the headband) and the sword `S`;
+- `sweep`: a horizontal split at the waist, `T`/`B`, plus `H` and `S`;
+- `spikes`: like a sweep, but `B` stays impaled (pinned) and `T` and `H` are thrown up;
+- `leave` (killed for leaving): the body bursts into quarters `Q0`–`Q3`, plus `H` and `S`.
+
+Pieces fall with gravity 0.3, bounce off floors (0.32), walls and ceilings, slide to rest with
+friction, land on planks from above and get impaled on spikes (staining them). While they fly they
+trail drops. Halves (and the hood, briefly) pump a pulsing fountain from the cut face for 80 ticks
+(NinjaRunner's `FOUNTAIN_T`), turned with the piece. Pieces lie for 12 s, then fade over 1 s.
+
+**Drops** follow NinjaRunner's `updateBlood` (gravity 0.2, max fall 5) but tell hits apart:
+- a wall or block side: a decal on the face, sometimes with a drip running down;
+- landing on a top surface with open air above: a pool (`h` grows up to 4 and spreads ±3 units);
+- a ceiling or underside: a decal, often with a hanging drip;
+- spikes: a decal, and the spike tile is stained (`G.bloody`).
+
+**Persistence and caps** (`GORE`): decals, pools and stains live 4 min (fading over the last 90 s).
+Decals are capped at 6000, oldest first; drops at 4000 (new ones are skipped); pieces at 64 (oldest
+dropped). `onCap(what, n)` reports a cap; `stats` counts evictions and skips. A late joiner starts
+with an empty world (it only sees later events).
+
+## public/music.js (SPEC §8)
+
+An original score: **156 BPM, E minor**, 8 bars (12.31 s): Em Em C D Em Em C B, with D# over the
+B. NinjaRunner's palette (detuned saws through low-passes, its sine "neon bell", a convolution
+reverb), made aggressive.
+
+- `scoreEvents(layer)` is the arrangement as data (`{t, v, m, d, g}`):
+  - `base`: a 16th-note bass ostinato (two detuned saws and a square sub, plucked low-pass; bars
+    4 and 8 run fills; notes outside the key move up a semitone), four-on-the-floor kick (sine
+    sweep with a click), snare on 2 and 4 with a roll into the loop, offbeat 8th hats, a stabbing
+    3-saw lead riff (each bar different; bars 5–8 vary 1–4), a quiet saw pad and neon bells;
+  - `intensity`: 16th hats, claps, ghost kicks, a crash on bars 1 and 5, tom fills, a noise riser
+    into the loop and the riff an octave up through an open filter.
+- `renderLoop(layer, sr)` renders one layer in an `OfflineAudioContext` with 2 s of tail and folds
+  the tail back onto the start, so the loop is seamless (reverb and releases carry over the seam).
+  It records the main-thread graph-build time.
+- `analyze(x, sr)` measures peak, RMS, the jump at the seam (and, for scale, the largest step around
+  the bar-5 downbeat), the tempo (autocorrelation of the low-band onset envelope) and brightness
+  (mean squared first difference over mean square).
+- `createMusic({ac, out, lite, log})` starts after a user gesture (`initAudio`), yields, then
+  renders both layers in parallel off the main thread (22.05 kHz with `LITE_AUDIO`, else up to
+  44.1 kHz) and scales both by one gain so base + intensity peaks at 0.9. The two buffers start at
+  the same time and loop in sync: `base → low-pass (3.5 kHz at rest) → vol`, `intensity → gain (0) →
+  vol`, `vol → MASTER`. `intensity()` (called on every kill) fades the layer in and opens the
+  low-pass to 18 kHz, holds 6.5 s, then both decay with a 0.9 s time constant (≈ 8–10 s in all).
+  `target` (CFG.musicVol) and `muted` set `vol`. Logs (`audio`): pre-render time / build time / rate /
+  lite or full, failure, intensity up and decaying.
+
+
 
 - `dbg(cat, msg, data)` appends `{ts, tick, cat, msg, data}` to a 300-entry ring. The categories
   are `net`, `sync`, `perf`, `audio`, `input`, `life` and `error`.
@@ -382,8 +465,16 @@ editable physics.
   and rim glow. Online, `colorOf(id)` is the player's chosen colour. Offline, the local player is
   pink and the dummy orange.
 - **Input.**
-  - Keyboard: arrows to move, Up or Z to jump, Shift or X to run, Space to slash, D for the debug
-    panel, M to mute.
+  - Keyboard: arrows to move, Up or Z to jump, Shift or X to run, Space to slash, Tab for the
+    scoreboard, D for the debug panel, M to mute.
+  - Touch (NinjaRunner's `TOUCH_BTN`, `btnAt`, `fingerOn`, `syncTouch`): ◀ ▶ bottom left, » ⚔ ⤒
+    bottom right, plus a small ♪ (mute) and ⛶ (full screen) bar. Every finger is tracked by pointer
+    id and can slide between buttons; jump and slash presses are latched like keys. **Run is the »
+    toggle** (as in NinjaRunner), so one thumb stays on ◀ ▶ and the other on ⤒ ⚔. The bits are OR-ed
+    into the tick mask (`touchBits()`) and log `device touch`. Buttons show when `pointer: coarse`
+    (or `?touch`), hide while the lobby is open, and live in `#stage`, so they turn with it.
+    Fight calls `goLandscape()` (full screen + orientation lock where allowed), as NinjaRunner's
+    start does; a phone held upright still gets the rotated stage.
   - Gamepad: stick or d-pad to move, A or d-pad up to jump, X or B to slash, bumpers or triggers
     to run.
 
@@ -395,9 +486,26 @@ editable physics.
   - Each frame then calls `net.flush()`, sets `state = net.view()`, plays remote FX and renders.
     `render()` draws the same `state.players` shape online and offline.
   - Offline, `updateOffline()` steps the sim with the dummy, as in M1.
-- **`onEvents`** turns `hit`, `kill` and `spawn` into SFX, damage popups, shake and corpses.
-  **M3 hook:** the kill feed, gore (seeded by `kill.seed`) and the music's intensity belong here.
-  The event shapes are in the Protocol section.
+- **`onEvents`** turns events into effects:
+  - `hit`: SFX, a damage popup, a small shake if it involves us, and (with `CFG.gore`) `goreHit`;
+  - `kill`: a kill-feed entry, `music.intensity()`, a shake for a camera focus within 120 units,
+    and with `CFG.gore` `goreKill` (the body is not drawn whole any more) plus gush/impale/die SFX.
+    With gore off it falls back to M1's flipped falling corpse;
+  - `spawn`: our own spawn snaps the camera.
+- **Gore drawing.**
+  - Decals and pools are painted into one offscreen canvas covering the arena (`GL`, at
+    `min(SCALE, 3)` device pixels per unit, 2 with `LITE_AUDIO`), and each frame draws only the
+    visible part with one `drawImage`. New blood is painted in as it lands (`G.newDecals`,
+    `G.newPools`). The layer is rebuilt from scratch (batched by colour and 10 fade steps) when a cap
+    or expiry removed blood (at most once a second) or every 3 s while anything is fading.
+  - Pieces (`drawGib`) are Pip clipped to the piece's polygon, turned by `(c, s)`, with a dark
+    crimson cut face and a wet highlight, drawn without shadow blur (dozens of blurred shadows were
+    too slow). The sword is drawn on its own.
+  - Flying drops use the `'lighter'` blend, batched per colour. Stained spikes use `TILE.spikeBloody`.
+  - Blood is **red**: `BLOOD` (arterial to dark crimson) for drops and decals, the darker `POOL`
+    for pools; the spike stains use `BLOOD` too. Player colours still tint headbands and glows.
+- **Music.** `initAudio` (on the first key, pointer or Fight) creates `music` unless `?nomusic`.
+  M toggles `muted`, which silences both the SFX and the music. A hidden tab suspends the context.
 - **Lobby (§9).** An overlay over the live arena. It has:
   - the logo,
   - a name field (`cleanName`) and 8 swatches,
@@ -408,16 +516,32 @@ editable physics.
   The name and colour are saved in `localStorage` (`multisplat-name`, `multisplat-color`).
   After a kick the lobby comes back and shows the reason.
 - **HUD.** `hudOnline` shows HP and score, a respawn countdown while dead, `ARENA FULL · QUEUE #n`
-  while queued, and `RECONNECTING…`. Name tags (`drawNameTag`, `(away)` during a grace period) and
-  HP bars float over every player. **M3 hook:** the kill feed and Tab scoreboard go in
-  `hudOnline`. `net.meta` has every player's score.
-- **Debug panel (D).** Online it adds:
+  with "you are #n of m waiting" under it while queued, and `RECONNECTING…`. Name tags
+  (`drawNameTag`, `(away)` during a grace period) and HP bars float over every player.
+  `hudCommon` (both modes):
+  - the kill feed: `A ✂ B` in the players' colours, `▲ B (spikes)` / `✕ B (left)` without a
+    killer, last 5, held 5 s then faded over 1.5 s;
+  - the scoreboard while Tab is held: every player by kills, with deaths and the queue length;
+  - on touch screens a small always-visible top 3, top right (the feed moves above the buttons).
+
+  The lobby's info line turns pink when the arena is full ("you will be #n in the queue"), and a
+  numbered queue list marks our own place.
+- **Debug panel (D).** In both modes: the FPS line with gore counts and the gore step / render
+  times, the **Gore** toggle (`CFG.gore`, on by default), and a **Music volume** slider
+  (`CFG.musicVol`, 0.5) with the music's state. Online it adds:
   - RTT (current/avg/max) and snapshot jitter,
   - prediction-error RMS, the snap count and reconnects,
   - a 6 s prediction-error graph, with a red line at 2 units,
   - **Send debug report**, which shows the id.
 
-  The physics and combat sliders are disabled online, because the server's values rule.
+  The physics and combat sliders are disabled online, because the server's values rule. Only
+  hitboxes, gore and the music volume can be changed online.
+- **Debug entries.** `perf`: `gore: kill` (counts and ms), `gore: <particles|gibs|decals> cap
+  reached` (at most every 10 s each), `gore: decal layer rebuilt` (when over 8 ms, and every 50th),
+  `gore: slow render` (a frame over 30 ms with heavy gore), `gore: on/off`, and the 5 s FPS sample
+  now carries render and gore times. `audio`: context created/state, `music pre-rendered` (ms,
+  build ms, rate, lite), `music pre-render failed`, `music intensity up/decaying`, `muted`. Reports'
+  `env` carry `music` and `gore` summaries.
   Hitboxes work in both modes. Offline it is M1's panel, with the dummy switches and Restart.
 - **`window.__mp`** exposes:
   - `state` (the drawn state), `sim`, `cfg`, `level`, `localId`, `online`, `net`, `lobbyOpen`,
@@ -425,6 +549,9 @@ editable physics.
   - `debug` (`entries()`, `send(kind, reason)`),
   - `autopilot`: a function `(me, players) → keys` called each tick,
   - `events` (the last 200 events processed), `input`, `fps`,
+  - `gore` (`G`, `fingerprint(key)`, `settled(key)`, `keys()`, `counts`), `feed` (the feed's text),
+    `perf` (`renderMs`, `goreMs`, `fps`), `music`, `analyzeLoop`, `startAudio`, and `inject(events)`,
+    which runs made-up events through `onEvents` (for offline gore and load checks),
   - offline only: `pause()`, `resume()`, `step(n)` and `reset()`.
 
 ## Tests
@@ -441,6 +568,14 @@ editable physics.
   - spike credit (none, recent hitter, expired),
   - `slashHits` and rewound `step`, history interpolation,
   - `predictStep` matching `step`.
+- `gore.test.js`: no DOM, `Math.random` or trig in the source; same seed → identical drops,
+  pieces, decals, pools and fingerprint for chop, sweep, spikes and leave; different seeds differ;
+  the right pieces per move and the impaled half; a kill's fingerprint is the same with other gore
+  in flight and a different gore clock; hit spurts seeded from the event; caps (decals oldest first,
+  drops, pieces, `onCap`); fade and expiry; `prng`/`sinp`.
+- `music.test.js`: 150–160 BPM and a 4–8 bar loop; 16th bass, four-on-the-floor kick, snare on 2
+  and 4, offbeat hats; every pitched note in E minor (D# only over B); the riff varies; the
+  intensity layer's extra percussion; `analyze` on a synthetic click loop (tempo, seam).
 - `level.test.js`: size and tile codes, closed border, 3–4 tiers, two short spike strips, ≥10
   spawns with footing and no spikes below or beside them, and `pickSpawn` distance and weighting.
 - `server.test.js`: traversal, MIME types, HEAD, 404, 405.
@@ -481,7 +616,10 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   - joins 3 players (Ash, Bea, Cy),
   - drives Ash and Bea with `test/bot.js` (down to the floor, meet on the left half, slash) until
     one kills the other; Cy parks on the right,
+  - asserts the kill feed shows `killer ✂ victim` on all pages,
   - asserts the kill (same seed), the score and the respawn on all pages,
+  - waits until the kill's gore has settled on every page and asserts the same gore fingerprint
+    everywhere (and that over 100 landings went into it),
   - drops the killer's socket and asserts the resume keeps id and score on every page,
   - sends a manual debug report and reads it back with `tools/debug.js report <id>`: the
     untrusted-input line, the server's view of that player, and no token in the files,

@@ -1,0 +1,46 @@
+# Example systemd unit for multisplat. Copy to /etc/systemd/system/multisplat.service and replace
+# the placeholders: /path/to/multisplat, <SERVICE_USER>, example.com.
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now multisplat
+#   journalctl -u multisplat -f
+[Unit]
+Description=multisplat game server
+After=network.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+WorkingDirectory=/path/to/multisplat
+ExecStart=/usr/bin/node server/server.js
+Restart=on-failure
+RestartSec=2
+
+Environment=NODE_ENV=production
+# Loopback only: nginx is the only thing that should reach the game.
+Environment=HOST=127.0.0.1
+Environment=PORT=3008
+Environment=ALLOWED_ORIGINS=https://example.com
+# nginx sets X-Real-IP; per-IP connection caps and report limits key on it.
+Environment=TRUST_PROXY=1
+Environment=MAX_PER_IP=4
+Environment=MAX_CONN=40
+Environment=DEBUG_DIR=/path/to/multisplat/debug-reports
+# Read-only admin listener for tools/debug.js. Always bound to 127.0.0.1. Never proxy it.
+Environment=DEBUG_PORT=3009
+# NET_SIM is a test-only latency simulator and is refused when NODE_ENV=production.
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/path/to/multisplat/debug-reports
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

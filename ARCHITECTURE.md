@@ -266,9 +266,12 @@ Client → server:
   reconnect); a dead token gets the `expired` welcome below instead of a fresh join */ }
 { t: 'create', room /* the new room's name, '' = default */, name? /* the creator's player name */ }
                                         // create; the sender is its pending admin and looks at it (no join)
-{ t: 'view', room /* id, or 0 = none */ }  // the room a lobby visitor looks at (roster, snapshots, events)
+{ t: 'view', room /* id, or 0 = none */, name? /* our name field */, watch? /* watching */ }
+                                        // the room a lobby visitor looks at (roster, snapshots, events);
+                                        // re-sent for the same room when name or watch change (SPEC §17)
 { t: 'rename', name }                   // admin: rename the room (cleanRoomName)
-{ t: 'admin', id }                      // admin: hand the role to human player `id` of the same room
+{ t: 'admin', id } | { t: 'admin', conn } // admin: hand the role to human player `id` of the same room, or
+                                        // to the lobby visitor on connection `conn` (it becomes the pending admin)
 { t: 'cfg', set: { key: value, … } } | { t: 'cfg', reset: true }
                                         // admin: the room's settings (SPEC §17.1); allowlist + range + step
                                         // (cleanSetting), else `refused` cfg/value; wrong shape: `malformed`
@@ -304,7 +307,8 @@ Server → client:
 { t: 'event', tick, ev: [event…] }     // reliable, in order, sent as they happen
 { t: 'lobby', rooms: [{id, name, admin /* name */, n, cap, bots, q, watch}], maxRooms,
   room /* the room played in or selected, or null */, rname, admin /* player id; null while pending */,
-  players: [roster], queue: [...], cap, bots, botMax, mine /* we are its admin */ }   // that room's detail (empty without one); on connect and on
+  padmin /* the pending admin's connection id, or null */, lobby: [{c /* connection id */, name /* or null */, w? /* watching */}],
+  players: [roster], queue: [...], cap, bots, botMax, mine /* we are its admin */, you /* our connection id */ }   // that room's detail (empty without one); on connect and on
                                        // any change (≤ 2/s); at once after hello, create, view, leave and a `bots` request
 { t: 'refused', what, why }            // SPEC §17: a request turned down without a kick
 { t: 'closed', room, name, why }       // the room this connection looked at closed (why: 'left' | 'empty')
@@ -325,7 +329,8 @@ render identical gore. There are also:
 { type: 'rename', tick, id, name }           // a freed name passed to its lowest "#n" holder (SPEC §9); no
                                              // position, so released at once; net.meta and net.lobby take it
 { type: 'chat',  id, text }                  // a chat line, to the room's connections (viewers too); no position, so it is released at once
-{ type: 'admin', tick, id, from, why }       // SPEC §17: the admin role moved ('transfer' or 'auto' at the old admin's release)
+{ type: 'admin', tick, id, conn?, from, why } // SPEC §17: the admin role moved ('transfer' or 'auto' at the old admin's release);
+                                             // to a lobby visitor: id null, `conn` its connection id (now the pending admin)
 { type: 'room',  tick, id, name }            // SPEC §17: the room was renamed
 { type: 'cfg',   tick, cfg, ch?, reset? }     // SPEC §17.1: the room's settings changed; cfg = the whole new
                                              // state as a diff against ROOM_DEFAULTS, ch = what this change set
@@ -379,7 +384,9 @@ is the viewers without a record there). Handlers:
   full`) and `roomsOfIp` (rooms whose `creatorIp` is this address, `refused ip`). Then `createRoom`,
   `setView` to it and `setPending(room, conn)`: the **pending admin** (`room.adminConn` = `conn`,
   `conn.adminOf` = room, `room.adminId` null), plus a lobby. `setView` away from that room (or
-  `disconnect`) calls `pendingGone`: no human in the room closes it, else `setAdmin(successor, 'auto')`.
+  `disconnect`) calls `pendingGone` → `room.handOn('left')`: the longest-present human
+  (`setAdmin(successor, 'auto')`), else the longest-looking lobby visitor (`setAdminConn`), else the room
+  closes. The creator's player name is its `conn.vname` (the name the room list shows for a pending admin).
   `join` binds a pending admin to its new record. `onLeave` of an admin who is the only human makes it the
   pending admin again (`setPending`) before releasing the record. `tick` closes a room held only by its
   pending admin after `ROOM.pendingMs` (10 min) without an admin action (`room.adminActAt`, touched by
@@ -390,25 +397,31 @@ is the viewers without a record there). Handlers:
   `conn.rec` and the view, makes it admin if it is the room's pending admin (or when the room has no
   admin at all, which only test rooms made by `createRoom` without a creator have), `room.add`s it and
   sends the welcome plus a lobby.
-- `onView`: a non-negative integer (else `malformed`); ignored for members; a pending admin looking
-  away while humans are in its room is refused (`leave admin`); lobby at once.
+- `onView`: a non-negative integer, an optional string `name` and boolean `watch` (else `malformed`);
+  ignored for members; otherwise `conn.vname` (`cleanName`, null for none or a bad one) and
+  `conn.vwatch` are kept (a change marks the lobby dirty); a pending admin looking away while humans
+  are in its room is refused (`leave admin`); else `setView` (which stamps `conn.viewAt`); lobby at once.
 - `onCfg` (SPEC §17.1): shape checks (`malformed`), the per-connection `cfgBucket` (`refused` cfg/rate
   + a flood drop), admin only (`adminRoom`, else `refused` cfg/admin), every key through `cleanSetting`
   (else `refused` cfg/value, nothing applied), then `room.applyCfg(set, reset, conn)` and its `cfg` event
   to the room's viewers; the lobby is marked dirty (its detail carries `cfg`). The join `welcome` carries
-  `cfg` too. `PROTOCOL` is 4.
+  `cfg` too. `PROTOCOL` is 5 (lobby visitors: `view` name/watch, lobby `lobby`/`padmin`/`you`, `admin` to a `conn`).
 - `onRename` / `onAdmin`: type checks (`malformed`), the shared edit bucket (`editBucket`), admin only
   (`adminRoom(conn)`: the room whose `adminId` is the sender's record, or whose pending admin it is), then `cleanRoomName` (rename,
   event `{type:'room'}` to the room's viewers) or a target that is another human record of the room
-  (`room.setAdmin(to, 'transfer')`, event `{type:'admin'}`). Refusals go through `refuse(conn, what, why)`
+  (`room.setAdmin(to, 'transfer')`, event `{type:'admin'}`), or (`conn` instead of `id`, exactly one of
+  them) another connection among `room.viewers` without a record (`room.setAdminConn(to, 'transfer')`:
+  its pending admin; a viewer of this room is never another room's pending admin, since looking away
+  gives that up). Refusals go through `refuse(conn, what, why)`
   (a `refused-req` ring event and `{t:'refused'}`).
 - `onBots`: shape check (n ≤ maxPlayers − 1), the per-connection bucket, then admin only (`refused bots
   admin` plus a lobby), then the server-wide `botBucket` across all rooms.
-- `onLeave`: the admin is refused (`leave admin`) while `room.humans()` has someone else; otherwise the
-  record is released (an admin alone stays as the pending admin) and a lobby follows.
-- `lobbyMsg(conn, cache)`: `rooms` (`room.summary()` each; a pending admin's name is the creator's
-  player name), `maxRooms`, the viewed room's `detail()` (`room, rname, admin, players, queue, cap, bots,
-  botMax`; empty without one) and the per-connection `mine`. The coalesced broadcast
+- `onLeave`: the admin is refused (`leave admin`) while `room.humans()` has someone else (lobby visitors
+  do not count); otherwise the record is released (an admin alone stays as the pending admin), the
+  connection is a lobby visitor of the room under its player name, and a lobby follows.
+- `lobbyMsg(conn, cache)`: `rooms` (`room.summary()` each; a pending admin's name is its `vname`),
+  `maxRooms`, the viewed room's `detail()` (`room, rname, admin, padmin, players, queue, lobby, cap, bots,
+  botMax`; empty without one) and the per-connection `mine` and `you`. The coalesced broadcast
   computes the list and each room's detail once (`cache`) and sends every connection its own message.
 - `tick()`: heartbeat, grace expiry and idle kicks over all records, `tickNo++`, then `room.step(now)`
   for every room (its time kept as `room.stepMs` (EMA) and `stepMax`), the lobby broadcast, input rates
@@ -504,10 +517,11 @@ a new frozen object per change, `baseCfg` itself after a reset), used by `activa
 `step` (the sim and `botKeys`); `applyCfg(set, reset, by)` returns the `cfg` event (null if nothing
 changed) and logs `room-cfg`; `detail()` and `adminView()` carry `cfgDiff(cfg)`. They die with the Room.
 `release(rec, reason, by)` frees the slot, name and token as before and then applies the room rules:
-with no human left (`humans()`: records without `bot`, playing, queued or away) it calls
-`arena.closeRoom` (why `left` for a leave, else `empty`); when the admin went, `setAdmin(successor(),
-'auto')` (the connected human with the earliest `joinedAt`, then away ones) and its `admin` event go out
-with the leave; then `promote()`. A drop inside the grace period is not a release, so the admin keeps the
+when the admin went, `handOn` (the connected human with the earliest `joinedAt`, then away ones; else
+the lobby visitor with the earliest `viewAt`, `visitors()`, as pending admin via `setAdminConn`) and
+its `admin` event go out with the leave, and with nobody to take over it calls `arena.closeRoom` (why
+`left` for a leave, else `empty`); a room with no human, no pending admin and no admin also closes;
+then `promote()`. A drop inside the grace period is not a release, so the admin keeps the
 role until the grace runs out (or the record resumes).
 
 ## server/debug.js
@@ -593,11 +607,14 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
 - **Rooms (SPEC §17).** `lobby` also holds `rooms`, `maxRooms`, `room`, `rname` and `admin`.
   `join(name, color, room)` and `create(name, color, rname)` set what the next `hello`/`create` sends (a
   resume sends only the token); `viewRoom(id)` sends `view` and is repeated on a new socket's connection
-  welcome (`viewWant`; also kept on `leave`, cleared by `closed`); `rename(name)`, `makeAdmin(id)`,
-  `isAdmin()`. `refused` (a refused join or create clears `want`) and `closed` go to the `onRefused` /
+  welcome (`viewWant`; also kept on `leave`, cleared by `closed`) with `viewInfo` (our name field and
+  whether we watch; `setViewInfo(info)` re-sends `view` when they change while we look at a room
+  without being in it); `rename(name)`, `makeAdmin({id} | {conn})`, `isAdmin()`. `lobby` also holds
+  `padmin`, `lobby` (the room's visitors) and `you`. `refused` (a refused join or create clears `want`) and `closed` go to the `onRefused` /
   `onClosed` callbacks; a lobby whose `room` differs from the last one resets the view (`resetView`:
   snapshots, the event queue, taken pickups, the arrival clock) and calls `onRoom`. `admin` and `room`
-  events update `lobby.admin` / `lobby.rname` (and the list) and call `onLobby`.
+  events update `lobby.admin` / `lobby.padmin` / `lobby.mine` / `lobby.rname` (and the list) and call
+  `onLobby`; an `admin` event naming our connection (`conn` = `you`) makes us the pending admin.
 - **State.**
   - `id`, `token`, `queuePos`, `lobby`.
   - `state`: `connecting`, `open`, `reconnecting` or `kicked`.
@@ -930,7 +947,11 @@ editable physics.
     Watch with its line; the info line; the admin's rename row (`#lRenameIn`, `#lRenameBtn` →
     `renameRoom`) and AI row (`renderBots('l')`: − / + for the admin, else the count read-only, no row at
     0); the live player list with scores and the queue (`rosterRow`: an ADMIN tag, and for the admin a
-    small `button.mkadm` "Make admin" next to every other human). Lists with buttons are rebuilt only when
+    small `button.mkadm` "Make admin" next to every other human); under them `#lVisBox` "In the lobby"
+    (`renderVisitors`: the room's visitors, 👁 for watchers, "(no name)", ADMIN for the pending admin, a
+    `button.mkadm` with `data-conn` for the admin; hidden while nobody but us is there; the Esc menu has
+    the same list, `#lvVisitors`). The name field's value goes to `net.setViewInfo` (700 ms after typing
+    stops), `watchUi` sends the watch flag. Lists with buttons are rebuilt only when
     their content changes (`sameList`), so a lobby update between press and release cannot swallow a click,
   - `#lErr` (notices, both screens), and the footer: How to play and the word id (`#lId`,
     ` · id: amber-otter`, set from `net.onWord`; SPEC §13.5).
@@ -947,7 +968,7 @@ editable physics.
 - **Admin transfer dialog** (`#adm`, `admDialog(target)`): every Make admin tap opens "Make <name> the
   admin of <room>? You will lose admin." with Cancel focused (Enter on it cancels; Esc or a tap outside
   cancels too; the keydown handler hands the keyboard to the dialog) and Confirm, which sends
-  `net.makeAdmin(id)`. 44 px buttons, above every other overlay.
+  `net.makeAdmin(target)` (`{id}` for a player, `{conn}` for a lobby visitor). 44 px buttons, above every other overlay.
 - **HUD.** `hudOnline` shows HP and score, a respawn countdown while dead, `ARENA FULL · QUEUE #n`
   with "you are #n of m waiting" under it while queued, and `RECONNECTING…`. Name tags
   (`drawNameTag`, `(away)` during a grace period) and HP bars float over every player.

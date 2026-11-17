@@ -275,7 +275,13 @@
   #lBots button:hover:not(:disabled) { background: rgba(5,217,232,.15); }
   #lBots button:disabled { opacity: .3; cursor: not-allowed; }
   #lBotN { min-width: 2ch; text-align: center; font-size: 20px; font-weight: 800; color: #fff; }
-  #lQueueBox.hidden { display: none; }
+  #lQueueBox.hidden, #lVisBox.hidden { display: none; }
+  /* the room's lobby visitors (SPEC §17): small and quiet, hidden while there are none */
+  ul.vis { list-style: none; margin: 0; padding: 0; max-height: 14vh; overflow-y: auto; font-size: 12px; }
+  ul.vis li { display: flex; align-items: center; gap: 8px; padding: 1px 0; color: #aaa; }
+  ul.vis li.me { color: #ddd; }
+  ul.vis .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.vis .nm.none { font-style: italic; }
   #lQueue { list-style: none; margin: 0; padding: 0; max-height: 18vh; overflow-y: auto; font-size: 13px; }
   #lQueue li { display: flex; align-items: center; gap: 8px; padding: 1px 0; color: #ccc; }
   #lQueue li.me { color: #f9f871; font-weight: 800; }
@@ -409,7 +415,7 @@
     <p>Spinning stars appear often. Each pickup gives 5, 10 or 15 (the number floats over it; big bundles are rarer), and you can carry 30. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
     <h3>Rooms</h3>
     <p>The first screen lists the open rooms (at most 10), each with its admin (★) and how many are fighting (of 8). Tap one to open it: pick a name and colour, then Fight or Watch. If it is full you wait in its queue. ← Rooms goes back to the list.</p>
-    <p>Create a room at the bottom of the list (the name is optional): you are its admin and land on its screen, where you can rename it and add or remove AI players (they take slots) before you press Fight. Going back to the list before anyone has joined closes it again. The admin also has the room settings (D, on a keyboard): gravity, jumps, speeds, damage, gore and the blood style, for everyone in the room until it closes. With the small Make admin button next to a player you hand the role to someone else (it asks first); while others are in the room you must do that before you leave it. If the admin's connection is lost for good, the player who has been there longest takes over. A room closes when its last player leaves.</p>
+    <p>Create a room at the bottom of the list (the name is optional): you are its admin and land on its screen, where you can rename it and add or remove AI players (they take slots) before you press Fight. Going back to the list before anyone has joined closes it again. The admin also has the room settings (D, on a keyboard): gravity, jumps, speeds, damage, gore and the blood style, for everyone in the room until it closes. With the small Make admin button next to a player, or next to someone in the lobby of the room ("In the lobby"), you hand the role to someone else (it asks first); while others are playing in the room you must do that before you leave it. If the admin's connection is lost for good, the player who has been there longest takes over, else whoever has been looking at the room longest. A room closes when nobody is left in it or looking at it.</p>
     <h3>Watching</h3>
     <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the room is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, and the Leader button to go back to following the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
     <h3>Privacy</h3>
@@ -425,6 +431,7 @@
       <div class="rt">Room: <b id="lvRName"></b></div>
       <div id="lvBots"><span>AI players</span><span id="lvBotRO"></span><span class="ctl"><button id="lvBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lvBotN">0</span><button id="lvBotInc" type="button" aria-label="More AI players">+</button></span></div>
       <ul id="lvPlayers"></ul>
+      <div id="lvVisBox" class="hidden2"><div class="rt">In the lobby</div><ul id="lvVisitors" class="vis"></ul></div>
     </div>
     <div id="lvErr"></div>
     <button id="lvYes">Leave</button><button id="lvNo">Stay</button>
@@ -464,6 +471,7 @@
       <label>In the room</label>
       <ul id="lPlayers"></ul>
       <div id="lQueueBox" class="hidden"><label>Queue (you join when a slot frees)</label><ul id="lQueue"></ul></div>
+      <div id="lVisBox" class="hidden"><label>In the lobby</label><ul id="lVisitors" class="vis"></ul></div>
     </div>
     <div id="lErr"></div>
     <div id="lStatus"></div>

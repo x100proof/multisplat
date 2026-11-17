@@ -32,9 +32,9 @@ export class Room {
     this.baseCfg = Object.freeze({ ...VIEW_DEFAULTS, ...arena.cfg });
     this.cfg = this.baseCfg; this.level = arena.level; this.maxPlayers = arena.maxPlayers;
     this.adminId = null;          // the record id of the admin (a human in this room) — SPEC §17
-    this.adminConn = null;        // or the pending admin: a connection with no record (created the room, not fighting)
+    this.adminConn = null;        // or the pending admin: a connection with no record (created the room, or
+                                  // was handed it while looking at it, and is not fighting)
     this.adminActAt = 0;          // the pending admin's last action (a room held only by it closes after ROOM.pendingMs)
-    this.pendingName = null;      // the creator's player name, shown in the room list while it is pending
     this.state = Sim.createWorld({ seed });
     this.state.tick = arena.tickNo;   // lockstep with every other room (see above)
     this.hist = Sim.createHistory();
@@ -56,6 +56,9 @@ export class Room {
   activeCount() { let n = 0; for (const r of this.recs.values()) if (r.state === 'play') n++; return n; }
   humans() { return [...this.recs.values()].filter(r => !r.bot); }
   watchers() { let n = 0; for (const c of this.viewers) if (!c.rec || c.rec.room !== this) n++; return n; }
+  // The lobby visitors of this room (SPEC §17): connections looking at it without a record (on its
+  // screen or watching), the longest-looking first. Its pending admin is one of them.
+  visitors() { return [...this.viewers].filter(c => !c.rec && !c.closed).sort((a, b) => (a.viewAt - b.viewAt) || (a.id - b.id)); }
   admin() { return this.adminId != null ? this.recs.get(this.adminId) || null : null; }
   maxBots() { return Math.max(0, this.maxPlayers - 1); }
 
@@ -146,8 +149,12 @@ export class Room {
     if (rn) evs.push(rn);
     this.arena.lobbyDirty = true;
     if (this.closing) return;   // closeRoom is removing the bots: nobody is left to tell
-    if (!this.humans().length && !this.adminConn) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
-    if (rec.id === this.adminId) evs.push(this.setAdmin(this.successor(), 'auto'));
+    if (rec.id === this.adminId) {
+      // the admin is gone for good: a human takes over, else a lobby visitor (pending), else it closes
+      const why = reason === 'left' ? 'left' : 'empty';
+      if (!this.humans().length && !this.visitors().length) { this.arena.closeRoom(this, why); return; }
+      evs.push(this.handOn(why, false));
+    } else if (!this.humans().length && !this.adminConn && this.adminId == null) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
   }
@@ -156,6 +163,17 @@ export class Room {
   successor() {
     const hs = this.humans().sort((a, b) => (!a.conn - !b.conn) || (a.joinedAt - b.joinedAt) || (a.id - b.id));
     return hs[0] || null;
+  }
+
+  // The admin is gone (SPEC §17): the role passes to the longest-present human, else to the lobby
+  // visitor who has looked at the room longest (as its pending admin); with nobody, the room closes
+  // (why: `closeWhy`). Sends the `admin` event itself unless `send` is false (then it returns it).
+  handOn(closeWhy, send = true) {
+    const rec = this.successor(), vis = rec ? null : this.visitors().find(c => c !== this.adminConn);
+    if (!rec && !vis) { this.arena.closeRoom(this, closeWhy); return null; }
+    const ev = rec ? this.setAdmin(rec, 'auto') : this.setAdminConn(vis, 'auto');
+    if (send) this.broadcastEvents([ev]);
+    return ev;
   }
 
   // Room settings (SPEC §17.1). `set`: {key: value}, already checked by the caller; reset: back to
@@ -169,6 +187,19 @@ export class Room {
     this.log(`room-cfg conn=${by ? by.id : '-'} ${reset ? 'reset' : Object.entries(ch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
     this.event('room-cfg', by ? by.id : null, reset ? { reset: true } : { set: ch });
     return { type: 'cfg', tick: this.state.tick, cfg: cfgDiff(this.cfg), ...(reset ? { reset: true } : { ch }) };
+  }
+
+  // Make the lobby visitor on `conn` (no record, looking at this room) the room's pending admin
+  // (SPEC §17): like a creator who has not fought, it renames, sets the AI players and the settings,
+  // watches, and stays admin when it joins with FIGHT. Returns the `admin` event (id null, `conn`).
+  setAdminConn(conn, why, by = null) {
+    const from = this.adminId;
+    if (this.adminConn && this.adminConn !== conn) this.adminConn.adminOf = null;
+    this.adminId = null; this.adminConn = conn; conn.adminOf = this; this.adminActAt = this.arena.now();
+    this.log(`admin from=${from ?? '-'} to=conn:${conn.id} why=${why}`);
+    this.event('admin', by ? by.id : conn.id, { from, toConn: conn.id, why });
+    this.arena.lobbyDirty = true;
+    return { type: 'admin', tick: this.state.tick, id: null, conn: conn.id, from, why };
   }
 
   // Make `rec` the admin. Returns the `admin` event for the room's viewers (the caller sends it).
@@ -239,13 +270,16 @@ export class Room {
   queueList() { return this.queue.map(r => ({ id: r.id, name: r.name, color: r.color, away: !r.conn })); }
   // The room's half of a lobby message (SPEC §17): what a member or a visitor who selected it sees.
   detail() {
-    return { room: this.id, rname: this.name, admin: this.adminId, players: this.roster(), queue: this.queueList(),
+    // lobby: its visitors [{c: connection id, name (null: none typed), w: watching}], longest first
+    const lobby = this.visitors().map(c => ({ c: c.id, name: c.vname ?? null, ...(c.vwatch ? { w: true } : {}) }));
+    return { room: this.id, rname: this.name, admin: this.adminId, padmin: this.adminConn ? this.adminConn.id : null,
+      players: this.roster(), queue: this.queueList(), lobby,
       cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots(), cfg: cfgDiff(this.cfg) };
   }
   // One row of the room list every lobby visitor sees.
   summary() {
     const a = this.admin();
-    const an = a ? a.name : this.adminConn ? this.pendingName : null;
+    const an = a ? a.name : this.adminConn ? this.adminConn.vname ?? null : null;
     return { id: this.id, name: this.name, admin: an, n: this.activeCount(), cap: this.maxPlayers,
       bots: this.bots.length, q: this.queue.length, watch: this.watchers() };
   }
@@ -372,7 +406,7 @@ export class Room {
   }
   adminView() {
     const a = this.admin(), st = this.state;
-    return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : this.adminConn ? { pending: true, conn: this.adminConn.id, name: this.pendingName } : null, creatorIp: this.creatorIp,
+    return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : this.adminConn ? { pending: true, conn: this.adminConn.id, name: this.adminConn.vname ?? null } : null, creatorIp: this.creatorIp,
       ageS: Math.round((this.arena.now() - this.createdAt) / 1000), bots: this.bots.length, watchers: this.watchers(),
       cfg: cfgDiff(this.cfg),
       stepMs: r2(this.stepMs), stepMaxMs: r2(this.stepMax),

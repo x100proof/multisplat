@@ -34,10 +34,10 @@ function setup(opts = {}) {
   return { arena, conn, maker, creator, joiner, advance, tick, events, logs };
 }
 
-test('rooms: protocol 4; a new connection sees an empty room list', () => {
+test('rooms: protocol 5; a new connection sees an empty room list', () => {
   const { conn } = setup();
   const c = conn();
-  assert.equal(PROTOCOL, 4); assert.equal(c.msgs[0].v, 4);
+  assert.equal(PROTOCOL, 5); assert.equal(c.msgs[0].v, 5);
   const l = c.last('lobby');
   assert.deepEqual(l.rooms, []); assert.equal(l.maxRooms, ROOM.max); assert.equal(l.room, null);
   assert.equal(l.cap, 8); assert.equal(NET.maxPlayers, 8);
@@ -67,16 +67,16 @@ test('rooms: create makes the creating connection the pending admin, without joi
   q.say({ t: 'view', room: 0 }); void q;
 });
 
-test('rooms: a created room closes when its pending admin looks away or disconnects with no human in it', () => {
+test('rooms: a created room closes when its pending admin looks away or disconnects with nobody else looking at it', () => {
   const { arena, conn, maker, tick } = setup();
   const a = maker('Ann');
   a.say({ t: 'bots', n: 3 });
-  const v = conn(); v.say({ t: 'view', room: 1 });
+  const v = conn();                                      // on the room list: not a visitor of the room
   a.say({ t: 'view', room: 0 });
   assert.equal(arena.rooms.size, 0); assert.equal(arena.recs.size, 0, 'its bots went with it');
   assert.equal(a.last('closed'), undefined, 'the creator went back on its own: no notice');
   assert.equal(a.last('lobby').room, null);
-  assert.deepEqual(v.last('closed'), { t: 'closed', room: 1, name: "Ann's room", why: 'left' });
+  assert.equal(v.last('closed'), undefined); tick(40); assert.deepEqual(v.last('lobby').rooms, []);
   // disconnecting
   const b = maker('Bea'); b.say({ t: 'bots', d: 1 });
   arena.disconnect(b.conn);
@@ -87,7 +87,8 @@ test('rooms: a created room closes when its pending admin looks away or disconne
   assert.deepEqual([...arena.rooms.keys()], [4]); assert.equal(c.last('lobby').room, 4);
   // a create from a pending admin is a protocol kick (admin of one room at most)
   d.say({ t: 'create', name: 'Di' }); assert.equal(d.closed.code, KICK.protocol);
-  assert.equal(arena.rooms.size, 0);
+  assert.deepEqual([...arena.rooms.keys()], [4]); assert.equal(arena.rooms.get(4).adminConn, c.conn, 'its visitor took over');
+  c.say({ t: 'view', room: 0 }); assert.equal(arena.rooms.size, 0);
   // a room held only by its pending admin closes after ROOM.pendingMs without an admin action
   const e = maker('Ed');
   tick(Math.ceil(ROOM.pendingMs / TICK_MS) + 2);
@@ -282,7 +283,7 @@ test('rooms: the admin cannot leave while another human is in the room; alone, i
   const { arena, creator, joiner, conn, tick } = setup();
   const a = creator('Ann'), b = joiner('Bea', 1);
   a.say({ t: 'bots', n: 2 });
-  const v = conn(); v.say({ t: 'view', room: 1 });
+  const v = conn(); v.say({ t: 'view', room: 1 });       // a lobby visitor does not stop the admin leaving the fight
   a.say({ t: 'leave' });
   assert.deepEqual(a.last('refused'), { t: 'refused', what: 'leave', why: 'admin' });
   assert.equal(arena.recs.get(a.id()).state, 'play', 'still in the room');
@@ -291,12 +292,11 @@ test('rooms: the admin cannot leave while another human is in the room; alone, i
   a.say({ t: 'leave' });                                 // now alone (bots are not humans): back on the room's screen
   assert.equal(arena.rooms.size, 1); assert.equal(arena.recs.has(a.id()), false);
   assert.equal(arena.rooms.get(1).adminConn, a.conn); assert.equal(a.last('lobby').mine, true); assert.equal(a.last('lobby').room, 1);
-  a.say({ t: 'view', room: 0 });                         // and looking away closes it
+  v.say({ t: 'view', room: 0 }); b.say({ t: 'view', room: 0 });   // (Bea stayed on the room's screen after leaving)
+  a.say({ t: 'view', room: 0 });                         // and looking away, with nobody else looking at it, closes it
   assert.equal(arena.rooms.size, 0);
   assert.equal(arena.recs.size, 0, 'its bots went with it');
-  assert.deepEqual(v.last('closed'), { t: 'closed', room: 1, name: "Ann's room", why: 'left' });
-  assert.equal(v.last('lobby').room, null); assert.deepEqual(v.last('lobby').rooms, []);
-  v.msgs.length = 0; tick(4); assert.equal(v.last('snapshot'), undefined);
+  tick(40); assert.deepEqual(v.last('lobby').rooms, []);
   assert.equal(a.closed, null, 'the admin stays connected, back at the room list');
 });
 
@@ -333,13 +333,12 @@ test('rooms: a room closes when its last human is gone for good (kick or grace e
   const { arena, creator, conn, advance, tick } = setup();
   const a = creator('Ann');
   a.say({ t: 'bots', n: 3 });
-  const v = conn(); v.say({ t: 'view', room: 1 });
-  arena.disconnect(a.conn);
+  arena.disconnect(a.conn);                              // nobody else looks at the room
   advance(3000); tick(1);
   assert.equal(arena.rooms.size, 1, 'kept while the human may still resume');
   advance(2100); tick(1);
   assert.equal(arena.rooms.size, 0); assert.equal(arena.recs.size, 0);
-  assert.equal(v.last('closed').why, 'empty');
+  void conn;
   const b = creator('Bea');
   b.say({ t: 'bots', n: 2 });
   arena.kick(b.conn, 'flood');

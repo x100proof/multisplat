@@ -1087,8 +1087,9 @@ async function roomsTest() {
 // buttons and the enabled AI controls, the old one loses them. The creator here is a pending admin
 // (created, not fighting): ← Rooms is refused while Bob is in the room. Then the Esc menu: Leave is
 // blocked for the admin with another human present, the transfer works from the menu, the old admin
-// leaves; the sole admin leaves the fight onto the room's screen (still admin), and going back to the
-// list closes the room: a watcher of it is sent back to the list with the closed message.
+// leaves; the sole admin leaves the fight onto the room's screen (still admin) and makes Bob, who is
+// watching (a lobby visitor of the room), the admin from "In the lobby": he becomes its pending admin,
+// FIGHT keeps it, and his going back to the list with nobody else looking closes the room.
 async function adminTest() {
   const dir = tempDir(); dirs.push(dir);
   const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
@@ -1158,7 +1159,7 @@ async function adminTest() {
   await B.page.click('#lvYes');
   await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && __mp.net.mode === 'viewer' && __mp.net.id == null), { what: 'Bob back in the lobby as a viewer' });
   // --- Ann is the only human and the admin: leaving the fight keeps her admin on the room's screen.
-  // Bob watches the room meanwhile.
+  // Bob watches the room meanwhile (a lobby visitor of it, listed "In the lobby" with 👁).
   await B.page.click('#lWatch');
   await waitFor(() => B.page.evaluate(() => __mp.watching.on), { what: 'Bob watching' });
   await A.page.keyboard.press('Escape');
@@ -1166,17 +1167,43 @@ async function adminTest() {
   await waitFor(async () => /You stay the admin/.test((await menu(A)).note), { what: 'the stay-admin note' });
   m = await menu(A);
   assert.ok(!m.yes); assert.equal(m.yesText, 'Leave');
+  await waitFor(() => A.page.evaluate(() => document.querySelectorAll('#lvVisitors button.mkadm').length === 1), { what: 'Bob (watching) in the Esc menu\'s lobby list' });
   await A.page.click('#lvYes');
   await waitFor(() => A.page.evaluate(r => __mp.lobbyOpen && __mp.net.lobby.room === r && __mp.net.isAdmin() && __mp.net.id == null, A.room), { what: 'Ann on the room\'s screen, still admin' });
   assert.equal(await roomsOpen(srv), 1, 'the room stays open');
-  await A.page.click('#lBack');                          // and back to the list closes it
-  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && /has closed/.test(document.getElementById('lErr').textContent)), { what: 'the watcher is back at the list with the closed message' });
-  assert.match(await B.page.textContent('#lErr'), /The room "Keep" has closed\./);
-  assert.equal(await B.page.evaluate(() => __mp.net.lobby.room), null);
-  await waitFor(async () => (await listOf(B)).length === 0, { what: 'the room is gone from the list' });
-  assert.equal(await roomsOpen(srv), 0);
-  assert.equal(await A.page.evaluate(() => __mp.net.lobby.room), null);
-  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves to the room screen, ← Rooms closes it, a watcher gets the closed message');
+  // --- Make admin to a lobby visitor: Bob, watching, is listed "In the lobby" with a Make admin button
+  const vis = p => p.page.evaluate(() => ({ shown: !document.getElementById('lVisBox').classList.contains('hidden'),
+    rows: [...document.querySelectorAll('#lVisitors li')].map(li => ({ name: li.querySelector('.nm').firstChild.textContent, admin: !!li.querySelector('.adm'), mk: !!li.querySelector('button.mkadm') })) }));
+  await waitFor(async () => (await vis(A)).rows.some(r => r.mk), { what: 'Bob in Ann\'s lobby list' });
+  let vv = await vis(A);
+  assert.ok(vv.shown);
+  assert.deepEqual(vv.rows.filter(r => r.mk).map(r => r.name), ['👁 Bob'], 'Make admin next to Bob only: ' + JSON.stringify(vv.rows));
+  assert.ok(vv.rows.some(r => r.name === 'Ann (you)' && r.admin && !r.mk), 'Ann listed as (you), ADMIN, no button');
+  await ask(A, '#lVisitors button.mkadm');
+  assert.equal((await dlg(A)).text, 'Make Bob the admin of Keep? You will lose admin.');
+  const bConn = await B.page.evaluate(() => __mp.net.lobby.you);
+  assert.deepEqual((await dlg(A)).target, { conn: bConn, name: 'Bob' });
+  await A.page.click('#admYes');
+  await waitFor(() => B.page.evaluate(() => __mp.net.isAdmin() && __mp.net.lobby.padmin === __mp.net.lobby.you), { what: 'Bob (watching) is the pending admin' });
+  await waitFor(() => B.page.evaluate(() => /You are now the admin of Keep/.test(document.getElementById('toast').textContent)), { what: 'the new-admin notice' });
+  await waitFor(() => A.page.evaluate(() => !__mp.net.isAdmin() && document.querySelectorAll('#lVisitors button.mkadm').length === 0), { what: 'Ann lost admin' });
+  await A.page.click('#lBack');                          // Ann is not the admin: back to the list, the room stays
+  await waitFor(() => A.page.evaluate(() => __mp.net.lobby.room === null), { what: 'Ann at the list' });
+  assert.equal(await roomsOpen(srv), 1);
+  // Bob stops watching (his room's screen, with the admin controls) and FIGHT keeps him admin
+  await B.page.keyboard.press('Escape');
+  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && !document.getElementById('lRenameRow').classList.contains('hidden2')), { what: 'Bob on the room screen with the admin controls' });
+  await B.page.click('#lFight');
+  await waitFor(() => B.page.evaluate(() => __mp.net.id != null && __mp.net.lobby.admin === __mp.net.id && __mp.net.isAdmin()), { what: 'Bob fighting, still admin' });
+  // the sole admin leaves the fight onto the room's screen; ← Rooms with nobody else looking closes it
+  await B.page.keyboard.press('Escape');
+  await waitFor(async () => (await menu(B)).open && !(await menu(B)).yes, { what: 'Bob\'s Esc menu' });
+  await B.page.click('#lvYes');
+  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && __mp.net.isAdmin() && __mp.net.id == null), { what: 'Bob on the room screen, admin' });
+  await B.page.click('#lBack');
+  await waitFor(async () => (await roomsOpen(srv)) === 0, { what: 'the room closed' });
+  await waitFor(async () => (await listOf(A)).length === 0, { what: 'the room is gone from the list' });
+  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves to the room screen, Make admin to a watching lobby visitor (pending admin, FIGHT keeps it), ← Rooms with nobody looking closes it');
   for (const p of [A, B]) await p.page.context().close();
   await srv.stop();
 }

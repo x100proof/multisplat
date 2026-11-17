@@ -1663,6 +1663,10 @@ function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* privat
 function setupLobby() {
   const nameIn = document.getElementById('lName');
   nameIn.value = lsGet(LS_NAME) || '';
+  // the room we look at lists us under what the name field holds (SPEC §17): sent when it settles
+  const sendName = () => { if (net) net.setViewInfo({ name: cleanName(nameIn.value) || '' }); };
+  sendName();
+  nameIn.addEventListener('input', () => { clearTimeout(sendName.t); sendName.t = setTimeout(sendName, 700); });
   pickedColor = Math.max(0, Math.min(COLORS.length - 1, +lsGet(LS_COLOR) || 0));
   const sw = document.getElementById('lColors');
   COLORS.forEach((c, i) => {
@@ -1686,9 +1690,9 @@ function setupLobby() {
   // AI players (SPEC §15): − / + ask the server (admin only); the count shown is always the server's
   for (const [id, d] of [['lBotDec', -1], ['lBotInc', 1], ['lvBotDec', -1], ['lvBotInc', 1]]) document.getElementById(id).addEventListener('click', () => net.bots(d));
   // "Make admin" buttons (lobby roster, Esc menu): each opens the confirm dialog
-  for (const id of ['lPlayers', 'lQueue', 'lvPlayers']) document.getElementById(id).addEventListener('click', e => {
+  for (const id of ['lPlayers', 'lQueue', 'lvPlayers', 'lVisitors', 'lvVisitors']) document.getElementById(id).addEventListener('click', e => {
     const b = e.target.closest('button.mkadm');
-    if (b) admDialog({ id: +b.dataset.id, name: b.dataset.name });
+    if (b) admDialog(b.dataset.conn ? { conn: +b.dataset.conn, name: b.dataset.name } : { id: +b.dataset.id, name: b.dataset.name });
   });
   // The log word id (SPEC §13.5), small in the footer so a player can quote it.
   const idEl = document.getElementById('lId'), showId = w => { idEl.textContent = w ? ` · id: ${w}` : ''; };
@@ -1824,6 +1828,31 @@ function rosterRow(p, { score = true, me = false, prefix = '' } = {}) {
   if (score) { const sc = document.createElement('span'); sc.className = 'sc'; sc.textContent = String(p.score); li.appendChild(sc); }
   return li;
 }
+// The room's lobby visitors (SPEC §17: on its screen, or 👁 watching), longest first, under "In the
+// lobby": name (or "(no name)"), ADMIN for its pending admin, and for the admin a "Make admin" button
+// next to everyone else. The section is hidden while nobody but ourselves is there.
+function renderVisitors(boxId, ulId, hideClass) {
+  const { lobby = [], padmin = null, you = null } = net.lobby, admin = net.isAdmin();
+  const others = lobby.filter(v => v.c !== you);
+  document.getElementById(boxId).classList.toggle(hideClass, !others.length);
+  const ul = document.getElementById(ulId);
+  if (sameList(ul, [admin, padmin, you, lobby])) return;
+  for (const v of lobby) {
+    const li = document.createElement('li'); if (v.c === you) li.className = 'me';
+    const nm = document.createElement('span'); nm.className = 'nm' + (v.name ? '' : ' none');
+    nm.textContent = (v.w ? '👁 ' : '') + (v.name || '(no name)') + (v.c === you ? ' (you)' : '');
+    if (v.w) nm.title = 'watching';
+    if (v.c === padmin) { const a = document.createElement('span'); a.className = 'adm'; a.textContent = 'ADMIN'; nm.appendChild(a); }
+    li.appendChild(nm);
+    if (admin && v.c !== you) {
+      const label = v.name || 'this visitor';
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'mkadm'; b.textContent = 'Make admin';
+      b.dataset.conn = v.c; b.dataset.name = label; b.setAttribute('aria-label', `Make ${label} admin`);
+      li.appendChild(b);
+    }
+    ul.appendChild(li);
+  }
+}
 // The AI row (lobby and Esc menu): − / + for the admin only; everyone else sees the count read-only
 // (and no row at all when there are none).
 function renderBots(pre) {
@@ -1881,13 +1910,14 @@ function renderLobby() {
   const ql = document.getElementById('lQueue');
   if (!sameList(ql, [admin, adm, net.id, queue])) queue.forEach((q, i) => ql.appendChild(rosterRow(q, { score: false, me: q.id === net.id, prefix: `#${i + 1} ` })));
   document.getElementById('lQueueBox').classList.toggle('hidden', !queue.length);
+  renderVisitors('lVisBox', 'lVisitors', 'hidden');
   renderBots('l');
   document.getElementById('lWatch').disabled = member;   // SPEC §16: watching is for lobby viewers
 }
 
 // ---------- the admin transfer confirm dialog (SPEC §17): every "Make admin" tap asks first ----------
 // Cancel has the focus, so a stray Enter does not hand the room away; Esc or a tap outside cancels.
-let admOpen = null;   // {id, name} while open
+let admOpen = null;   // {id, name} (a player) or {conn, name} (a lobby visitor) while open
 const admEl = document.getElementById('adm');
 function admDialog(target) {
   admOpen = target;
@@ -1897,10 +1927,10 @@ function admDialog(target) {
     document.getElementById('admRoom').textContent = net.lobby.rname || 'this room';
     document.getElementById('admNo').focus();
   }
-  dbg('life', target ? 'make admin: asking' : 'make admin: closed', target ? { id: target.id } : {});
+  dbg('life', target ? 'make admin: asking' : 'make admin: closed', target ? (target.conn != null ? { conn: target.conn } : { id: target.id }) : {});
 }
 document.getElementById('admNo').addEventListener('click', () => admDialog(null));
-document.getElementById('admYes').addEventListener('click', () => { const t = admOpen; admDialog(null); if (t) net.makeAdmin(t.id); });
+document.getElementById('admYes').addEventListener('click', () => { const t = admOpen; admDialog(null); if (t) net.makeAdmin(t); });
 admEl.addEventListener('click', e => { if (e.target === admEl) admDialog(null); });
 
 // ---------- how to play: H (or ? on touch, or the lobby link) opens it; H, Escape, Enter or Close shuts it ----------
@@ -1964,6 +1994,7 @@ function renderLeave() {
   const ul = document.getElementById('lvPlayers');
   const { players = [], queue = [] } = net.lobby;
   if (!sameList(ul, [admin, net.lobby.admin, net.id, players, queue])) for (const p of [...players, ...queue].filter(p => !p.bot)) ul.appendChild(rosterRow(p, { score: false, me: p.id === net.id }));
+  renderVisitors('lvVisBox', 'lvVisitors', 'hidden2');
 }
 function leaveGame() {
   if (ONLINE && net.isAdmin() && otherHumans().length) { renderLeave(); return; }   // blocked: hand over first (SPEC §17)
@@ -1993,6 +2024,7 @@ let watching = false, watchChosen = null, watchId = null;   // chosen: picked by
 const watchEl = document.getElementById('watch');
 function watchUi(on) {
   watching = on; watchChosen = null; watchId = null;
+  if (net) net.setViewInfo({ watch: on });   // the room's lobby list marks watchers 👁 (SPEC §17)
   document.body.classList.toggle('watching', on);
   watchEl.classList.toggle('hidden', !on);
   for (const k in keys) keys[k] = false;

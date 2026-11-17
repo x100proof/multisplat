@@ -679,7 +679,12 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   - **A room** (after tapping one, or creating one): "← Rooms" and the room's name; the name field, colour
     swatches, FIGHT and WATCH with the watch line (§16), a status line ("n/8 fighting · n waiting · you are
     the admin"); for the admin only the rename row and the AI −/+ row (others see the AI count read-only,
-    or no row at 0); "In the room" (the roster, with Make admin buttons for the admin) and the queue. It is
+    or no row at 0); "In the room" (the roster, with Make admin buttons for the admin) and the queue; and
+    "In the lobby", small and quiet, hidden while nobody but oneself is there: the room's **lobby
+    visitors** (connections looking at it without playing in it, on its screen or watching (marked 👁),
+    the longest-looking first), each under the name its page's name field holds (sent with `view` and
+    again, debounced, when it changes; player-name rules, otherwise "(no name)"), ADMIN by the pending
+    admin, and for the admin a Make admin button next to everyone but itself. It is
     shown while the page looks at the room (`view`), and the arena behind it is that room's. "← Rooms" sends
     `view` 0. A page that leaves the fight (Esc → Leave) or stops watching lands on the room's screen. When
     the room closes the page goes back to the list with "The room "<name>" has closed."
@@ -689,12 +694,17 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   **pending admin** (admin with no player record and no slot) and lands on the room's screen, where it can
   rename it, set the AI players and watch. FIGHT (a `hello` into the room) joins it as a normal player who
   stays admin (bound to the player record from then on). A blank name gives "<name>'s room" with the
-  creator's remembered player name, else "Room <id>". If the pending admin leaves the room's screen (back to
-  the list, another room) or disconnects while no human is in the room, the room closes (its bots go too);
-  with humans in it, it must hand over first (the server refuses a `view` elsewhere: `refused` leave/admin),
-  and a pending admin who disconnects passes the role at once to the human who has been there longest. A
-  player admin who is the only human and leaves the fight becomes the pending admin again. A room held only
-  by its pending admin closes after **10 minutes** without an admin action (create, rename, bots, admin).
+  creator's remembered player name, else "Room <id>". A lobby visitor made admin (below) is a pending
+  admin in exactly the same way. While humans are in the room, the pending admin must hand over before
+  it leaves the room's screen (back to the list, another room: the server refuses such a `view`:
+  `refused` leave/admin); if it disconnects, the role passes at once to the human who has been there
+  longest. With no human in the room, a pending admin who leaves the room's screen or disconnects passes
+  the role at once to the lobby visitor who has looked at the room longest (who becomes the pending
+  admin, with the "You are now the admin" notice), and with no visitor either the room closes (its bots go
+  too). Lobby visitors never block anyone from leaving: they are not asked to be handed over to. A
+  player admin who is the only human and leaves the fight becomes the pending admin again (visitors or
+  not). A room held only by its pending admin closes after **10 minutes** without an admin action
+  (create, rename, bots, settings, admin), visitors or not.
   Room names use the player-name rules (trimmed, double spaces collapsed, allowlist
   `[A-Za-z0-9 _-]`) plus the apostrophe, **1–20 characters**, checked on both sides. Names need not be
   unique (the list shows the admin too).
@@ -702,21 +712,29 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   - adds and removes the room's AI players (§15) and **renames** the room, from the room's screen (also
     while pending) or the Esc menu;
   - **hands the role on** with a small "Make admin" button next to every other human's name (not bots,
-    not oneself) in the room roster in the lobby and in the Esc menu, visible to the admin only. Every tap
+    not oneself) in the room roster in the lobby and in the Esc menu, and next to every other lobby
+    visitor of the room in its "In the lobby" list (room screen and Esc menu), visible to the admin only. Every tap
     opens a confirmation dialog: "Make <name> the admin of <room>? You will lose admin." with Cancel
     (focused, so a stray Enter does nothing; Esc also cancels) and Confirm, 44 px targets. Only Confirm
     sends the request. The server accepts it only from the current admin, for another human record of
-    the same room (playing, queued, or away inside its resume grace). Everyone in the room is told
-    (event `admin`) and the new admin's controls appear at once;
+    the same room (playing, queued, or away inside its resume grace) or another connection looking at
+    this room without a record (a lobby visitor of it; one is never another room's admin, since a
+    pending admin looking away gives that room up). A visitor made admin becomes the room's pending
+    admin: it renames, sets the AI players and the room settings, watches, and FIGHT joins it as a
+    player who stays admin. Everyone in the room is told (event `admin`) and the new admin's controls
+    appear at once;
   - **cannot leave for good without handing over** while another human is in the room: the Esc menu then
-    says "Make someone admin first", lists the room's humans with Make admin buttons and disables Leave
-    (the server refuses such a `leave` too). An admin who is the only human leaves the fight onto the room's
+    says "Make someone admin first", lists the room's humans (and, under "In the lobby", its visitors)
+    with Make admin buttons and disables Leave (the server refuses such a `leave` too). Lobby visitors
+    alone do not block Leave. An admin who is the only human leaves the fight onto the room's
     screen and stays admin (pending).
   - If the admin's connection drops, the role stays through the 5 s resume grace (§6.4). When the admin
     is gone for good (the grace ran out, a kick, or replaced), the role passes automatically to the human
-    who has been in the room longest, preferring connected ones (event `admin` with `why: 'auto'`).
+    who has been in the room longest, preferring connected ones, else to the lobby visitor who has looked
+    at it longest (as its pending admin) (event `admin` with `why: 'auto'`); with neither the room closes.
 - **Closing.** A room closes when its last human is gone for good (leave, kick or grace expiry; a human
-  away inside the grace keeps it open) and it has no pending admin, or as under Creating. Its bots are removed. Everyone looking at it (watchers, lobby
+  away inside the grace keeps it open) and it has no pending admin and nobody (no lobby visitor) to take
+  the admin role over, or as under Creating. Its bots are removed. Everyone looking at it (watchers, lobby
   visitors who selected it) gets `closed` and goes back to the room list with a short message.
 - **Per room:** name de-duplication and passing a freed name on (§9), colour uniqueness (§9), the queue
   and promotion, chat (§9), the AI players (§15), watching (§16). **Global:** connection caps
@@ -729,20 +747,26 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   open rooms created from one address** (the client IP as in §10, `TRUST_PROXY` included). Creating is
   limited per connection (burst 2, then one per 15 s); renames and admin transfers share another bucket
   (burst 4, then one per 2 s); a request over a bucket is refused and counts toward the flood kick.
-- **Protocol** (version 4 since room settings, §17.1; an older page reloads through the build check, §10):
+- **Protocol** (version 5 since lobby visitors can be made admin; an older page reloads through the build check, §10):
   - client → server: `{t:'create', room, name?}` (create a room named `room`, '' for the default; `name`
     is the creator's player name, optional; the sender becomes its pending admin and looks at it, and does
     not join); `{t:'hello', name, color, room: id}` (join; a resume `hello` with its token
-    needs no room); `{t:'view', room: id|0}` (the room a lobby visitor looks at; 0 for none);
-    `{t:'rename', name}`; `{t:'admin', id}`; `bots` and `leave` as before with the admin rules above.
-    Wrong types are `malformed` kicks (a missing or non-integer `room` in a fresh `hello` is `bad hello`);
+    needs no room); `{t:'view', room: id|0, name?, watch?}` (the room a lobby visitor looks at, 0 for
+    none; `name`: its name field, `watch`: watching; sent again for the same room when they change);
+    `{t:'rename', name}`; `{t:'admin', id}` (a player of the room) or `{t:'admin', conn}` (a lobby
+    visitor of the room, by its connection id; exactly one of the two); `bots` and `leave` as before with
+    the admin rules above. Wrong types are `malformed` kicks (a missing or non-integer `room` in a fresh
+    `hello` is `bad hello`);
   - server → client: `lobby` carries `rooms: [{id, name, admin, n, cap, bots, q, watch}]`, `maxRooms`, and
     for the room the connection plays in or selected `room`, `rname`, `admin` (the admin's player id; null
-    while the admin is pending) plus the existing roster fields, and `mine` (this connection is that room's
-    admin, pending or as its player); the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
+    while the admin is pending), `padmin` (the pending admin's connection id, or null), `lobby` (its
+    visitors: `[{c: connection id, name (null: none), w?: watching}]`) plus the existing roster fields,
+    `mine` (this connection is that room's admin, pending or as its player) and `you` (this connection's
+    id); the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
     what, why}` turns a request down without a kick (`create`: `full` | `ip` | `rate` | `name`; `join`:
     `gone`; `leave`: `admin`; `rename`: `admin` | `name` | `rate`; `admin`: `admin` | `target` | `rate`;
-    `bots`: `admin`; `cfg`: `admin` | `value` | `rate`); `{t:'closed', room, name, why}`; events `{type:'admin', id, from, why}` and
+    `bots`: `admin`; `cfg`: `admin` | `value` | `rate`); `{t:'closed', room, name, why}`; events `{type:'admin', id, conn?, from, why}` (to a lobby visitor:
+    `id` null and `conn` its connection id) and
     `{type:'room', id, name}`.
 - **Debugging.** `/state` and `tools/debug.js state` show every room (id, name, admin, players, bots,
   queue, watchers, pickups, its settings as a diff against the defaults (`cfg`), its share of the tick); ring events and log lines of a room carry its id

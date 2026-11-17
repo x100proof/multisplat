@@ -7,13 +7,18 @@
 // Every room steps once per server tick, so all rooms share one tick number (`arena.tickNo`): a
 // lobby visitor switching rooms keeps one continuous timeline and clock sync.
 import * as Sim from '../shared/sim.js';
-import { NET, TICK_MS, COLORS, KEY, BOT } from '../shared/constants.js';
+import { NET, TICK_MS, COLORS, KEY, BOT, FX } from '../shared/constants.js';
 import { newBrain, botKeys } from './ai.js';
 
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
 const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
 const DRAIN_WINDOW = 30;                            // ticks over which a standing input backlog is measured
 const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a skipped input must not lose
+// A rescued throw or slash press (from skipped inputs) that lands while its cooldown still runs (the
+// skip squeezed it closer to the previous one than the player pressed it) is retried when the
+// cooldown ends, up to RETRY_MAX times; plain presses on cooldown are still ignored, as the client
+// expects. Without this a quick second throw played its swish on the client but never flew.
+const RETRY_MAX = 3;
 export const r2 = v => Math.round(v * 100) / 100;
 
 export class Room {
@@ -193,7 +198,7 @@ export class Room {
     this.add({
       id, name: this.uniqueName(`${BOT.name} ${no}`), color: BOT.color, token: null, bot: true, botNo: no,
       brain: newBrain(this.state.rng ^ (id * 7919)),   // seeded from the room's sim seed, without consuming it
-      conn: null, ip: null, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, minQ: Infinity, qTicks: 0,
+      conn: null, ip: null, state: 'queue', inputs: [], lastSeq: -1, maxSeq: -1, lastKeys: 0, starve: 0, carry: 0, retry: [], tried: 0, minQ: Infinity, qTicks: 0,
       lastActive: now, discAt: null, fx: 0, joinedAt: now,
     }, by);
     return true;
@@ -263,7 +268,8 @@ export class Room {
         keys = botKeys(rec.brain, Sim.getPlayer(this.state, rec.id), this.state, seen, { cfg: this.cfg, level: this.level });
       } else if (rec.conn && rec.inputs.length) {
         const inp = rec.inputs.shift();
-        keys = inp.keys | rec.carry; rec.carry = 0;
+        const due = takeRetries(rec, this.state.tick);
+        keys = inp.keys | rec.carry | due; rec.tried = (rec.carry | due) & (KEY.THROW | KEY.SLASH); rec.carry = 0;
         rec.lastSeq = inp.seq; rec.starve = 0;
         if (inp.keys !== 0) rec.lastActive = now;
       } else if (rec.conn && ++rec.starve <= STARVE_ZERO_TICKS) keys = rec.lastKeys;
@@ -281,7 +287,11 @@ export class Room {
     const evs = [...this.pendingEvents, ...Sim.step(st, inputs, { cfg: this.cfg, level: this.level, rewind })];
     this.pendingEvents = [];
     Sim.recordHistory(this.hist, st);
-    for (const p of st.players) { const rec = this.recs.get(p.id); if (rec) rec.fx |= p.fx; }
+    for (const p of st.players) {
+      const rec = this.recs.get(p.id); if (!rec) continue;
+      rec.fx |= p.fx;
+      if (rec.tried) { retryRejected(rec, p, st.tick); rec.tried = 0; }
+    }
     this.broadcastEvents(this.withScores(evs));
     if (st.tick % SNAP_DIV === 0) this.snapshot();
   }
@@ -352,5 +362,23 @@ export class Room {
       stars: (st.stars || []).map(f => ({ id: f.id, owner: f.owner, x: r2(f.x), y: r2(f.y), vx: f.vx, dist: r2(f.dist) })),
       players: [...this.recs.values()].filter(r => r.state === 'play').map(r => this.recView(r)),
       queue: this.queue.map(r => this.recView(r)) };
+  }
+}
+
+// Rescued presses due by `tick` (SPEC §6.2: see RETRY_MAX), removed from the list.
+function takeRetries(rec, tick) {
+  let bits = 0;
+  if (rec.retry && rec.retry.length) rec.retry = rec.retry.filter(r => (r.at <= tick ? ((bits |= r.bit), false) : true));
+  return bits;
+}
+// After the step: a rescued throw/slash the sim refused because its cooldown was still running is
+// tried again on the tick the cooldown ends (key up the tick before, so it is a fresh press).
+function retryRejected(rec, p, tick) {
+  const tries = r => (rec.tries = rec.tries || {}, rec.tries[r] = (rec.tries[r] || 0) + 1);
+  for (const [bit, fx, cd] of [[KEY.THROW, FX.THROW, p.throwCd | 0], [KEY.SLASH, FX.SLASH, Math.max(p.atkCd | 0, p.atk | 0)]]) {
+    if (!(rec.tried & bit)) continue;
+    if (p.fx & fx || !p.alive) { if (rec.tries) rec.tries[bit] = 0; continue; }
+    if (cd > 0 && tries(bit) <= RETRY_MAX) (rec.retry = rec.retry || []).push({ bit, at: tick + cd + 1 });
+    else if (rec.tries) rec.tries[bit] = 0;
   }
 }

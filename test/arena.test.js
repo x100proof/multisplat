@@ -157,6 +157,28 @@ test('a one-tick slash tap inside a skipped (drained) input still fires', () => 
   assert.equal(p.swing, swing + 1, 'the skipped tap is carried into the next tick');
 });
 
+test('a second quick throw squeezed into the first one\'s cooldown by a drain is retried, not lost', () => {
+  const { conn, tick, arena } = setup();
+  const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  tick(100);
+  const rec = arena.recs.get(1), p = Sim.getPlayer(roomOf(arena).state, 1);
+  p.stars = 10; p.iframes = 0;
+  let seq = 0;
+  const send = (keys = 0) => a.say({ t: 'input', seq: ++seq, keys });
+  for (let i = 0; i < 10; i++) { send(); tick(1); }
+  tick(10);                                          // a stall, then a burst: throw, 6 idle, throw (7 apart, past the 5-tick cooldown as pressed)
+  for (let i = 1; i <= 11; i++) send(i === 1 || i === 8 ? KEY.THROW : 0);
+  tick(1);                                           // the first throw flies
+  assert.equal(p.stars, 9);
+  rec.qTicks = 29; rec.minQ = Infinity;              // the drain skips inputs 3..11 on the next tick, the second throw among them
+  send(); tick(1);
+  send(); tick(1);                                   // the rescued throw lands 2 ticks after the first: on cooldown
+  for (let i = 0; i < 10; i++) { send(); tick(1); }
+  assert.equal(p.stars, 8, 'the second throw flew once its cooldown ended');
+  for (let i = 0; i < 20; i++) { send(); tick(1); }
+  assert.equal(p.stars, 8, 'and only once');
+});
+
 test('after a long absence inputs are applied again at once', () => {
   const { conn, tick, arena } = setup();
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });

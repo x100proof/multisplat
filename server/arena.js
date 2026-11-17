@@ -519,7 +519,7 @@ export class Arena {
 
   // Forget input sequencing: a new session (resume) restarts its seq from 1.
   resetInputs(rec) {
-    rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.minQ = Infinity; rec.qTicks = 0;
+    rec.lastSeq = -1; rec.maxSeq = -1; rec.starve = 0; rec.carry = 0; rec.retry = []; rec.tried = 0; rec.tries = null; rec.minQ = Infinity; rec.qTicks = 0;
   }
 
   // The player is gone for good (its room does the work, including admin hand-over and closing).

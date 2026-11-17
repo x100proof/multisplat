@@ -6,6 +6,7 @@ import { NET, TICK_MS, PW, PH, KEY, FX, cfgDiff, cfgFromDiff } from '/shared/con
 import { LEVEL } from '/shared/level.js';
 import { dbg, dbgv, sendReport, setWordId, setLogSink } from './debug.js';
 import { isWordId } from '/shared/logid.js';
+import { unpackPlayer, unpackItems, unpackFlying } from '/shared/protocol.js';
 
 const INTERP_TICKS = NET.interpMs / TICK_MS;          // 6
 const EXTRAP_TICKS = NET.extrapMs / TICK_MS;          // 6
@@ -16,21 +17,8 @@ const RESTART_MS = 40000;                              // how long to keep recon
 const LS_WORD = 'multisplat-id';                       // the log word id (SPEC §13.5), kept per browser
 const lsWord = () => { try { const w = localStorage.getItem(LS_WORD); return isWordId(w) ? w : null; } catch { return null; } };
 
-// Snapshot player array layout (server/arena.js snapshot()).
-function unpack(a) {
-  return { id: a[0], x: a[1], y: a[2], vx: a[3], vy: a[4], face: a[5], hp: a[6], atk: a[7],
-    alive: !!(a[8] & 1), onGround: !!(a[8] & 2), atkType: a[8] & 4 ? 'sweep' : 'chop', long: !!(a[8] & 8),
-    iframes: a[9], stun: a[10], fx: a[11], stars: a[12] | 0, w: PW, h: PH };   // a[12]: ninja stars carried (absent before M6)
-}
-// Long-sword pickups lying in the arena, from a snapshot's `it` ([[id, x, y]]). A snapshot from a
-// pre-M5 server has none.
-// a[3] is the kind (1 = ninja stars; absent or 0 = long sword); a[4] a star pickup's amount (absent
-// from an older server: n is left out and Sim.starAmount gives the old 3).
-const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a => (a[3] === 1
-  ? { id: a[0], x: a[1], y: a[2], kind: 'star', ...(a[4] > 0 ? { n: a[4] } : {}) }
-  : { id: a[0], x: a[1], y: a[2], kind: 'long' })) : []);
-// Ninja stars in flight, from a snapshot's `st` ([[id, x, y, vx, owner]]); none from an older server.
-const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).map(a => [a[0], { id: a[0], x: a[1], y: a[2], vx: a[3], owner: a[4] }]) : []);
+// The packed snapshot rows: shared/protocol.js.
+const unpack = a => unpackPlayer(a, PW, PH);
 
 // Can this page share a game with the server whose welcome is `m` (SPEC §18)? page: {rules, build}, the
 // page's own ids (from its index.html). 'same': yes, and it is the same build; 'ui': yes, only files
@@ -49,7 +37,7 @@ export function compareVersion(page, m) {
 // why}) when the room we looked at closed, onRoom(id) when the room whose world we see changes (the
 // game then clears what it drew of the old one). onCfg(ev) when the room's settings (SPEC §17.1)
 // changed: ev is the server's `cfg` event, or null when they came with a welcome or lobby message.
-export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {}, onMadeAdmin = () => {}, onCfg = () => {} } = {}) {
+export function createNet({ onIdle = () => {}, onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {}, onMadeAdmin = () => {}, onCfg = () => {} } = {}) {
   const net = {
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
@@ -101,7 +89,22 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   net.lostToRestart = false;                           // an `expired` resume right after a restart: the server couldn't keep the game
   let viewWant = 0;                                    // the room picked in the lobby (asked for again after a reconnect)
   let viewInfo = { name: '', watch: false };           // what goes with `view`: our name field, watching (SPEC §17)
-  const viewMsg = () => ({ t: 'view', room: viewWant, ...(viewWant ? { name: viewInfo.name, watch: viewInfo.watch } : {}) });
+  // A pending admin's seat (SPEC §17), kept per tab like the resume token: a reload, a drop or a
+  // server restart (SPEC §18) gives it back with the next `view` of that room.
+  const SEAT = 'multisplat-seat';
+  const seatGet = () => { try { return JSON.parse(sessionStorage.getItem(SEAT) || 'null'); } catch { return null; } };
+  const seatSet = v => { try { if (v) sessionStorage.setItem(SEAT, JSON.stringify(v)); else sessionStorage.removeItem(SEAT); } catch { /* ignore */ } };
+  const viewMsg = () => {
+    const s = seatGet();
+    return { t: 'view', room: viewWant, ...(viewWant ? { name: viewInfo.name, watch: viewInfo.watch } : {}), ...(s && s.room === viewWant ? { seat: s.seat } : {}) };
+  };
+  // At start, before connect: a tab that held a room as its pending admin goes back to that room's screen.
+  net.resumeSeat = function resumeSeat() {
+    const s = seatGet();
+    if (!s || !Number.isInteger(s.room) || typeof s.seat !== 'string') return 0;
+    viewWant = s.room; dbg('life', 'admin seat after reload', { room: s.room });
+    return s.room;
+  };
   let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
   // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
   // and the server (which restarts seq at the hello) would take those numbers and then ignore the
@@ -207,7 +210,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     else if (net.state === 'reconnecting' || net.state === 'restarting') { attempts = 0; net.connect(); }
   });
 
-  function send(obj) { if (!frozen && ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  function send(obj) {
+    globalThis.__wireCheck?.('up', obj);   // the unit tests hold every message to shared/protocol.js (test/wire.js)
+    if (!frozen && ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  }
   // The streamed debug log (SPEC §13.5) goes out on this socket whenever it is open.
   setLogSink(str => { if (frozen || !ws || ws.readyState !== 1) return false; ws.send(str); return true; });
 
@@ -281,10 +287,14 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   net.leave = function leave() {
     dbg('life', 'leave');
     send({ t: 'leave' });
+    outOfFight();
+  };
+  // No longer playing, still connected and looking at the room (Leave, or the server's idle leave).
+  function outOfFight() {
     viewWant = net.lobby.room || 0;                    // the server keeps us looking at the room we left
     net.token = null, ssDel(); want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
     live = false; dropped = false; seq = 0; pending = []; unsent = [];
-  };
+  }
   // Send a chat line (SPEC §9). Only its length is logged, never the text.
   // Ask for one AI player more (d = 1) or fewer (d = -1) (SPEC §15). The server answers with a
   // lobby message carrying the new count; nothing changes here until then.
@@ -395,6 +405,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   net.restarting = () => restarting;              // the server said it is restarting and no welcome has come since
 
   function onLobbyMsg(m) {
+    // the seat: kept while the server says this page holds it; dropped once it answers our view of
+    // that room without it (handed over, taken back by someone else, or expired)
+    if (m.seat) seatSet({ seat: m.seat, room: m.room });
+    else { const s = seatGet(); if (s && m.room === s.room && !m.held) seatSet(null); }
     // bots / botMax (SPEC §15) come with every lobby message; a welcome's roster leaves them as they were
     // rooms (SPEC §17): the list, and the room we look at (null: none, the plain list)
     const room = m.room ?? null;
@@ -434,6 +448,11 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.id === net.id) { net.mode = 'play'; net.queuePos = 0; dbg('life', 'promoted', { id: e.id }); }
       } else if (e.type === 'leave') {
         const mm = net.meta.get(e.id); if (mm) mm.gone = true;
+        if (e.id === net.id && net.id != null && e.reason === 'idle') {   // taken out of the fight for idling (SPEC §6.4)
+          dbg('life', 'idle: out of the fight');
+          outOfFight();
+          onIdle();
+        }
       } else if (e.type === 'rename') {   // a freed name passed to its "#2" holder (SPEC §9)
         const mm = net.meta.get(e.id); if (mm) mm.name = e.name;
         for (const p of [...net.lobby.players, ...net.lobby.queue]) if (p.id === e.id) p.name = e.name;

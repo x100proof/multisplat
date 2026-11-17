@@ -1687,7 +1687,7 @@ function frame(t) {
 }
 
 // ---------- online: connection, lobby screen ----------
-const net = ONLINE ? createNet({ onLobby: () => { renderLobby(); if (leaveOpen) renderLeave(); syncPanel(); }, onStatus: s => onNetStatus(s),
+const net = ONLINE ? createNet({ onIdle: () => { leaveMenu(false); backToLobby('You were idle for 2 minutes.'); }, onLobby: () => { renderLobby(); if (leaveOpen) renderLeave(); syncPanel(); }, onStatus: s => onNetStatus(s),
   onRefused: m => onRefused(m), onClosed: m => onRoomClosed(m), onRoom: () => { clearRoomView(); syncPanel(); }, onCfg: ev => onRoomCfg(ev),
   onMadeAdmin: e => toast(`You are now the admin of ${net.lobby.rname || 'this room'}` + (e.why === 'auto' ? '\n(the previous admin left)' : '')) }) : null;
 // A short notice over the lobby or the game (#toast), gone after a few seconds.
@@ -1722,7 +1722,7 @@ function setupLobby() {
   document.getElementById('lFight').addEventListener('click', fight);
   document.getElementById('lWatch').addEventListener('click', () => watch(true));   // SPEC §16: no name, no slot
   // Rooms (SPEC §17): two screens. Tapping a room in the list opens its screen (the server then sends
-  // its roster, snapshots and events); ← Rooms goes back to the list; create one; rename ours (admin).
+  // its roster, snapshots and events); Leave goes back to the list; create one; rename ours (admin).
   document.getElementById('lRoomList').addEventListener('click', e => {
     const b = e.target.closest('button[data-room]');
     if (b && net.mode === 'viewer') { showNotice(''); net.viewRoom(+b.dataset.room); }
@@ -1796,7 +1796,7 @@ function createRoom() {
   net.create(rname, cleanName(lsGet(LS_NAME) || '') || undefined);
   document.getElementById('lRoomName').value = '';
 }
-// ← Rooms: back to the room list. Leaving the screen of a room we created and nobody has joined
+// Leave (the room screen's top-left button): back to the room list. Leaving the screen of a room we created and nobody has joined
 // closes it; with others in it we must make someone admin first (the server refuses too).
 function backToRooms() {
   if (!lobbyOpen || net.mode !== 'viewer') return;
@@ -2029,8 +2029,7 @@ function renderLeave() {
   }
   const m = net.meta.get(net.id), admin = net.isAdmin(), others = otherHumans();
   let note = net.mode === 'queue' ? 'You will lose your place in the queue.' : `Your score${m ? ` of ${m.score}` : ''} will be lost.`;
-  if (admin && others.length) { note = 'You are the admin. Make someone admin first, then you can leave:'; yes.disabled = true; }
-  else if (admin) note += ' You stay the admin, on the room\'s screen.';
+  if (admin) note += ' You stay the admin, on the room\'s screen.';
   document.getElementById('lvNote').textContent = note;
   setText('lvRName', net.lobby.rname || '');
   renderBots('lv');
@@ -2040,7 +2039,6 @@ function renderLeave() {
   renderVisitors('lvVisBox', 'lvVisitors', 'hidden2');
 }
 function leaveGame() {
-  if (ONLINE && net.isAdmin() && otherHumans().length) { renderLeave(); return; }   // blocked: hand over first (SPEC §17)
   leaveMenu(false);
   if (!ONLINE) { location.href = location.pathname; return; }
   net.leave();
@@ -2323,6 +2321,7 @@ if (ONLINE) {
   document.body.classList.add('inlobby');
   document.getElementById('help').classList.add('gone');
   if (net.resumeSaved()) { goLandscape(); closeLobby(); }   // this tab was playing before a reload: straight back in
+  else net.resumeSeat();                                     // or held a room as its admin: back on its screen
   net.connect();
 } else {
   lobbyEl.classList.add('hidden');

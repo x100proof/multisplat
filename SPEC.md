@@ -42,6 +42,7 @@ shared/
   sim.js           DETERMINISTIC simulation step used by BOTH server and client
   level.js         the arena map + spawn points
   constants.js     tunables (physics, combat, net)
+  protocol.js      the wire protocol: every message, field and event; snapshot packing (§18)
 server/
   server.js        http static server + WebSocket game server
   arena.js         authoritative world, tick loop, broadcast
@@ -219,7 +220,9 @@ ARCHITECTURE.md    the code as implemented
   **5 s** is closed. A player on it is treated like any dropped player: gone from the game once
   the 5 s above run out without a resume.
 - A clock offset is estimated from `ping`/`pong`, and RTT is shown in the debug panel.
-- **Idle kick:** a player with no input for 120 s goes back to the lobby.
+- **Idle:** a player with no input for 120 s is taken out of the fight, as if it had pressed Leave: it
+  stays connected on the room's screen ("You were idle for 2 minutes."), its slot frees, and an admin
+  stays the room's admin (pending). Its page learns it from its own `leave` event with reason `idle`.
 - **Server restart (§18):** `{t:'restart'}` and close code 1012 mean the server is restarting with
   the rooms saved: the client freezes its game, reconnects and resumes as after a drop (for up to
   40 s), and every welcome carries the rules hash `r` that decides whether it may play on.
@@ -717,12 +720,15 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   admin in exactly the same way. While humans are in the room, the pending admin must hand over before
   it leaves the room's screen (back to the list, another room: the server refuses such a `view`:
   `refused` leave/admin); if it disconnects, the role passes at once to the human who has been there
-  longest. With no human in the room, a pending admin who leaves the room's screen or disconnects passes
-  the role at once to the lobby visitor who has looked at the room longest (who becomes the pending
-  admin, with the "You are now the admin" notice), and with no visitor either the room closes (its bots go
-  too). Lobby visitors never block anyone from leaving: they are not asked to be handed over to. A
-  player admin who is the only human and leaves the fight becomes the pending admin again (visitors or
-  not). A room held only by its pending admin closes after **10 minutes** without an admin action
+  longest. With no human in the room, a pending admin who leaves the room's screen passes the role at
+  once to the lobby visitor who has looked at the room longest (who becomes the pending admin, with the
+  "You are now the admin" notice), and with no visitor either the room closes (its bots go too). If its
+  page instead **drops** (a reload, a network blip; not a kick), its **seat** is held for the grace
+  period: the pending admin holds a secret `seat` (32 hex, sent only to it in `lobby`, kept by the page
+  for the tab like a resume token), and a `view` of the room carrying it takes the role back; when the
+  grace runs out the role passes on as above. Lobby visitors never block anyone from leaving: they are
+  not asked to be handed over to. A player admin may always leave the fight (Esc menu → Leave): it
+  becomes the pending admin again, on the room's screen, and hands over only to leave the room. A room held only by its pending admin closes after **10 minutes** without an admin action
   (create, rename, bots, settings, admin), visitors or not.
   Room names use the player-name rules (trimmed, double spaces collapsed, allowlist
   `[A-Za-z0-9 _-]`) plus the apostrophe, **1–20 characters**, checked on both sides. Names need not be
@@ -839,12 +845,18 @@ by code**: no version number is maintained by hand anywhere.
 
 - **Two fingerprints, computed by the server at start:**
   - the **rules hash**: what a page and a server must agree on to share a game. A sha256 over every
-    file under `shared/` (the deterministic sim, constants, level …) plus `public/net.js` (the client
-    end of the protocol), in path order, each normalized first: comments removed and whitespace runs
+    file under `shared/` (the deterministic sim, constants, level …, and `shared/protocol.js`: every
+    message both ways with its fields and their kinds, every room event, the packed snapshot rows), in
+    path order, each normalized first: comments removed and whitespace runs
     collapsed (one line break if the run had one, else one space), strings, template literals and
     regex literals kept byte for byte. Editing a comment or re-indenting changes nothing; any other
     change to those files does. The served `index.html` carries it (`<meta name="rules">`) next to
-    the build id, and every `welcome` carries it as `r`.
+    the build id, and every `welcome` carries it as `r`. `public/net.js` is not in it: a running page
+    keeps its own `net.js`, so a change to how the page handles messages never ends a game. The
+    server reads incoming messages only through `protocol.js` (undeclared fields are dropped, a wrong
+    kind is a kick), and the unit tests check every message the server and `net.js` send against it,
+    so the protocol file can't fall behind the code. A change of meaning with the same shape bumps
+    `PROTOCOL` there.
   - the **shape hash**: what a save file must match to be loaded. The server builds a sample arena in
     memory (rooms with a pending and a playing admin, humans connected and away, an AI player with its
     brain, a queued player, non-default settings, pickups, a star in flight, a dropped long sword, a
@@ -868,8 +880,9 @@ by code**: no version number is maintained by hand anywhere.
   inside the level); a room that fails is dropped and logged, the others come back with their ids.
   The tick goes on from the saved one. Restored humans are away with an extended **30 s** grace to
   resume, then the usual expiry applies. A room whose admin was **pending** (a connection, which has
-  no record or token): the role passes to the human who has been in the room longest, as when a
-  pending admin disconnects (§17); with no human in it the room is not restored.
+  no record or token) holds its admin's seat (§17) for the same 30 s, so the page takes it back after
+  the restart even with nobody else in the room; then the role passes on as when a pending admin
+  leaves.
 - **The page.** On `{t:'restart'}` or close code 1012 the game freezes on its last frame (nothing is
   sent), shows "SERVER UPDATING…", and reconnects about every 0.7 s for up to 40 s, resuming with its
   token as after a drop. Every welcome is compared with the page's own ids (`compareVersion` in
@@ -886,10 +899,8 @@ by code**: no version number is maintained by hand anywhere.
     server was updated and could not keep this game."
   - A page older than this section knows no rules hash: it reloads whenever the build id changes, as
     before (the server keeps sending `b`).
-- **What the fingerprints do not catch.** A change outside `shared/` and `public/net.js` that keeps a
-  field's name and type but changes its meaning (say, a record field reinterpreted by
-  `server/room.js`), and server-only protocol changes (`server/arena.js` sending a message an old
-  `net.js` misreads). Such a change needs the restart to start empty (stop the service, delete the
+- **What the fingerprints do not catch.** A change outside `shared/` that keeps a field's name and
+  type but changes its meaning (say, a record field reinterpreted by `server/room.js`). Such a change needs the restart to start empty (stop the service, delete the
   file or let it age past 2 minutes, start). The trial step is the safety net for the rest: a room the
   new code can't step, or that steps into nonsense, is dropped rather than served.
 - **Deploying.** The service manager must deliver SIGTERM to `node` itself (run it directly or with

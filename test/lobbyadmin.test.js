@@ -138,7 +138,9 @@ test('lobby visitors: with no human playing, a pending admin who goes passes the
   assert.equal(arena.rooms.size, 1); assert.equal(room.adminConn, v.conn); assert.equal(room.bots.length, 2);
   assert.ok(w.events().some(e => e.type === 'admin' && e.conn === v.conn.id && e.why === 'auto'));
   assert.equal(a.last('lobby').room, null);
-  arena.disconnect(v.conn);                              // disconnecting: the same
+  arena.disconnect(v.conn);                              // its page dropping: the seat is held for the grace, then the same
+  assert.equal(room.adminConn, null); assert.ok(room.seat);
+  advance(arena.graceMs + 100); tick(1);
   assert.equal(room.adminConn, w.conn);
   // the room held only by a visitor admin closes after ROOM.pendingMs without an admin action, telling its visitors
   advance(10); const x = visitor('Xi', 1);

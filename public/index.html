@@ -270,7 +270,6 @@
             color: #05d9e8; background: rgba(0,0,0,.45); border: 2px solid #05d9e8; border-radius: 6px; box-shadow: 0 0 10px rgba(5,217,232,.4); touch-action: manipulation; }
   #lWatch:hover:not(:disabled) { background: rgba(5,217,232,.15); }
   #lWatch:disabled { opacity: .35; cursor: not-allowed; }
-  #lWatchNote { font-size: 12px; color: #9ad8ff; margin-top: 6px; }
   #lErr { color: #ff6ec7; font-size: 12px; min-height: 1.2em; margin-top: 6px; }
   #lPlayers { list-style: none; margin: 0; padding: 0; max-height: 30vh; overflow-y: auto; font-size: 14px; }
   #lPlayers li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
@@ -328,7 +327,7 @@
   #lRoomHead { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
   #lRoomTitle { flex: 1; font-size: clamp(26px, 5vw, 36px); line-height: 1.15; font-weight: 800; color: #f9f871; overflow-wrap: anywhere;   /* names are at most 20 characters: wrap, never cut */
                  text-shadow: 0 0 10px rgba(249,248,113,.55), 2px 2px 0 #000; }   /* the room's name: the screen's heading */
-  #lBack { min-height: 40px; font: inherit; font-size: 13px; font-weight: 700; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.45); border-radius: 6px; cursor: pointer; padding: 0 12px; touch-action: manipulation; white-space: nowrap; }
+  #lBack { margin-left: auto; flex: none; min-height: 40px; font: inherit; font-size: 13px; font-weight: 700; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.45); border-radius: 6px; cursor: pointer; padding: 0 12px; touch-action: manipulation; white-space: nowrap; }
   #lBack:hover { background: rgba(154,216,255,.12); }
   #lFoot .links { margin-left: auto; white-space: nowrap; }
   #lBotRO, #lvBotRO { font-size: 12px; color: #9ad8ff; }
@@ -489,13 +488,12 @@
     </div>
     <!-- screen 2: one room, like the old single-arena lobby -->
     <div id="scrRoom" class="hidden">
-      <div id="lRoomHead"><button id="lBack" type="button">← Rooms</button><span id="lRoomTitle"></span></div>
+      <div id="lRoomHead"><span id="lRoomTitle"></span><button id="lBack" type="button">Leave</button></div>
       <label for="lName">Name</label>
       <input id="lName" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="ninja name">
       <label>Colour</label>
       <div id="lColors"></div>
       <div id="lActs"><button id="lFight">FIGHT</button><button id="lWatch" type="button">WATCH</button></div>
-      <div id="lWatchNote">Watch: no name needed, takes no slot. Click or tap a ninja to follow them.</div>
       <div id="lInfo"></div>
       <div id="lRenameRow" class="rowin"><input id="lRenameIn" type="text" maxlength="20" autocomplete="off" spellcheck="false" placeholder="room name" aria-label="Room name"><button id="lRenameBtn" type="button">RENAME</button></div>
       <div id="lBots"><label><span class="dot"></span>AI players</label><span id="lBotRO"></span><div class="ctl"><button id="lBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lBotN" aria-live="polite">0</span><button id="lBotInc" type="button" aria-label="More AI players">+</button></div></div>

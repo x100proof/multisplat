@@ -55,9 +55,9 @@ async function joinRoom(room, { ip = nextIp(), name = 'joiner' } = {}) {
   const w = await waitFor(() => c.msgs.find(m => m.t === 'welcome' && m.id), { timeout: 3000, what: 'a welcome after hello' });
   return { c, room, id: w.id };
 }
-// An admin alone leaves (it stays the room's pending admin) and the socket closes (the room then closes
-// at once, freeing the address's quota).
-async function leaveClose(c) { send(c, { t: 'leave' }); await sleep(60); c.ws.close(); await c.closed; }
+// Leave the fight, then the room's screen (as the room screen's Leave; refused for an admin with humans
+// still playing), then close: a pending admin that only dropped would hold its seat for the grace.
+async function leaveClose(c) { send(c, { t: 'leave' }); await sleep(60); send(c, { t: 'view', room: 0 }); await sleep(30); c.ws.close(); await c.closed; }
 const roomsOpen = async () => (await admin('/state')).rooms.length;
 const status = p => p.then(() => 101, e => e.status || e.message);
 
@@ -224,7 +224,7 @@ test('at most 10 rooms: the 11th is refused (why full) and a freed place can be 
   await waitFor(async () => (await roomsOpen()) === 0, { timeout: 3000, what: 'all rooms closed' });
 });
 
-test('a non-admin cannot add AI players, rename the room, hand over admin or leave-as-admin; a viewer cannot either; none is kicked', async () => {
+test('a non-admin cannot add AI players, rename the room, hand over admin or leave the room as admin; a viewer cannot either; none is kicked', async () => {
   const A = await mkRoom({ name: 'boss', room: 'Mine', keep: true });
   const B = await joinRoom(A.room, { name: 'guest' });
   const V = await open();
@@ -239,8 +239,10 @@ test('a non-admin cannot add AI players, rename the room, hand over admin or lea
   }
   const st = (await admin('/state')).rooms.find(r => r.id === A.room);
   assert.equal(st.name, 'Mine'); assert.equal(st.bots, 0); assert.equal(st.admin.id, A.id);
-  // the admin may not leave while another human is in the room
-  send(A.c, { t: 'leave' });
+  // the admin may leave the fight (it stays the pending admin) but not the room while another human plays
+  send(A.c, { t: 'leave' }); await sleep(120);
+  assert.deepEqual(A.c.refused(), []);
+  send(A.c, { t: 'view', room: 0 });
   await waitFor(() => A.c.refused().length, { what: 'leave refused' });
   assert.deepEqual(A.c.refused(), [{ t: 'refused', what: 'leave', why: 'admin' }]);
   // an admin handing over to a bot, itself or nobody is refused (target), and to the guest it works

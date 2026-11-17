@@ -14,13 +14,14 @@ import { navOf } from './ai.js';
 import { createLogStore } from './logs.js';
 import { isWordId, LOG } from '../shared/logid.js';
 import { Room, r2 } from './room.js';
+import { PROTOCOL, readUp } from '../shared/protocol.js';
 
 // 2: rooms (SPEC §17). hello needs a room id; create, view, rename and admin are new; bots is admin-only.
 // 3: create no longer joins (its connection is the room's pending admin); lobby carries `mine`.
 // 4: room settings (SPEC §17.1): `cfg` message (admin only), `cfg` event, cfg in welcome and lobby.
 // 5: lobby visitors of a room (SPEC §17): `view` carries name/watch, lobby carries `lobby`, `padmin`
 //    and `you`, `admin` may name a visitor's connection (`conn`), and so may the `admin` event.
-export const PROTOCOL = 5;
+export { PROTOCOL };
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
@@ -117,6 +118,7 @@ export class Arena {
   // a record again when this connection joins the room (FIGHT).
   setPending(room, conn) {
     room.adminId = null; room.adminConn = conn; conn.adminOf = room; room.adminActAt = this.now();
+    room.seat = randomBytes(16).toString('hex'); room.seatAt = null;
     room.log(`admin pending conn=${conn.id}`);
     this.lobbyDirty = true;
   }
@@ -130,6 +132,10 @@ export class Arena {
     if (!room || room.adminConn !== conn) return;
     room.adminConn = null;
     if (!this.rooms.has(room.id)) return;
+    // its page dropped (a reload, a network blip): with nobody playing, hold its seat for the grace
+    // period rather than handing the room on or closing it (it comes back with the seat, see onView)
+    if (conn.closed && !conn.kicked && room.seat && !room.humans().length) { room.seatAt = this.now(); room.log(`admin seat held conn=${conn.id}`); this.lobbyDirty = true; return; }
+    room.seat = null; room.seatAt = null;
     room.handOn('left');
   }
 
@@ -162,6 +168,7 @@ export class Arena {
     this.log(`kick conn=${conn.id} ip=${conn.ip} reason=${reason}${conn.room ? ` room=${conn.room.id}` : ''}`);
     this.event('kick', conn.id, { reason, player: conn.rec ? conn.rec.id : null, room: conn.room ? conn.room.id : null });
     this.send(conn, { t: 'kick', reason });
+    conn.kicked = true;   // a kicked pending admin's seat is not held (pendingGone)
     const rec = conn.rec;
     // A kick ends the player's session: no resume. (Except 'replaced': the record lives on.)
     if (rec && reason !== 'replaced') this.release(rec, 'kick');
@@ -206,6 +213,11 @@ export class Arena {
     try { m = JSON.parse(typeof data === 'string' ? data : data.toString('utf8')); } catch { return this.kick(conn, 'malformed'); }
     if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string') return this.kick(conn, 'malformed');
     if (!this.allow(conn, m.t)) return;
+    // only what shared/protocol.js declares reaches a handler: an undeclared field is dropped, a
+    // declared one of the wrong kind is a kick (SPEC §18: the protocol is part of the rules hash)
+    const r = readUp(m);
+    if (r.bad) return this.kick(conn, m.t === 'hello' ? 'bad hello' : 'malformed');
+    m = r.m;
     switch (m.t) {
       case 'input': return this.onInput(conn, m);
       case 'ping': return this.onPing(conn, m);
@@ -330,16 +342,20 @@ export class Arena {
   // a kill. The admin may not leave while another human is in the room (SPEC §17): it must make
   // someone admin first (`refused` leave/admin). An admin who is the only human stays the room's
   // admin, pending (the room stays open while it looks at it).
-  onLeave(conn) {
+  // `reason` 'idle': the tick takes a player out of the fight after idleMs without input, the same
+  // way (it stays connected, on the room's screen; an admin stays admin), and its page learns it from
+  // its own `leave` event with reason 'idle'.
+  onLeave(conn, reason = 'left') {
     const rec = conn.rec;
     if (!rec) return;   // already a viewer: nothing to do
     const room = rec.room;
-    if (room.adminId === rec.id && room.humans().some(r => r !== rec)) return this.refuse(conn, 'leave', 'admin');
+    // An admin may always leave the fight (Esc menu): it stays the admin, pending, on the room's screen;
+    // handing over is needed only to leave the room itself (the room screen's Leave, SPEC §17).
     conn.rec = null;
     // now a lobby visitor of the room, under its player name, from now on (SPEC §17)
     conn.vname = rec.name.replace(/#\d+$/, ''); conn.vwatch = false; conn.viewAt = this.now();
     if (room.adminId === rec.id && conn.room === room) this.setPending(room, conn);
-    this.release(rec, 'left');
+    this.release(rec, reason);
     if (this.rooms.has(room.id)) this.send(conn, this.lobbyMsg(conn));
   }
 
@@ -469,7 +485,7 @@ export class Arena {
     this.setView(conn, room);
     // The pending admin joining its room is bound to its record; a room without any admin (only
     // made by tests) takes its first human.
-    if (room.adminConn === conn) { room.adminConn = null; conn.adminOf = null; room.adminId = rec.id; }
+    if (room.adminConn === conn) { room.adminConn = null; conn.adminOf = null; room.adminId = rec.id; room.seat = null; room.seatAt = null; }
     else if (room.adminId == null && !room.adminConn) room.adminId = rec.id;
     room.add(rec);
     this.welcome(conn, rec, false);
@@ -494,8 +510,16 @@ export class Arena {
   // leave/admin, as for a player admin's leave): it must make someone admin first.
   onView(conn, m) {
     if (!Number.isInteger(m.room) || m.room < 0 || (m.name !== undefined && typeof m.name !== 'string') ||
-        (m.watch !== undefined && typeof m.watch !== 'boolean')) return this.kick(conn, 'malformed');
+        (m.watch !== undefined && typeof m.watch !== 'boolean') ||
+        (m.seat !== undefined && (typeof m.seat !== 'string' || !/^[0-9a-f]{32}$/.test(m.seat)))) return this.kick(conn, 'malformed');
     const to = m.room ? this.rooms.get(m.room) || null : null;
+    // a page back with its pending-admin seat (after a reload, a drop or a server restart) takes it again
+    if (to && m.seat && !conn.rec && !conn.adminOf && to.seat === m.seat && !to.adminConn && to.adminId == null) {
+      this.setView(conn, to);
+      to.adminConn = conn; conn.adminOf = to; to.seatAt = null; to.adminActAt = this.now();
+      to.log(`admin seat taken back conn=${conn.id}`);
+      this.lobbyDirty = true;
+    }
     const p = conn.adminOf;
     if (!conn.rec) {
       const vname = m.name !== undefined ? cleanName(m.name) : conn.vname ?? null, vwatch = !!m.watch && !!to;
@@ -608,7 +632,7 @@ export class Arena {
     // mine: this connection is the admin of the room it looks at (pending, or as its player);
     // you: its connection id, as the room's `lobby` list and a visitor's `padmin` name it
     const mine = !!room && (room.adminConn === conn || (!!conn.rec && conn.rec.room === room && room.adminId === conn.rec.id));
-    return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail, mine, you: conn.id };
+    return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail, mine, you: conn.id, ...(room && room.adminConn === conn ? { seat: room.seat } : {}) };
   }
 
   // ---------- the tick ----------
@@ -628,10 +652,21 @@ export class Arena {
         room.adminConn = null; c.adminOf = null;
         this.closeRoom(room, 'idle');
       }
+    // a held pending-admin seat (its page dropped, or the server restarted) runs out after the grace
+    for (const room of [...this.rooms.values()])
+      if (room.seat && !room.adminConn && room.seatAt != null && now - room.seatAt >= this.graceMs) {
+        room.seat = null; room.seatAt = null;
+        room.log('admin seat expired');
+        room.handOn('left');
+      }
     // grace expiry and idle kicks (every room)
     for (const rec of [...this.recs.values()]) {
       if (!rec.conn && rec.discAt != null && now - rec.discAt >= this.graceMs) this.release(rec, 'timeout');
-      else if (rec.conn && rec.state === 'play' && now - rec.lastActive >= this.idleMs) this.kick(rec.conn, 'idle');
+      else if (rec.conn && rec.state === 'play' && now - rec.lastActive >= this.idleMs) {
+        // out of the fight, not off the server: no admin hand-over (SPEC §6.4)
+        this.log(`idle conn=${rec.conn.id} id=${rec.id} room=${rec.room.id}`);
+        this.onLeave(rec.conn, 'idle');
+      }
     }
     // every room steps once (empty rooms don't exist: a room closes with its last human)
     this.tickNo++;

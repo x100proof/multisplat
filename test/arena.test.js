@@ -388,18 +388,26 @@ test('heartbeat: a timed-out player resumes inside 5 s; at 6 s an automatic resu
   assert.equal(a3.last('welcome').resumed, false); assert.notEqual(a3.last('welcome').id, id);
 });
 
-test('idle for 120 s goes back to the lobby', () => {
+test('idle for 120 s: out of the fight, still connected, and an admin stays admin', () => {
   const { conn, tick, clock, arena } = setup();
   const a = conn(); a.say({ t: 'hello', name: 'A', color: 0 });
+  const b = conn(); b.say({ t: 'hello', name: 'B', color: 1 });
   tick(10);
   clock.advance(119000); tick(1);
   assert.equal(a.closed, null);
   a.say({ t: 'input', seq: 1, keys: KEY.LEFT }); tick(1);
   clock.advance(119000); tick(1);
   assert.equal(a.closed, null, 'input resets the idle timer');
+  b.say({ t: 'input', seq: 1, keys: KEY.LEFT }); tick(1);   // B is active
+  const room = [...arena.rooms.values()][0], aid = a.last('welcome').id;
+  assert.equal(room.adminId, aid);
   clock.advance(2000); tick(1);
-  assert.equal(a.last('kick').reason, 'idle'); assert.equal(a.closed.code, KICK.idle);
-  assert.equal(arena.recs.size, 0); assert.equal(arena.rooms.size, 0, 'its last human gone, the room closed');
+  assert.equal(a.closed, null, 'not disconnected'); assert.equal(a.last('kick'), undefined);
+  assert.ok(a.msgs.some(m => m.t === 'event' && m.ev.some(e => e.type === 'leave' && e.id === aid && e.reason === 'idle')), 'told by its own leave event');
+  assert.equal(arena.recs.has(aid), false, 'its slot is freed');
+  assert.equal(room.adminConn, a.conn, 'still the admin (pending, on the room screen)'); assert.equal(room.adminId, null);
+  assert.equal(a.last('lobby').mine, true);
+  assert.ok(!b.msgs.some(m => m.t === 'event' && m.ev.some(e => e.type === 'admin')), 'no hand-over');
 });
 
 test('input flood: excess dropped, sustained flood kicked', () => {

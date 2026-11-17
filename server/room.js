@@ -9,6 +9,8 @@
 import * as Sim from '../shared/sim.js';
 import { NET, TICK_MS, COLORS, KEY, BOT, FX, VIEW_DEFAULTS, cleanSetting, cfgDiff } from '../shared/constants.js';
 import { newBrain, botKeys } from './ai.js';
+import { randomBytes } from 'node:crypto';
+import { r2, packPlayer, packItem, packFlying } from '../shared/protocol.js';
 
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
 const STARVE_ZERO_TICKS = 8;                        // repeat the last input this long, then use 0
@@ -20,7 +22,7 @@ const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a sk
 // expects. Without this a quick second throw played its swish on the client but never flew.
 const RETRY_MAX = 3;
 const SAME = (a, b) => { for (const k in a) if (a[k] !== b[k]) return false; return true; };
-export const r2 = v => Math.round(v * 100) / 100;
+export { r2 };
 
 export class Room {
   // arena: the owning Arena (config, clock, logs, the global record and token maps).
@@ -35,6 +37,10 @@ export class Room {
     this.adminConn = null;        // or the pending admin: a connection with no record (created the room, or
                                   // was handed it while looking at it, and is not fighting)
     this.adminActAt = 0;          // the pending admin's last action (a room held only by it closes after ROOM.pendingMs)
+    // The pending admin's seat (SPEC §17): a secret only its page holds (like a resume token), so a
+    // page that reloads or drops, or a server restart (SPEC §18), doesn't lose the room. While the
+    // page is away (seatAt: since when) the seat is held for the grace period, then the role moves on.
+    this.seat = null; this.seatAt = null;
     this.state = Sim.createWorld({ seed });
     this.state.tick = arena.tickNo;   // lockstep with every other room (see above)
     this.hist = Sim.createHistory();
@@ -154,7 +160,7 @@ export class Room {
       const why = reason === 'left' ? 'left' : 'empty';
       if (!this.humans().length && !this.visitors().length) { this.arena.closeRoom(this, why); return; }
       evs.push(this.handOn(why, false));
-    } else if (!this.humans().length && !this.adminConn && this.adminId == null) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
+    } else if (!this.humans().length && !this.adminConn && !this.seat && this.adminId == null) { this.arena.closeRoom(this, reason === 'left' ? 'left' : 'empty'); return; }
     if (evs.length) this.broadcastEvents(evs);
     this.promote();
   }
@@ -196,6 +202,7 @@ export class Room {
     const from = this.adminId;
     if (this.adminConn && this.adminConn !== conn) this.adminConn.adminOf = null;
     this.adminId = null; this.adminConn = conn; conn.adminOf = this; this.adminActAt = this.arena.now();
+    this.seat = randomBytes(16).toString('hex'); this.seatAt = null;
     this.log(`admin from=${from ?? '-'} to=conn:${conn.id} why=${why}`);
     this.event('admin', by ? by.id : conn.id, { from, toConn: conn.id, why });
     this.arena.lobbyDirty = true;
@@ -207,6 +214,7 @@ export class Room {
     const from = this.adminId;
     this.adminId = rec ? rec.id : null;
     if (this.adminConn) { this.adminConn.adminOf = null; this.adminConn = null; }   // a pending admin handed over
+    this.seat = null; this.seatAt = null;
     this.log(`admin from=${from ?? '-'} to=${this.adminId ?? '-'} why=${why}`);
     this.event('admin', by ? by.id : rec && rec.conn ? rec.conn.id : null, { from, to: this.adminId, why });
     this.arena.lobbyDirty = true;
@@ -272,7 +280,7 @@ export class Room {
   detail() {
     // lobby: its visitors [{c: connection id, name (null: none typed), w: watching}], longest first
     const lobby = this.visitors().map(c => ({ c: c.id, name: c.vname ?? null, ...(c.vwatch ? { w: true } : {}) }));
-    return { room: this.id, rname: this.name, admin: this.adminId, padmin: this.adminConn ? this.adminConn.id : null,
+    return { room: this.id, rname: this.name, admin: this.adminId, padmin: this.adminConn ? this.adminConn.id : null, ...(this.seat && !this.adminConn ? { held: true } : {}),
       players: this.roster(), queue: this.queueList(), lobby,
       cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots(), cfg: cfgDiff(this.cfg) };
   }
@@ -378,11 +386,9 @@ export class Room {
     const p = st.players.map(q => {
       const rec = this.recs.get(q.id), fx = rec ? rec.fx : 0;
       if (rec) rec.fx = 0;
-      return [q.id, r2(q.x), r2(q.y), r2(q.vx), r2(q.vy), q.face, q.hp, q.atk,
-        (q.alive ? 1 : 0) | (q.onGround ? 2 : 0) | (q.atkType === 'sweep' ? 4 : 0) | (q.long ? 8 : 0), q.iframes, q.stun, fx, q.stars | 0];
+      return packPlayer(q, fx);
     });
-    const it = (st.items || []).map(i => (Sim.itemKind(i) === 'star' ? [i.id, i.x, i.y, 1, Sim.starAmount(i)] : [i.id, i.x, i.y, 0]));
-    const fl = (st.stars || []).map(f => [f.id, r2(f.x), r2(f.y), f.vx, f.owner]);
+    const it = (st.items || []).map(packItem), fl = (st.stars || []).map(packFlying);
     const tail = ',"p":' + JSON.stringify(p) + ',"it":' + JSON.stringify(it) + ',"st":' + JSON.stringify(fl) + '}';
     const head = '{"t":"snapshot","tick":' + st.tick;
     for (const c of this.viewers) {

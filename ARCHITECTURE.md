@@ -17,6 +17,7 @@ Status: **M6** (in progress). This covers:
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
 shared/level.js       the 26x18 arena (no spikes), tile queries, spawn points, item points (long swords and ninja stars), spawn picker
 shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, ninja stars, respawn, pickups)
+shared/protocol.js    the wire protocol (every message, field and event; snapshot packing); in the rules hash, held to by both ends
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       connections and protocol, rate limits, heartbeat, resume tokens, idle kick, the rooms and the one tick loop
 server/room.js        one room: its world, slots/queue, names, colours, bots, admin, sim step with lag comp, snapshots
@@ -379,13 +380,14 @@ code can go on under the new code, and there are two separate halves to it:
 | | **Rules hash** | **Shape hash** |
 |---|---|---|
 | Question it answers | Can this *page* share a game with this *server*? | Can this *server* load this *save file*? |
-| Computed from | the source of `shared/**` and `public/net.js` | the structure of what the save routine writes for a sample arena |
+| Computed from | the source of `shared/**`: the sim and `shared/protocol.js` | the structure of what the save routine writes for a sample arena |
 | Computed by | `rulesHash` in `server/version.js`, at start | `computeShapeHash` in `server/persist.js`, at start |
 | Where it travels | `<meta name="rules">` in the served page, `r` in every `welcome`, `rulesHash` in the save file | `shapeHash` in the save file |
 | Who compares | the page (`compareVersion` in `net.js`), and the loading server | the loading server (`loadState`) |
 
-Why two: the client runs the shared sim for prediction and speaks the protocol through `net.js`, so a
-page may only stay in a game if both ends run the same rules. The save file, on the other hand,
+Why two: the client runs the shared sim for prediction and speaks the protocol declared in
+`shared/protocol.js`, so a page may only stay in a game if both ends run the same sim and the same
+protocol. The save file, on the other hand,
 depends on the server's own data structures (`server/room.js` records, `server/ai.js` brains, room
 fields), which the page never sees; a server-side refactor can make an old save unreadable while
 every page stays perfectly compatible, and the reverse (a sim change with an unchanged save format)
@@ -399,7 +401,7 @@ start, so the decision can't be forgotten or got wrong by a person or an agent e
 1. `readTree` reads every file under `public/` and `shared/` once, at start. The server serves
    exactly those bytes from memory (`makeHandler`), so the hash always describes the page a browser
    loaded, even though the service runs from a working tree that a deploy rewrites under it.
-2. The rules files (`isRulesFile`: `shared/**` and `public/net.js`) in path order are fed to sha256 as
+2. The rules files (`isRulesFile`: `shared/**`) in path order are fed to sha256 as
    `path \0 normalized-text \0`; the first 16 hex digits are the hash.
 3. `normalizeJs` removes comments and collapses whitespace runs: a run that contains a line break
    becomes one `\n` (line breaks matter in JS: `return\nx` is not `return x`), any other run one space;
@@ -410,6 +412,29 @@ start, so the decision can't be forgotten or got wrong by a person or an agent e
    `return`: a regex; after a name, a number or `)`/`]`: a division). The only promise it makes is
    the safe one: sources that differ in anything but comments and the amount of whitespace give
    different hashes. A test normalizes every served file and checks the result still parses.
+
+### Why `net.js` is not in it: the protocol file
+
+A running page keeps the `net.js` it loaded; a new `net.js` only ever reaches new pages. So a change
+to how the page *handles* messages (its prediction, reconnects, sessionStorage, the seat it keeps)
+never stops an old page from playing on with a new server. What the two must agree on is the wire
+itself, and that lives in `shared/protocol.js`: every message type both ways with every field and its
+kind (`UP`, `DOWN`), every event a room broadcasts (`EVENTS`), the packed snapshot rows
+(`packPlayer`/`unpackPlayer`, items, flying stars, used by both `server/room.js` and `net.js`), and
+`PROTOCOL`. A declaration is only worth something if the code can't drift from it, so both ends are
+held to it by code:
+
+- **The server can only read what is declared.** `Arena.onMessage` passes every incoming message
+  through `readUp`: undeclared fields are dropped before any handler runs and a declared field of the
+  wrong kind is a kick. A server change that needs a new field from the page has to declare it,
+  which changes `protocol.js` and so the hash: old pages are told to reload instead of silently
+  missing the field.
+- **Everything sent is checked in the tests.** `test/wire.js` is loaded into every unit test file
+  (`node --import`). It checks every message the server sends (snapshots included) and every message
+  `net.js` sends against `checkMessage`; an undeclared type, field or event, or a value of another
+  kind, fails `npm test`. So the server can't start sending something new without declaring it either.
+- **A change of meaning** with an unchanged shape (a field that now counts in other units) is the one
+  thing no code can see: bump `PROTOCOL` in the same file.
 
 `RULES_HASH` (tests only, refused in production) replaces the computed value, so a test can restart
 the server as if `shared/` had changed.
@@ -452,11 +477,12 @@ pages:     freeze on the last frame, "SERVER UPDATING…", reconnect ~0.7 s apar
 
 ### What it deliberately does not catch, and the safety net
 
-- A change **outside** `shared/` and `public/net.js` that keeps a field's name and type but changes
+- A change **outside** `shared/` that keeps a field's name and type but changes
   its meaning (a record field reinterpreted by `server/room.js`, a brain field read differently by
   `server/ai.js`): both hashes stay equal and the old value is loaded under the new meaning.
-- **Server-only protocol changes** (`server/arena.js` / `room.js` sending a message an old `net.js`
-  misreads): `server/` is not in the rules hash, on purpose, or every server tweak would end every game.
+- A protocol change of **meaning** with an unchanged shape (see above: bump `PROTOCOL`). Shape changes
+  are caught, though `server/` is not in the hash: the server reads only what `protocol.js` declares
+  and the tests hold what it sends to the same file.
 - The **trial step** is the net under both: `trialRoom` restores a deep copy of each room into a
   scratch arena, checks it (`checkRoom`: records against slots, queue and sim players, unique tokens,
   bots with brains, the admin, every number in the sim state finite, players inside the level), steps

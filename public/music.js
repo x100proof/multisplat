@@ -162,6 +162,28 @@ function buildLayer(X, dest, layer) {
   for (const e of scoreEvents(layer)) voices[e.v](e);
 }
 
+// A browser does not leave a page while an OfflineAudioContext is still rendering: a reload in
+// the first seconds of a game stalled until both loops were done (seconds on a slow device), long
+// enough for the server's grace period to run out and the player to come back as "Name#2". So the
+// render runs in RENDER_SLICE_S slices (suspend points), and once the page starts to unload no
+// slice is resumed: the render sits suspended and the page goes at once. If the page stays after
+// all (a cancelled navigation, or back from the bfcache), the render carries on.
+const RENDER_SLICE_S = .5;
+let leaving = false;
+const held = [];
+function carryOn() { leaving = false; held.splice(0).forEach(f => f()); }
+if (typeof addEventListener === 'function') {
+  addEventListener('beforeunload', () => { leaving = true; setTimeout(carryOn, 2000); });   // timers stop once the page is gone
+  addEventListener('pagehide', () => { leaving = true; });
+  addEventListener('pageshow', carryOn);
+}
+function sliceRender(X, seconds) {
+  if (typeof X.suspend !== 'function') return;
+  const next = () => { if (leaving) held.push(next); else X.resume(); };
+  try { for (let t = RENDER_SLICE_S; t < seconds; t += RENDER_SLICE_S) X.suspend(t).then(next); }
+  catch { /* suspend points unsupported (or past the end): the render runs in one go */ }
+}
+
 // Renders one layer offline and folds the tail past the loop end back onto the start, so the
 // buffer loops seamlessly (reverb and note releases carry over the seam). Returns {l, r} arrays.
 export async function renderLoop(layer, sr) {
@@ -172,6 +194,7 @@ export async function renderLoop(layer, sr) {
   const b0 = performance.now();
   buildLayer(X, X.destination, layer);
   const buildMs = performance.now() - b0;   // main-thread time; the render itself runs off it
+  sliceRender(X, (n + tail) / sr);
   const r = await X.startRendering();
   const out = [];
   for (let ch = 0; ch < 2; ch++) {

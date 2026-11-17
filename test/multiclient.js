@@ -875,7 +875,7 @@ async function staleBuildTest() {
 
 // Restarts without losing games (SPEC §18): two pages fight in a room; the server process is stopped
 // (SIGTERM: it saves the rooms to STATE_FILE) and started again on the same port and file. Same rules:
-// both pages show "SERVER UPDATING…" meanwhile, then resume in place (no reload) with the same ids and
+// both pages show the "SERVER UPDATING…" overlay meanwhile, then resume in place (no reload) with the same ids and
 // scores and play on. Then a restart under other rules (RULES_HASH, tests only): the new server starts
 // empty, both games stop with the update message, and OK reloads into the lobby of the new version.
 async function restartTest() {
@@ -895,7 +895,7 @@ async function restartTest() {
   assert.deepEqual(await scores(B), before);
   assert.ok(before.some(([s]) => s > 0), 'somebody scored');
   await srv.stop();
-  for (const p of both) await waitFor(() => p.page.evaluate(() => __mp.net.restarting() && /SERVER UPDATING/.test(document.getElementById('msg').textContent)), { what: `${p.name}: "server updating"` });
+  for (const p of both) await waitFor(() => p.page.evaluate(() => __mp.net.restarting() && document.getElementById('rov').className === 'up'), { what: `${p.name}: "server updating"` });
   srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file, PORT: srv.port, DEBUG_PORT: srv.adminPort }); servers.push(srv);
   assert.ok(srv.logs.some(l => /^restore: 1 room/.test(l)), 'the room was restored: ' + srv.logs.join(' | '));
   for (const p of both) await waitFor(() => p.page.evaluate(id => __mp.net.state === 'open' && __mp.net.mode === 'play' && __mp.net.id === id && !!__mp.net.me && !__mp.lobbyOpen, p.id), { timeout: 15000, what: `${p.name} resumed` });
@@ -1208,16 +1208,16 @@ async function adminTest() {
   const menu = p => p.page.evaluate(() => ({ open: __mp.leaveOpen, yes: document.getElementById('lvYes').disabled, yesText: document.getElementById('lvYes').textContent,
     note: document.getElementById('lvNote').textContent, mk: document.querySelectorAll('#lvPlayers button.mkadm').length }));
   // (Bob's page hears of Ann fighting with the next lobby broadcast, up to 0.5 s later: the open menu re-renders then)
-  await waitFor(async () => { const x = await menu(B); return x.open && x.yes && x.mk === 1; }, { what: 'Esc menu with Leave blocked and a Make admin' });
+  // Leave in the Esc menu is never blocked for the admin (it stays the admin, on the room's screen);
+  // handing over is only needed to leave the room itself (the room screen's Leave button)
+  await waitFor(async () => { const x = await menu(B); return x.open && !x.yes && x.mk === 1; }, { what: 'Esc menu with Leave open and a Make admin' });
   let m = await menu(B);
-  assert.ok(m.yes, 'Leave is disabled for an admin with another human in the room');
-  assert.match(m.note, /Make someone admin first/); assert.equal(m.mk, 1);
+  assert.match(m.note, /You stay the admin/); assert.equal(m.yesText, 'Leave');
   await B.page.click('#lvPlayers button.mkadm');
   await waitFor(async () => (await dlg(B)).open, { what: 'confirm dialog from the Esc menu' });
   assert.equal((await dlg(B)).text, 'Make Ann the admin of Keep? You will lose admin.');
   await B.page.click('#admYes');
-  await waitFor(async () => (await adminOf(B)) === aId && !(await menu(B)).yes, { what: 'Leave enabled after the transfer' });
-  assert.equal((await menu(B)).yesText, 'Leave');
+  await waitFor(async () => (await adminOf(B)) === aId && !/You stay the admin/.test((await menu(B)).note), { what: 'the menu after the transfer' });
   await B.page.click('#lvYes');
   await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && __mp.net.mode === 'viewer' && __mp.net.id == null), { what: 'Bob back in the lobby as a viewer' });
   // --- Ann is the only human and the admin: leaving the fight keeps her admin on the room's screen.
@@ -1265,7 +1265,7 @@ async function adminTest() {
   await B.page.click('#lBack');
   await waitFor(async () => (await roomsOpen(srv)) === 0, { what: 'the room closed' });
   await waitFor(async () => (await listOf(A)).length === 0, { what: 'the room is gone from the list' });
-  log('admin: Esc menu blocks Leave until the admin hands over (transfer from the menu works), the sole admin leaves to the room screen, Make admin to a watching lobby visitor (pending admin, FIGHT keeps it), ← Rooms with nobody looking closes it');
+  log('admin: Esc menu Leave is open to the admin (transfer from the menu works), the sole admin leaves to the room screen, Make admin to a watching lobby visitor (pending admin, FIGHT keeps it), ← Rooms with nobody looking closes it');
   for (const p of [A, B]) await p.page.context().close();
   await srv.stop();
 }

@@ -4,7 +4,6 @@
 // damage, knockback, stun, kill credit), loss on death and leave, determinism.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import * as S from '../shared/sim.js';
 import { KEY, DEFAULTS, STAR_HAND, STAR_BUNDLES } from '../shared/constants.js';
 import { LEVEL } from '../shared/level.js';
@@ -137,7 +136,7 @@ test('stars: bundles of 5, 10 and 15 with odds 6 : 3 : 2 (inversely proportional
   assert.ok(real[5] > real[10] && real[10] > real[15], 'bigger bundles are rarer');
 });
 
-test('stars: the snapshot packs a star pickup amount and net.js unpacks it (absent from an old server: 3)', async () => {
+test('stars: the snapshot packs a star pickup amount and the page unpacks it (absent from an old server: 3)', async () => {
   const { Arena } = await import('../server/arena.js');
   const arena = new Arena({ now: () => 0, seed: 3, heartbeatMs: 0 });
   const room = arena.createRoom('Test');
@@ -148,11 +147,8 @@ test('stars: the snapshot packs a star pickup amount and net.js unpacks it (abse
   room.snapshot();
   const it = msgs.filter(m => m.t === 'snapshot').at(-1).it;
   assert.deepEqual(it, [[1, 305, 272, 1, 15], [2, 72, 208, 0], [3, 40, 272, 1, 3]]);
-  // public/net.js's unpackItems (a module-private helper: evaluated from its source)
-  const src = readFileSync(new URL('../public/net.js', import.meta.url), 'utf8');
-  const def = src.match(/^const unpackItems = [\s\S]*?\n(?=\S)/m);
-  assert.ok(def, 'unpackItems found in net.js');
-  const unpackItems = new Function(def[0] + 'return unpackItems;')();
+  // the page's unpacker (shared/protocol.js, which net.js uses)
+  const { unpackItems } = await import('../shared/protocol.js');
   const items = unpackItems([[1, 305, 272, 1, 15], [2, 72, 208, 0], [9, 40, 272, 1]]);
   assert.deepEqual(items, [{ id: 1, x: 305, y: 272, kind: 'star', n: 15 }, { id: 2, x: 72, y: 208, kind: 'long' }, { id: 9, x: 40, y: 272, kind: 'star' }]);
   assert.deepEqual(items.map(S.starAmount), [15, 3, 3]);

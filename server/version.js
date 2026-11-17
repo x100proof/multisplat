@@ -4,9 +4,12 @@
 //   a CSS tweak included, gives a new one. It is for diagnostics and for the quiet reload of a page
 //   whose UI is older than the server's.
 // - the rules hash: a hash of the code that client and server must agree on to share a game, i.e.
-//   every file under shared/ (the deterministic sim, constants, level, …) plus public/net.js (the
-//   client end of the protocol), each normalized first (comments dropped, whitespace runs collapsed:
-//   see normalizeJs), so editing a comment or re-indenting does not count as a change.
+//   every file under shared/: the deterministic sim, constants and level the page predicts with, and
+//   shared/protocol.js, every message and field on the wire. Each is normalized first (comments
+//   dropped, whitespace runs collapsed: see normalizeJs), so editing a comment or re-indenting does
+//   not count as a change. public/net.js is not in it: a page that is already running keeps its own
+//   net.js, so a new one only matters to new pages; what a running page and a new server must agree
+//   on is the protocol, and both ends are held to protocol.js (see there).
 //
 // Nobody maintains either by hand: both are computed from the code the server is about to serve.
 // The files are kept in memory and served from there (server/server.js), so the page a browser
@@ -38,8 +41,8 @@ export function buildId(files) {
   return h.digest('hex').slice(0, 10);
 }
 
-// The files the rules hash covers: everything under shared/, and public/net.js.
-export const isRulesFile = rel => rel.startsWith('shared/') || rel === 'public/net.js';
+// The files the rules hash covers: everything under shared/ (protocol.js included).
+export const isRulesFile = rel => rel.startsWith('shared/');
 
 // The rules hash: sha256 over "<path>\0<normalized text>\0" of each rules file in path order; 16 hex.
 export function rulesHash(files) {

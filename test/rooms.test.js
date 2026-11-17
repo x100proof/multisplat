@@ -77,9 +77,11 @@ test('rooms: a created room closes when its pending admin looks away or disconne
   assert.equal(a.last('closed'), undefined, 'the creator went back on its own: no notice');
   assert.equal(a.last('lobby').room, null);
   assert.equal(v.last('closed'), undefined); tick(40); assert.deepEqual(v.last('lobby').rooms, []);
-  // disconnecting
+  // disconnecting: the seat is held for the grace period (a reload takes it back), then the room closes
   const b = maker('Bea'); b.say({ t: 'bots', d: 1 });
   arena.disconnect(b.conn);
+  assert.equal(arena.rooms.size, 1); assert.ok(arena.rooms.get(2).seat);
+  tick(Math.ceil(arena.graceMs / TICK_MS) + 2);
   assert.equal(arena.rooms.size, 0); assert.equal(arena.recs.size, 0);
   // looking at another room
   const c = maker('Cy'), d = maker('Di');
@@ -279,14 +281,19 @@ test('rooms: admin transfer is validated: only the admin, only to another human 
   assert.equal(b.last('refused').why, 'rate');
 });
 
-test('rooms: the admin cannot leave while another human is in the room; alone, it stays pending admin', () => {
+test('rooms: the admin may leave the fight (it stays admin, pending, on the room screen) but not the room while humans play', () => {
   const { arena, creator, joiner, conn, tick } = setup();
   const a = creator('Ann'), b = joiner('Bea', 1);
   a.say({ t: 'bots', n: 2 });
-  const v = conn(); v.say({ t: 'view', room: 1 });       // a lobby visitor does not stop the admin leaving the fight
-  a.say({ t: 'leave' });
+  const v = conn(); v.say({ t: 'view', room: 1 });
+  const aid = a.id();
+  a.say({ t: 'leave' });                                 // the Esc menu's Leave: never refused for the admin
+  assert.equal(a.last('refused'), undefined);
+  assert.equal(arena.recs.has(aid), false); assert.equal(arena.rooms.get(1).adminConn, a.conn, 'still the admin, pending');
+  a.say({ t: 'view', room: 0 });                         // the room screen's Leave while Bea plays: hand over first
   assert.deepEqual(a.last('refused'), { t: 'refused', what: 'leave', why: 'admin' });
-  assert.equal(arena.recs.get(a.id()).state, 'play', 'still in the room');
+  a.say({ t: 'hello', name: 'Ann', color: 0, room: 1 }); // back into the fight, still the admin
+  assert.equal(arena.rooms.get(1).adminId, a.id());
   b.say({ t: 'leave' });                                 // anyone else may leave
   assert.equal(arena.recs.has(b.id()), false);
   a.say({ t: 'leave' });                                 // now alone (bots are not humans): back on the room's screen

@@ -46,7 +46,7 @@ test('rules hash: every served JS file normalizes to code that still parses, and
   }
 });
 
-test('rules hash: covers shared/ and public/net.js only, ignores their comments', () => {
+test('rules hash: covers shared/ only (the sim and the protocol, not net.js), ignores comments', () => {
   const base = { 'public/game.js': 'draw();', 'public/net.js': 'send(1); // proto', 'public/index.html': '<p>', 'shared/sim.js': 'step(); /* sim */' };
   const h = rulesHash(files(base));
   assert.match(h, /^[0-9a-f]{16}$/);
@@ -54,9 +54,10 @@ test('rules hash: covers shared/ and public/net.js only, ignores their comments'
   assert.equal(rulesHash(files({ ...base, 'public/index.html': '<div>' })), h);
   assert.equal(rulesHash(files({ ...base, 'shared/sim.js': '// new comment\nstep();' })), h, 'a comment is not a change');
   assert.notEqual(rulesHash(files({ ...base, 'shared/sim.js': 'step(2);' })), h);
-  assert.notEqual(rulesHash(files({ ...base, 'public/net.js': 'send(2);' })), h);
+  assert.equal(rulesHash(files({ ...base, 'public/net.js': 'send(2);' })), h, 'the page\'s message handling is not in it');
+  assert.notEqual(rulesHash(files({ ...base, 'shared/protocol.js': 'UP = {};' })), h, 'the protocol is');
   assert.notEqual(rulesHash(files({ ...base, 'shared/new.js': 'x();' })), h, 'a new shared file counts');
-  assert.ok(isRulesFile('shared/level.js') && isRulesFile('public/net.js') && !isRulesFile('public/game.js') && !isRulesFile('server/room.js'));
+  assert.ok(isRulesFile('shared/level.js') && isRulesFile('shared/protocol.js') && !isRulesFile('public/net.js') && !isRulesFile('public/game.js') && !isRulesFile('server/room.js'));
 });
 
 test('rules hash: served in index.html and in every welcome', async () => {
@@ -161,8 +162,8 @@ test('save → restore: rooms, records, scores, bots, settings and admins come b
     assert.deepEqual(r1.cfg, before[0].cfg); assert.equal(r1.cfg.gravity, .4);
     assert.deepEqual(r1.roster().map(p => ({ ...p, away: undefined })), before[0].roster);
     assert.ok(r1.roster().filter(p => !p.bot).every(p => p.away), 'restored humans start away');
-    // room 2's admin was pending (a connection, gone): the role passed to its human
-    assert.equal(r2.adminId, A.cy.last('welcome').id); assert.equal(r2.adminConn, null);
+    // room 2's admin was pending (a connection, gone): its seat is held for the restore grace
+    assert.equal(r2.adminId, null); assert.equal(r2.adminConn, null); assert.equal(r2.seat, A.arena.rooms.get(2).seat); assert.ok(r2.seat);
     assert.deepEqual(checkRoom(r1), []); assert.deepEqual(checkRoom(r2), []);
     // a new room or player gets a fresh id
     assert.ok(B.arena.nextRoom >= 3 && B.arena.nextId > Math.max(...B.arena.recs.keys()));
@@ -253,16 +254,29 @@ test('restore: a room that fails its trial step is dropped, the others come back
   } finally { removeDir(dir); }
 });
 
-test('restore: a room held only by its pending admin is not restored', () => {
+test('restore: a room held only by its pending admin comes back with the seat held; its page takes it back', () => {
   const dir = tempDir(), file = join(dir, 'rooms.json');
   try {
     const w = world();
     const p = w.conn('ip-p'); p.say({ t: 'create', room: 'Lonely', name: 'Pen' });
     w.tick(3);
+    const seat = p.last('lobby').seat;
+    assert.match(seat, /^[0-9a-f]{32}$/);
+    w.arena.disconnect(p.conn);                         // the restart closes the page first: held, still saved
     saveState(w.arena, file, HASHES);
     const B = world();
     const r = loadState(B.arena, file, HASHES);
-    assert.equal(r.loaded, 0); assert.equal(B.arena.rooms.size, 0);
+    assert.equal(r.loaded, 1); assert.equal(B.arena.rooms.get(1).seat, seat);
+    const q = B.conn('ip-p'); q.say({ t: 'view', room: 1, seat: 'f'.repeat(32) });
+    assert.equal(B.arena.rooms.get(1).adminConn, null, 'a wrong seat takes nothing');
+    q.say({ t: 'view', room: 1, seat });
+    assert.equal(B.arena.rooms.get(1).adminConn, q.conn); assert.equal(q.last('lobby').mine, true);
+    // without its page, the room closes once the restore grace is over
+    const C = world();
+    saveState(B.arena, file, HASHES); B.arena.disconnect(q.conn);
+    assert.equal(loadState(C.arena, file, HASHES).loaded, 1);
+    C.clock.t += RESTORE_GRACE_MS + 100; C.tick(1);
+    assert.equal(C.arena.rooms.size, 0);
   } finally { removeDir(dir); }
 });
 

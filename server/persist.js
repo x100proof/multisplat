@@ -45,7 +45,7 @@ const ROOM_SKIP = new Set(['arena', 'level', 'maxPlayers', 'baseCfg', 'hist', 'v
 const REC_SKIP = new Set(['conn', 'room', 'inputs', 'lastSeq', 'maxSeq', 'lastKeys', 'starve', 'carry', 'minQ', 'qTicks',
   'retry', 'tried', 'tries', 'fx']);
 // performance.now() timestamps (anywhere outside the sim state): saved as ages.
-const TIME_KEYS = new Set(['joinedAt', 'lastActive', 'discAt', 'createdAt', 'adminActAt', 'at']);
+const TIME_KEYS = new Set(['joinedAt', 'lastActive', 'discAt', 'createdAt', 'adminActAt', 'seatAt', 'at']);
 
 // A plain-data copy of v; throws on anything JSON would not carry exactly. times: convert TIME_KEYS.
 function plain(v, path, now, times, key = '') {
@@ -86,7 +86,9 @@ export function roomData(room, now) {
   d.$recs = [...room.recs.values()].map(r => recData(r, now));
   d.$queue = room.queue.map(r => r.id);
   d.$bots = room.bots.map(r => r.id);
-  d.$pending = !!room.adminConn;   // the admin was a pending one (a connection, gone with the old process)
+  // the admin was a pending one (a connection, gone with the old process), or its page had dropped
+  // and the room was holding its seat
+  d.$pending = !!room.adminConn || (!!room.seat && room.adminId == null);
   return d;
 }
 
@@ -102,9 +104,9 @@ export function snapshotArena(arena, { rulesHash = '', shapeHash = '', wallNow =
 }
 
 // A Room for `arena` from saved data (not yet registered with the arena: see adopt). Restored humans
-// are away, with RESTORE_GRACE_MS to resume. A room whose admin was pending: the role passes to its
-// longest-present human, as when a pending admin disconnects (SPEC §17); with no human the room is
-// not restored (it would have closed). Returns null for a room that must not come back.
+// are away, with RESTORE_GRACE_MS to resume. A room whose admin was pending holds its seat for the
+// same grace (its page takes it back, SPEC §17); a save without a seat passes the role to the
+// longest-present human, or is not restored with nobody in it. Returns null for a room that must not come back.
 export function restoreRoom(arena, saved, { graceMs = RESTORE_GRACE_MS } = {}) {
   const d = structuredClone(saved), now = arena.now();
   const room = new Room(arena, { id: d.id, name: d.name, seed: 1, creatorIp: d.creatorIp ?? null });
@@ -122,8 +124,11 @@ export function restoreRoom(arena, saved, { graceMs = RESTORE_GRACE_MS } = {}) {
   room.bots = d.$bots.map(id => room.recs.get(id));
   room.adminConn = null;
   if (d.$pending) {
-    if (!room.humans().length) return null;
-    room.adminId = room.successor().id;
+    // its pending admin's page comes back with the seat (SPEC §17) within the restore grace; with no
+    // seat (an old save) the role passes on as before, and a room with nobody is not restored
+    if (room.seat) room.seatAt = now + graceMs - arena.graceMs;
+    else if (!room.humans().length) return null;
+    else room.adminId = room.successor().id;
   }
   return room;
 }
@@ -155,7 +160,7 @@ export function checkRoom(room) {
   const queued = [...room.recs.values()].filter(r => r.state === 'queue');
   if (room.queue.some(r => !r || r.state !== 'queue') || queued.length !== room.queue.length) bad.push('queue');
   if (room.bots.some(r => !r || !r.bot) || room.bots.length !== [...room.recs.values()].filter(r => r.bot).length) bad.push('bots');
-  if (!room.humans().length) bad.push('no human');
+  if (!room.humans().length && !room.seat) bad.push('no human');   // a held seat: its pending admin's page comes back
   if (room.adminId != null && (!room.recs.has(room.adminId) || room.recs.get(room.adminId).bot)) bad.push('admin');
   const nonFinite = [];
   const walk = (v, path) => {

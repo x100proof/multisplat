@@ -1422,6 +1422,24 @@ function drawGib(g, cx) {
 
 // Online HUD: own HP and score, respawn countdown, queue position, connection state.
 // (M3 adds the kill feed and the Tab scoreboard here.)
+// The restart overlay (SPEC §18): the screen dims and a box says the server is updating while the
+// page waits for it; once the game is back it says so, and it stays up at least ROV_MIN_MS in all
+// so a one-second restart is still seen. Returns true while it is up.
+const ROV_MIN_MS = 1500, ROV_DONE_MS = 1200;
+let rovAt = 0, rovDoneAt = 0;
+function restartOverlay() {
+  const el = document.getElementById('rov'), now = performance.now();
+  if (net.restarting()) {
+    if (!rovAt) { rovAt = now; rovDoneAt = 0; dbg('net', 'restart overlay'); }
+    el.className = 'up';
+    return true;
+  }
+  if (!rovAt) return false;
+  if (!rovDoneAt) rovDoneAt = Math.max(now, rovAt + ROV_MIN_MS - ROV_DONE_MS);
+  if (now < rovDoneAt + ROV_DONE_MS) { el.className = net.state === 'open' ? 'up done' : 'up'; return true; }
+  el.className = ''; rovAt = 0; rovDoneAt = 0;
+  return false;
+}
 function hudOnline() {
   const me = net.me, m = metaOf(ME);
   setText('hHp', me ? `HP ${Math.max(0, me.hp)}` : '');
@@ -1431,7 +1449,7 @@ function hudOnline() {
   let msg = '', sub = '';
   if (staleBuild) msg = 'NEW VERSION · RELOADING…';
   else if (updOpen) msg = '';
-  else if (net.restarting()) { msg = 'SERVER UPDATING…'; sub = 'your game continues in a moment'; }
+  else if (restartOverlay()) { /* the restart overlay (#rov) says it */ }
   else if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
   else if (!lobbyOpen && net.mode === 'queue') {
     msg = `ROOM FULL · QUEUE #${net.queuePos}`;

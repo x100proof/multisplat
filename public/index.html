@@ -48,6 +48,21 @@
   @keyframes starsGot { from { color: #fff; text-shadow: 0 0 14px #f9f871, 0 0 4px #fff; } }
   #hHp.low { color: #ff2a6d; text-shadow: 0 0 6px #ff2a6d, 2px 2px 0 #000; }
   /* a short notice over the lobby or the game (e.g. "You are now the admin"), gone after a few seconds */
+  /* restart overlay (SPEC §18): dims the game while the server updates, then says it is back */
+  #rov { position: fixed; inset: 0; z-index: 8; display: none; align-items: center; justify-content: center; pointer-events: none;
+         background: rgba(5,3,10,.55); backdrop-filter: grayscale(.7); }
+  #rov.up { display: flex; }
+  #rov .box { padding: 18px 26px; border: 2px solid #05d9e8; border-radius: 10px; background: rgba(5,3,10,.9); text-align: center;
+              box-shadow: 0 0 22px rgba(5,217,232,.55); font-family: system-ui, sans-serif; }
+  #rov .t1 { font-weight: 800; font-size: clamp(18px, 3.4vw, 32px); color: #05d9e8; letter-spacing: .06em; text-shadow: 0 0 10px #05d9e8; }
+  #rov .t2 { margin-top: 6px; font-size: clamp(12px, 1.8vw, 16px); color: #d1f7ff; }
+  #rov .t3 { display: none; font-weight: 800; font-size: clamp(18px, 3.4vw, 32px); color: #f9f871; text-shadow: 0 0 10px #f9f871; }
+  #rov .spin { width: 28px; height: 28px; margin: 0 auto 10px; border-radius: 50%; border: 3px solid rgba(5,217,232,.25); border-top-color: #05d9e8;
+               animation: rovSpin .8s linear infinite; }
+  @keyframes rovSpin { to { transform: rotate(360deg); } }
+  #rov.done .t1, #rov.done .t2, #rov.done .spin { display: none; }
+  #rov.done .t3 { display: block; }
+  #rov.done .box { border-color: #f9f871; box-shadow: 0 0 22px rgba(249,248,113,.5); }
   #toast { position: fixed; left: 50%; top: 18%; transform: translateX(-50%); z-index: 9; pointer-events: none; max-width: calc(100vw - 32px);
            padding: 10px 18px; border-radius: 8px; border: 2px solid #f9f871; background: rgba(5,3,10,.88); color: #f9f871; text-align: center;
            font: 800 clamp(14px, 2.4vw, 20px) system-ui, sans-serif; box-shadow: 0 0 16px rgba(249,248,113,.5); transition: opacity .4s; }
@@ -494,6 +509,7 @@
     <div id="lFoot"><span class="links"><a href="#" id="lHelp">How to play</a><span id="lId" title="Your id in the diagnostic log: quote it when you report a problem"></span></span></div>
   </div>
 </div>
+<div id="rov" aria-live="polite"><div class="box"><div class="spin"></div><div class="t1">SERVER UPDATING…</div><div class="t2">game paused · it carries on in a moment</div><div class="t3">UPDATED · GAME RESUMED</div></div></div>
 <div id="toast" class="hidden" role="status" aria-live="polite"></div>
 <div id="dbg" class="hidden"></div>
 <script type="module" src="game.js"></script>

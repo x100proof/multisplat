@@ -41,8 +41,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
     meta: new Map(),                                   // id -> {name, color, score, deaths, away}
     // the room list, and the selected (or our own) room's detail: name, admin id, roster, queue, bots,
-    // and `mine`: we are its admin (pending, before FIGHT, or as its player) (SPEC §17)
-    lobby: { rooms: [], maxRooms: 10, room: null, rname: null, admin: null, players: [], queue: [], cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1, mine: false },
+    // and `mine`: we are its admin (pending, before FIGHT, or as its player) (SPEC §17); `lobby`: its
+    // visitors [{c, name, w}], `padmin` the pending admin's connection id, `you` ours
+    lobby: { rooms: [], maxRooms: 10, room: null, rname: null, admin: null, padmin: null, players: [], queue: [], lobby: [], you: null, cap: NET.maxPlayers, bots: 0, botMax: NET.maxPlayers - 1, mine: false },
     me: null,                                          // the predicted local player (sim object)
     stats: { rtt: 0, rttAvg: 0, rttMax: 0, offset: 0, jitter: 0, reconnects: 0, snaps: 0, snapGapMax: 0,
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
@@ -65,6 +66,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
   let viewWant = 0;                                    // the room picked in the lobby (asked for again after a reconnect)
+  let viewInfo = { name: '', watch: false };           // what goes with `view`: our name field, watching (SPEC §17)
+  const viewMsg = () => ({ t: 'view', room: viewWant, ...(viewWant ? { name: viewInfo.name, watch: viewInfo.watch } : {}) });
   let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
   // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
   // and the server (which restarts seq at the hello) would take those numbers and then ignore the
@@ -201,11 +204,23 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   net.viewRoom = function viewRoom(id) {
     dbg('life', 'view room', { room: id || 0 });
     viewWant = id || 0;
-    send({ t: 'view', room: viewWant });
+    send(viewMsg());
+  };
+  // Our name field or watching changed: the room we look at shows us under that name (SPEC §17).
+  // Sent again only when it changed and we look at a room without being in it.
+  net.setViewInfo = function setViewInfo(info) {
+    const next = { ...viewInfo, ...info };
+    if (next.name === viewInfo.name && next.watch === viewInfo.watch) return;
+    viewInfo = next;
+    if (viewWant && net.id == null && net.state === 'open') send(viewMsg());
   };
   // Admin only (the server checks): rename our room, hand the admin role to player `id`.
   net.rename = function rename(name) { dbg('life', 'rename room', { len: name.length }); send({ t: 'rename', name }); };
-  net.makeAdmin = function makeAdmin(id) { dbg('life', 'make admin', { id }); send({ t: 'admin', id }); };
+  // target: {id} (a player of the room) or {conn} (a visitor of the room, SPEC §17)
+  net.makeAdmin = function makeAdmin(target) {
+    dbg('life', 'make admin', target);
+    send(target.conn != null ? { t: 'admin', conn: target.conn } : { t: 'admin', id: target.id });
+  };
   net.isAdmin = () => !!net.lobby.mine;
   // Admin only (the server checks): change the room's settings ({key: value}) or reset them (SPEC §17.1).
   net.setCfg = function setCfgMsg(set) { dbg('life', 'room setting', { keys: Object.keys(set).join(',') }); send({ t: 'cfg', set }); };
@@ -283,7 +298,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     }
     if (m.id == null) {                                 // connection welcome (before hello)
       net.serverTick = m.tick;
-      if (viewWant && !want) send({ t: 'view', room: viewWant });   // a new socket looks at nothing until told
+      if (viewWant && !want) send(viewMsg());   // a new socket looks at nothing until told
       return;
     }
     const wasDrop = dropped;
@@ -297,7 +312,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
-    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap, mine: m.admin === m.id, cfg: m.cfg });
+    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, padmin: null, players: m.players, queue: m.queue, cap: m.cap, mine: m.admin === m.id, cfg: m.cfg });
     dbg('life', m.state === 'play' ? 'in arena' : 'queued', { id: m.id, queuePos: m.queuePos, resumed: m.resumed });
     if (wasDrop) sendReport('auto', 'reconnected after drop');
     status('open');
@@ -309,8 +324,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     const room = m.room ?? null;
     if (room !== net.lobby.room) { resetView(); dbg('life', 'room view', { from: net.lobby.room, to: room }); onRoom(room); }
     net.lobby = { rooms: Array.isArray(m.rooms) ? m.rooms : net.lobby.rooms, maxRooms: m.maxRooms || net.lobby.maxRooms,
-      room, rname: m.rname ?? null, admin: m.admin ?? null, mine: !!m.mine,
-      players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
+      room, rname: m.rname ?? null, admin: m.admin ?? null, padmin: m.padmin ?? null, mine: !!m.mine,
+      players: m.players || [], queue: m.queue || [], lobby: Array.isArray(m.lobby) ? m.lobby : [], you: m.you ?? net.lobby.you, cap: m.cap || net.cap,
       bots: Number.isInteger(m.bots) ? m.bots : net.lobby.bots, botMax: Number.isInteger(m.botMax) ? m.botMax : net.lobby.botMax };
     // the room's settings come with every lobby message (none from an older server: the defaults)
     setCfg(room ? m.cfg : null);
@@ -349,10 +364,13 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.id === net.id) dbg('life', 'renamed', { id: e.id });
         onLobby(net.lobby);
       } else if (e.type === 'admin') {    // the admin role moved (SPEC §17): a transfer or the old admin gone for good
-        net.lobby.admin = e.id; net.lobby.mine = e.id != null && e.id === net.id;
-        if (e.id === net.id) dbg('life', 'made admin', { why: e.why });
+        // (to a player: `id`; to a lobby visitor, who becomes the pending admin: `conn`)
+        const me = (e.id != null && e.id === net.id) || (e.conn != null && net.id == null && e.conn === net.lobby.you);
+        net.lobby.admin = e.id ?? null; net.lobby.padmin = e.conn ?? null; net.lobby.mine = me;
+        if (me) dbg('life', 'made admin', { why: e.why });
+        if (me && net.id == null && net.lobby.room) viewWant = net.lobby.room;
         onLobby(net.lobby);
-        if (e.id != null && e.id === net.id) onMadeAdmin(e);   // tell them, in the lobby or in game
+        if (me) onMadeAdmin(e);   // tell them, in the lobby or in game
       } else if (e.type === 'cfg') {      // the admin changed the room's settings (SPEC §17.1)
         setCfg(e.cfg, e);
       } else if (e.type === 'room') {     // the admin renamed the room

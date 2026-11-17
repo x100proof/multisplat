@@ -18,7 +18,9 @@ import { Room, r2 } from './room.js';
 // 2: rooms (SPEC §17). hello needs a room id; create, view, rename and admin are new; bots is admin-only.
 // 3: create no longer joins (its connection is the room's pending admin); lobby carries `mine`.
 // 4: room settings (SPEC §17.1): `cfg` message (admin only), `cfg` event, cfg in welcome and lobby.
-export const PROTOCOL = 4;
+// 5: lobby visitors of a room (SPEC §17): `view` carries name/watch, lobby carries `lobby`, `padmin`
+//    and `you`, `admin` may name a visitor's connection (`conn`), and so may the `admin` event.
+export const PROTOCOL = 5;
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
@@ -101,7 +103,7 @@ export class Arena {
   setView(conn, room) {
     if (conn.room === room) return;
     if (conn.room) conn.room.viewers.delete(conn);
-    conn.room = room;
+    conn.room = room; conn.viewAt = this.now();
     if (room) room.viewers.add(conn);
     this.lobbyDirty = true;   // watcher counts changed
     if (conn.adminOf && conn.adminOf !== room) this.pendingGone(conn);
@@ -116,15 +118,15 @@ export class Arena {
   }
 
   // The pending admin of a room looked away (back to the room list, another room) or disconnected.
-  // With no human in the room it closes; otherwise the longest-present human takes over at once.
+  // The role passes at once to the longest-present human, else to the visitor who has looked at the
+  // room longest (it becomes the pending admin); with nobody left the room closes.
   pendingGone(conn) {
     const room = conn.adminOf;
     conn.adminOf = null;
     if (!room || room.adminConn !== conn) return;
     room.adminConn = null;
     if (!this.rooms.has(room.id)) return;
-    if (!room.humans().length) return this.closeRoom(room, 'left');
-    room.broadcastEvents([room.setAdmin(room.successor(), 'auto')]);
+    room.handOn('left');
   }
 
   roomsOfIp(ip) { let n = 0; for (const r of this.rooms.values()) if (r.creatorIp === ip) n++; return n; }
@@ -330,6 +332,8 @@ export class Arena {
     const room = rec.room;
     if (room.adminId === rec.id && room.humans().some(r => r !== rec)) return this.refuse(conn, 'leave', 'admin');
     conn.rec = null;
+    // now a lobby visitor of the room, under its player name, from now on (SPEC §17)
+    conn.vname = rec.name.replace(/#\d+$/, ''); conn.vwatch = false; conn.viewAt = this.now();
     if (room.adminId === rec.id && conn.room === room) this.setPending(room, conn);
     this.release(rec, 'left');
     if (this.rooms.has(room.id)) this.send(conn, this.lobbyMsg(conn));
@@ -403,7 +407,7 @@ export class Arena {
     if (conn.rec || conn.adminOf) return this.kick(conn, 'protocol');
     if ((m.room !== undefined && typeof m.room !== 'string') || (m.name !== undefined && typeof m.name !== 'string')) return this.kick(conn, 'malformed');
     const pname = m.name !== undefined ? cleanName(m.name) : null;
-    if (pname) this.logs.touch(conn.word, { name: pname });
+    if (pname) { this.logs.touch(conn.word, { name: pname }); conn.vname = pname; }
     const now = this.now();
     if (!take(conn, 'createBucket', ROOM.createBurst, ROOM.createRefillMs, now)) { this.dropped(conn); return this.refuse(conn, 'create', 'rate'); }
     const typed = (m.room || '').trim();
@@ -412,7 +416,6 @@ export class Arena {
     if (this.rooms.size >= this.maxRooms) return this.refuse(conn, 'create', 'full');
     if (this.roomsOfIp(conn.ip) >= this.roomsPerIp) return this.refuse(conn, 'create', 'ip');
     const room = this.createRoom(name, conn.ip);
-    room.pendingName = pname;
     room.log(`room-create conn=${conn.id} ip=${conn.ip} name=${JSON.stringify(name)}`);
     room.event('room-create', conn.id, { name });
     this.setView(conn, room);
@@ -456,16 +459,24 @@ export class Arena {
     this.send(conn, this.lobbyMsg(conn));
   }
 
-  // {t:'view', room: id|0}: the room a lobby visitor looks at (its roster, snapshots and events; Watch
-  // is this with the lobby closed). 0 (or a room that has closed meanwhile) means none: the plain room
-  // list. A member always looks at its own room, so its view request is ignored. The answer is a lobby
-  // message at once.
+  // {t:'view', room: id|0, name?, watch?}: the room a lobby visitor looks at (its roster, snapshots and
+  // events; Watch is this with the lobby closed). 0 (or a room that has closed meanwhile) means none:
+  // the plain room list. `name`: what the visitor's name field holds (player-name rules; anything else
+  // is no name), shown to the room in its "In the lobby" list; `watch`: the page is watching (SPEC
+  // §16). A page re-sends `view` for the same room when these change. A member always looks at its own
+  // room, so its view request is ignored. The answer is a lobby message at once.
   // A pending admin may not look away from its room while another human is in it (`refused`
   // leave/admin, as for a player admin's leave): it must make someone admin first.
   onView(conn, m) {
-    if (!Number.isInteger(m.room) || m.room < 0) return this.kick(conn, 'malformed');
+    if (!Number.isInteger(m.room) || m.room < 0 || (m.name !== undefined && typeof m.name !== 'string') ||
+        (m.watch !== undefined && typeof m.watch !== 'boolean')) return this.kick(conn, 'malformed');
     const to = m.room ? this.rooms.get(m.room) || null : null;
     const p = conn.adminOf;
+    if (!conn.rec) {
+      const vname = m.name !== undefined ? cleanName(m.name) : conn.vname ?? null, vwatch = !!m.watch && !!to;
+      if (vname !== (conn.vname ?? null) || vwatch !== !!conn.vwatch) { conn.vname = vname; conn.vwatch = vwatch; this.lobbyDirty = true; }
+      if (vname) this.logs.touch(conn.word, { name: vname });
+    }
     if (!conn.rec && p && p !== to && p.adminConn === conn && p.humans().length) this.refuse(conn, 'leave', 'admin');
     else if (!conn.rec) this.setView(conn, to);
     this.send(conn, this.lobbyMsg(conn));
@@ -489,15 +500,24 @@ export class Arena {
     this.lobbyDirty = true;
   }
 
-  // {t:'admin', id}: the admin hands the role to player `id` (SPEC §17), after the client's confirm
-  // dialog. Valid only from the room's current admin, to another human record of the same room,
-  // playing or queued (an `away` one inside its grace period too). Everyone in the room is told with
-  // an `admin` event. Rate-limited per connection (the edit bucket).
+  // {t:'admin', id} or {t:'admin', conn}: the admin hands the role to player `id`, or to the lobby
+  // visitor on connection `conn` (SPEC §17), after the client's confirm dialog. Valid only from the
+  // room's current admin, to another human record of the same room, playing or queued (an `away` one
+  // inside its grace period too), or to another connection looking at this room without a record (on
+  // its screen or watching), which becomes the room's pending admin. Such a connection is admin of no
+  // other room: a pending admin looking away gives its room up. Everyone in the room is told with an
+  // `admin` event. Rate-limited per connection (the edit bucket).
   onAdmin(conn, m) {
-    if (!Number.isInteger(m.id)) return this.kick(conn, 'malformed');
+    const hasId = m.id !== undefined, hasConn = m.conn !== undefined;
+    if (hasId === hasConn || !Number.isInteger(hasId ? m.id : m.conn)) return this.kick(conn, 'malformed');
     if (!take(conn, 'editBucket', ROOM.editBurst, ROOM.editRefillMs, this.now())) { this.dropped(conn); return this.refuse(conn, 'admin', 'rate'); }
     const room = this.adminRoom(conn);
     if (!room) return this.refuse(conn, 'admin', 'admin');
+    if (hasConn) {
+      const to = [...room.viewers].find(c => c.id === m.conn);
+      if (!to || to === conn || to.rec || to.closed || (to.adminOf && to.adminOf !== room)) return this.refuse(conn, 'admin', 'target');
+      return room.broadcastEvents([room.setAdminConn(to, 'transfer', conn)]);
+    }
     const to = room.recs.get(m.id);
     if (!to || to.bot || to === conn.rec) return this.refuse(conn, 'admin', 'target');
     room.broadcastEvents([room.setAdmin(to, 'transfer', conn)]);
@@ -559,10 +579,11 @@ export class Arena {
     const room = conn.room;
     let detail;
     if (room) detail = cache ? cache[room.id] || (cache[room.id] = room.detail()) : room.detail();
-    else detail = { room: null, rname: null, admin: null, players: [], queue: [], cap: this.maxPlayers, bots: 0, botMax: Math.max(0, this.maxPlayers - 1), cfg: {} };
-    // mine: this connection is the admin of the room it looks at (pending, or as its player)
+    else detail = { room: null, rname: null, admin: null, padmin: null, players: [], queue: [], lobby: [], cap: this.maxPlayers, bots: 0, botMax: Math.max(0, this.maxPlayers - 1), cfg: {} };
+    // mine: this connection is the admin of the room it looks at (pending, or as its player);
+    // you: its connection id, as the room's `lobby` list and a visitor's `padmin` name it
     const mine = !!room && (room.adminConn === conn || (!!conn.rec && conn.rec.room === room && room.adminId === conn.rec.id));
-    return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail, mine };
+    return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail, mine, you: conn.id };
   }
 
   // ---------- the tick ----------
@@ -647,7 +668,7 @@ export class Arena {
   }
   connView(c) {
     return { conn: c.id, ip: c.ip, word: c.word, player: c.rec ? c.rec.id : null, room: c.room ? c.room.id : null,
-      ...(c.adminOf ? { pendingAdmin: c.adminOf.id } : {}),
+      ...(c.adminOf ? { pendingAdmin: c.adminOf.id } : {}), ...(!c.rec && c.room ? { vname: c.vname ?? null, watching: !!c.vwatch } : {}),
       rttMs: Math.round(c.rtt), inputRate: c.inRate,
       dropped: c.dropCount, logDropped: c.logDropped, ageS: Math.round((this.now() - c.connectedAt) / 1000) };
   }

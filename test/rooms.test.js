@@ -386,3 +386,18 @@ test('rooms: admin and debug views list the rooms; events and logs carry room id
   assert.equal(arena.logs.find(v.conn.word)[0].entries[0].room, 1, 'streamed log entries are tagged with the room');
   assert.equal(arena.viewByToken(b.last('welcome').token).player.room, 1);
 });
+
+test('an error in one room\'s step closes that room only; the others and the server carry on', () => {
+  const { arena, creator, tick, logs } = setup();
+  const a = creator('Ann'), b = creator('Bob');
+  tick(5);
+  const [ra, rb] = [...arena.rooms.values()];
+  ra.step = () => { throw new Error('boom'); };
+  const t0 = rb.state.tick;
+  tick(3);
+  assert.ok(!arena.rooms.has(ra.id), 'the broken room is closed');
+  assert.ok(arena.rooms.has(rb.id) && rb.state.tick === t0 + 3, 'the other room kept stepping');
+  assert.equal(a.last('closed')?.why, 'error');
+  assert.ok(logs.some(l => /room-error room=/.test(l)));
+  assert.equal(b.last('closed'), undefined);
+});

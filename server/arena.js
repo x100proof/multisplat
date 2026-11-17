@@ -564,9 +564,16 @@ export class Arena {
     }
     // every room steps once (empty rooms don't exist: a room closes with its last human)
     this.tickNo++;
-    for (const room of this.rooms.values()) {
+    // a bug in one room's step closes that room (its players land on the room list) instead of
+    // taking the whole server, and every other room, down with it
+    for (const room of [...this.rooms.values()]) {
       const r0 = this.now();
-      room.step(now);
+      try { room.step(now); } catch (e) {
+        this.log(`room-error room=${room.id} ${String(e && e.stack || e).split('\n').slice(0, 4).join(' | ')}`);
+        this.event({ type: 'room-error', room: room.id, err: String(e && e.message || e).slice(0, 200) });
+        try { this.closeRoom(room, 'error'); } catch (e2) { this.rooms.delete(room.id); this.log(`room-error close failed room=${room.id} ${String(e2 && e2.message)}`); }
+        continue;
+      }
       const d = this.now() - r0;
       room.stepMs += (d - room.stepMs) * .05; room.stepMax = Math.max(room.stepMax, d);
     }

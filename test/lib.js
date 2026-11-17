@@ -24,9 +24,11 @@ export function tempDir(prefix = 'multisplat-') { return mkdtempSync(join(tmpdir
 export function removeDir(d) { try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
 
 // Start server/server.js as a child process. Resolves once it is listening.
-// Returns { port, adminPort, origin, url, wsUrl, proc, logs, stop() }.
+// Returns { port, adminPort, origin, url, wsUrl, proc, logs, stop() }. extra.PORT reuses a port (a
+// restart, SPEC §18). STATE_FILE is 'off' unless given, so no test server saves rooms for the next.
 export async function startServer(extra = {}, { quiet = true } = {}) {
-  const port = await freePort();
+  const port = extra.PORT ? +extra.PORT : await freePort();
+  extra = { STATE_FILE: 'off', ...extra };
   const adminPort = extra.DEBUG_PORT === undefined ? await freePort() : extra.DEBUG_PORT;
   const origin = `http://127.0.0.1:${port}`;
   const vars = { ...process.env, HOST: '127.0.0.1', PORT: String(port), ALLOWED_ORIGINS: origin,

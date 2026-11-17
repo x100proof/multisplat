@@ -46,9 +46,10 @@ function take(holder, key, burst, refillMs, now) {
 export class Arena {
   constructor({ cfg = DEFAULTS, level = Sim.LEVEL, now = () => performance.now(), log = () => {}, event = () => {},
     maxPlayers = NET.maxPlayers, graceMs = NET.graceMs, idleMs = NET.idleMs, heartbeatMs = NET.heartbeatMs,
-    maxPerIp = Infinity, seed, build = '', logs = createLogStore(), maxRooms = ROOM.max, roomsPerIp = ROOM.perIp } = {}) {
+    maxPerIp = Infinity, seed, build = '', rules = '', logs = createLogStore(), maxRooms = ROOM.max, roomsPerIp = ROOM.perIp } = {}) {
     this.logs = logs;     // the streamed client logs, per word id (SPEC §13.5; server/logs.js)
     this.build = build;   // the server's build id, sent in every welcome (SPEC §10)
+    this.rules = rules;   // and its rules hash (SPEC §18): a page whose own differs can't share a game with it
     this.cfg = cfg; this.level = level; this.now = now; this.log = log; this.event = event; this.maxPerIp = maxPerIp;
     this.maxPlayers = maxPlayers; this.graceMs = graceMs; this.idleMs = idleMs;
     this.heartbeatMs = heartbeatMs;   // 0 or Infinity: no heartbeat (never used by the server itself)
@@ -143,7 +144,7 @@ export class Arena {
     conn.logBucket = LOG.burst; conn.logAt = this.now(); conn.logDropped = 0;
     this.logs.touch(conn.word, { ip: conn.ip });
     this.conns.add(conn);
-    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.tickNo, cap: this.maxPlayers, colors: COLORS, w: conn.word });
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, r: this.rules, tick: this.tickNo, cap: this.maxPlayers, colors: COLORS, w: conn.word });
     this.send(conn, this.lobbyMsg(conn));
     return conn;
   }
@@ -386,7 +387,7 @@ export class Arena {
     // An automatic reconnect asks to resume only: with the token gone (the grace period ran out),
     // it is told so and stays a lobby viewer instead of silently joining as a new player.
     if (m.token && m.resume === true) {
-      this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, tick: this.tickNo, cap: this.maxPlayers, resumed: false, expired: true });
+      this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, r: this.rules, tick: this.tickNo, cap: this.maxPlayers, resumed: false, expired: true });
       return;
     }
     if (!Number.isInteger(m.room) || m.room < 1) return this.kick(conn, 'bad hello');
@@ -452,7 +453,7 @@ export class Arena {
 
   welcome(conn, rec, resumed) {
     const room = rec.room;
-    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, id: rec.id, token: rec.token, resumed, state: rec.state,
+    this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, r: this.rules, id: rec.id, token: rec.token, resumed, state: rec.state,
       name: rec.name, color: rec.color, tick: this.tickNo, queuePos: room.queuePos(rec),
       room: room.id, rname: room.name, admin: room.adminId, cfg: cfgDiff(room.cfg),
       players: room.roster(), queue: room.queueList(), cap: this.maxPlayers });
@@ -655,9 +656,16 @@ export class Arena {
     this.stopped = false;
     loop();
   }
-  stop() {
+  // restart: the server is restarting and has saved the rooms (SPEC §18): every connection is told
+  // ({t:'restart'}) and closed with NET.restartClose, and no record is released (the next server
+  // restores them and the pages resume). Otherwise every connection is kicked ('shutdown').
+  stop({ restart = false } = {}) {
     this.stopped = true; clearTimeout(this.timer);
-    for (const c of [...this.conns]) this.kick(c, 'shutdown');
+    if (!restart) { for (const c of [...this.conns]) this.kick(c, 'shutdown'); return; }
+    for (const c of [...this.conns]) {
+      this.send(c, { t: 'restart' });
+      try { c.close(NET.restartClose, 'restart'); } catch { /* already closed */ }
+    }
   }
 
   // ---------- views for the debug tools (SPEC §13) ----------

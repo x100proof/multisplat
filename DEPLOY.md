@@ -13,6 +13,7 @@ comes from environment variables, so nothing in this repository needs editing.
 | `MAX_PER_IP` / `MAX_CONN` | `4` / `40` | WebSocket connection caps. |
 | `DEBUG_DIR` | `./debug-reports` | Where player debug reports are stored (git-ignored). |
 | `DEBUG_PORT` | unset | Read-only admin listener for `tools/debug.js`. Always bound to `127.0.0.1`. |
+| `STATE_FILE` | `./state/rooms.json` | Where the running games are saved when the server is stopped, so a restart doesn't end them (see "Updating" below). The directory is created `0700`, the file `0600` (it holds resume tokens); `off` saves nothing. Git-ignored. |
 | `NET_SIM` | unset | Test only: `delayMs,jitterPct` of artificial latency each way. Refused when `NODE_ENV=production`. |
 
 ## 1. Quick start
@@ -67,7 +68,7 @@ The nginx template:
 ```sh
 sudo cp deploy/multisplat.service /etc/systemd/system/
 sudoedit /etc/systemd/system/multisplat.service     # placeholders, origin, ports
-sudo mkdir -p /path/to/multisplat/debug-reports && sudo chown <SERVICE_USER> /path/to/multisplat/debug-reports
+sudo mkdir -p /path/to/multisplat/debug-reports /path/to/multisplat/state && sudo chown <SERVICE_USER> /path/to/multisplat/debug-reports /path/to/multisplat/state
 sudo systemctl daemon-reload
 sudo systemctl enable --now multisplat
 journalctl -u multisplat -f                          # the logs
@@ -75,6 +76,17 @@ journalctl -u multisplat -f                          # the logs
 
 The server logs connects, joins, leaves, kicks, refusals and errors to stdout (so to the
 journal). It never logs message bodies.
+
+**Updating without ending games.** `git pull && sudo systemctl restart multisplat` is all it takes.
+On SIGTERM (or SIGINT) the server saves every room to `STATE_FILE`, tells every page it is restarting
+and exits, well inside systemd's stop timeout (it takes milliseconds; the unit must deliver the
+signal to `node` itself, e.g. `ExecStart=/usr/bin/node …` or `exec node …` from a shell). The new
+server loads the file if it is under 2 minutes old and was written by a server running the same game
+rules (the code in `shared/` and `public/net.js`, compared by a hash the server computes itself) and
+the same save format; the pages then resume their games in place. If the rules changed, the new
+server starts empty and every open game stops with a message asking the player to load the new
+version. The start log says which happened (`restore: …`). `STATE_FILE` must be writable by the
+service (with `ProtectSystem=strict`, list its directory in `ReadWritePaths`).
 
 ## 4. Behind a second proxy or CDN
 

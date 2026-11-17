@@ -11,6 +11,7 @@ Status: **M6** (in progress). This covers:
   window (§6.4), scores for everyone along the top (§9), neon blood by default with a real-gore
   option (§7), ninja stars (§5.2).
 - rooms (SPEC §17): up to 10 rooms of 8 slots, each with an admin; see server/room.js and "Rooms" below.
+- restarts without losing games (SPEC §18): see "Restarts without losing games: the two fingerprints" below.
 
 ```
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
@@ -19,6 +20,8 @@ shared/sim.js         deterministic 60 Hz world step (movement, player collision
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       connections and protocol, rate limits, heartbeat, resume tokens, idle kick, the rooms and the one tick loop
 server/room.js        one room: its world, slots/queue, names, colours, bots, admin, sim step with lag comp, snapshots
+server/version.js     the served files (read once, served from memory), the build id, the rules hash and its JS normalizer
+server/persist.js     saving the rooms on SIGTERM, loading them at start (trial step), the shape hash
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
 server/logs.js        streamed client logs: per word id, the last hour in memory, with caps (SPEC §13.5)
 shared/logid.js       word ids (`amber-otter`: 100 adjectives x 100 nouns) and the LOG streaming limits
@@ -29,7 +32,7 @@ public/music.js       the combat score as data, its offline pre-render into two 
 public/net.js         client netcode: socket, reconnect/resume, clock sync, prediction, interpolation
 public/debug.js       client log ring (dbg), debug report builder and sender, log streaming queue
 tools/debug.js        CLI for the admin listener
-test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, rooms, bots, spectate, gore, music, logs, hygiene)
+test/*.test.js        node:test unit tests (sim, items, stars, level, server, arena, rooms, bots, spectate, gore, music, logs, persist, hygiene)
 test/multiclient.js   headless Chromium: 3 players, fight, kill feed, score strip, gore fingerprint and blood styles, resume, debug report, NET_SIM prediction, long sword, leave, ninja stars, heartbeat
 test/abuse.js         server limits against a real server process
 test/smoke.js         connect to a deployed /ws and expect `welcome`
@@ -360,9 +363,135 @@ the hitter gets the point.
   (`conn.rtt`, smoothed), and a socket with no pong for 30 s is dropped.
 - **`NET_SIM=delayMs,jitterPct`** delays every message in both directions, including the RTT
   pings, by `delayMs ± jitterPct %`, keeping order. So `120,2` gives an RTT of about 240 ms.
-- `startServer(cfg)` returns `{http, wss, arena, debug, admin, events, port, adminPort, close()}`.
+- `startServer(cfg)` returns `{http, wss, arena, debug, admin, events, port, adminPort, close(), restart()}`.
+  Before listening it computes the shape hash and loads `STATE_FILE` (SPEC §18); `restart()` saves the
+  rooms and closes every socket with the restart code (the SIGTERM/SIGINT handler calls it, then exits).
+  `STATE_FILE` (default `./state/rooms.json`, `off` for none) and the test-only `RULES_HASH` come from
+  `loadConfig`. Static files are served from memory (`makeHandler`, `server/version.js`).
 - Logs (stdout): listen, connect, join/promote/queue, resume, drop, timeout, leave, kick, refuse, report
   and errors. Never message bodies.
+
+## Restarts without losing games: the two fingerprints (SPEC §18)
+
+A deploy restarts the server. The question at every restart is whether the games running on the old
+code can go on under the new code, and there are two separate halves to it:
+
+| | **Rules hash** | **Shape hash** |
+|---|---|---|
+| Question it answers | Can this *page* share a game with this *server*? | Can this *server* load this *save file*? |
+| Computed from | the source of `shared/**` and `public/net.js` | the structure of what the save routine writes for a sample arena |
+| Computed by | `rulesHash` in `server/version.js`, at start | `computeShapeHash` in `server/persist.js`, at start |
+| Where it travels | `<meta name="rules">` in the served page, `r` in every `welcome`, `rulesHash` in the save file | `shapeHash` in the save file |
+| Who compares | the page (`compareVersion` in `net.js`), and the loading server | the loading server (`loadState`) |
+
+Why two: the client runs the shared sim for prediction and speaks the protocol through `net.js`, so a
+page may only stay in a game if both ends run the same rules. The save file, on the other hand,
+depends on the server's own data structures (`server/room.js` records, `server/ai.js` brains, room
+fields), which the page never sees; a server-side refactor can make an old save unreadable while
+every page stays perfectly compatible, and the reverse (a sim change with an unchanged save format)
+also happens. One hash would either reload pages needlessly or load saves wrongly.
+
+**Nobody maintains a version number.** Both hashes are computed by the code from the code at every
+start, so the decision can't be forgotten or got wrong by a person or an agent editing the game.
+
+### How the rules hash is computed
+
+1. `readTree` reads every file under `public/` and `shared/` once, at start. The server serves
+   exactly those bytes from memory (`makeHandler`), so the hash always describes the page a browser
+   loaded, even though the service runs from a working tree that a deploy rewrites under it.
+2. The rules files (`isRulesFile`: `shared/**` and `public/net.js`) in path order are fed to sha256 as
+   `path \0 normalized-text \0`; the first 16 hex digits are the hash.
+3. `normalizeJs` removes comments and collapses whitespace runs: a run that contains a line break
+   becomes one `\n` (line breaks matter in JS: `return\nx` is not `return x`), any other run one space;
+   a block comment counts as whitespace. It is a small scanner, not a regex: `'…'`, `"…"`, template
+   literals (with `${…}` nested to any depth) and regex literals are copied byte for byte, so a `//`
+   or `/*` inside them is never taken for a comment. Whether a `/` starts a regex is decided from the
+   previous token, as JS itself does (after an operator, `(`, `,`, `{`, `}`, `;` or a keyword like
+   `return`: a regex; after a name, a number or `)`/`]`: a division). The only promise it makes is
+   the safe one: sources that differ in anything but comments and the amount of whitespace give
+   different hashes. A test normalizes every served file and checks the result still parses.
+
+`RULES_HASH` (tests only, refused in production) replaces the computed value, so a test can restart
+the server as if `shared/` had changed.
+
+### How the shape hash is computed
+
+1. `sampleArena` builds an arena in memory with a fixed seed and a fake clock, through the normal
+   protocol paths: room 1 has a pending admin, two humans (one away inside its grace), an AI player
+   with its brain, a queued human, a changed setting, pickups, a ninja star in flight, a long sword
+   waiting to drop and a chat bucket; room 2 has an admin who fights.
+2. `snapshotArena` serializes it exactly as a real save does. Serialization works by exclusion: every
+   own field of a `Room` and of a record is written unless it is in `ROOM_SKIP` / `REC_SKIP`
+   (connections, the owner and config, input sequencing, the lag-compensation history …) or handled
+   by the codec (`$recs`, `$queue`, `$bots`, `$pending`). Timestamps (`TIME_KEYS`; `performance.now()`
+   restarts with the process) are written as ages. Anything that is not plain JSON data (a `Map`, a
+   class instance, `Infinity`/`NaN`, a function) throws.
+3. `shapeOf` turns the result into a canonical string of sorted keys and value types, arrays as the
+   set of their elements' shapes (so lengths and order don't matter); sha256, 16 hex digits.
+
+So a field added to a record or a room is saved and restored without anyone touching
+`server/persist.js`, *and* it changes the shape hash, so an older file that lacks it is not loaded.
+A field that can't be saved fails the start-up computation (persistence is then off, and the start
+log says why) and `test/persist.test.js`, long before a deploy.
+
+### The decision at a restart
+
+```
+SIGTERM ─► old server: stop the tick, saveState → STATE_FILE (0600, atomic), {t:'restart'} + close 1012, exit
+           new server: loadState (file deleted on read) ─┬─ rules ≠ or shape ≠ or > 2 min old ─► start empty
+                                                         └─ both equal ─► trial-step every room ─► restore the good ones
+pages:     freeze on the last frame, "SERVER UPDATING…", reconnect ~0.7 s apart for ≤ 40 s, resume with the token
+           first welcome on the new socket ─► compareVersion(page ids, welcome) ─► same / ui / outdated
+```
+
+| Rules hash | Shape hash | Server | Page |
+|---|---|---|---|
+| equal | equal | restores the rooms (trial step permitting) | resumes in place: same id, score, room; no reload (a different build id only queues a quiet reload on the room list) |
+| equal | different | starts empty | the resume comes back `expired`: back to the lobby with "The server was updated and could not keep this game." |
+| different | (any) | starts empty | the game stops: `leave` (if it had a record), nothing more sent or handled, the dialog "The game was updated and this match can't continue on your version." → OK reloads into the lobby; a lobby visitor or watcher reloads at once |
+
+### What it deliberately does not catch, and the safety net
+
+- A change **outside** `shared/` and `public/net.js` that keeps a field's name and type but changes
+  its meaning (a record field reinterpreted by `server/room.js`, a brain field read differently by
+  `server/ai.js`): both hashes stay equal and the old value is loaded under the new meaning.
+- **Server-only protocol changes** (`server/arena.js` / `room.js` sending a message an old `net.js`
+  misreads): `server/` is not in the rules hash, on purpose, or every server tweak would end every game.
+- The **trial step** is the net under both: `trialRoom` restores a deep copy of each room into a
+  scratch arena, checks it (`checkRoom`: records against slots, queue and sim players, unique tokens,
+  bots with brains, the admin, every number in the sim state finite, players inside the level), steps
+  it 60 ticks catching exceptions, and checks again. A room that fails is dropped and logged; the
+  others are restored. For a change the trial can't see, start empty on purpose (stop the service,
+  remove `STATE_FILE`, start).
+
+### Details
+
+- **Saving** (`server.js` `restart()`, from the SIGTERM/SIGINT handler): synchronous from the save to
+  the close, so no tick runs in between; `Arena.stop({restart: true})` sends `{t:'restart'}` and closes
+  with `NET.restartClose` (1012) without releasing any record; the handler waits at most 500 ms for the
+  sockets to close and exits (a 1.5 s hard timer backs it up). A room that fails to serialize is left
+  out and logged. Format: `{rulesHash, shapeHash, savedAt (wall clock ms), tick, nextId, nextRoom,
+  rooms: [{id, name, creatorIp, cfg, adminId, adminActAt, pendingName, state, createdAt, $recs,
+  $queue, $bots, $pending}]}`, records with every field but `REC_SKIP` (`token` included, hence 0600).
+- **Loading** (`loadState`, before the server listens): read, delete, parse, compare both hashes and the
+  age (`STATE_MAX_AGE_MS`, 2 min), then per room: trial, `restoreRoom` (a new `Room` with every saved
+  field assigned back, records with `conn: null` and fresh input sequencing, `discAt` set so that the
+  usual `graceMs` check gives `RESTORE_GRACE_MS`, 30 s; a `$pending` room's admin becomes `successor()`,
+  and without a human the room is skipped), `adopt` (room list, global record and token maps). The
+  arena's `tickNo`, `nextId` and `nextRoom` continue from the file. The start log says
+  `restore: N room(s)` (plus any `dropped room=… (why)`) or `restore: none (why)`.
+- **Pending admins** have no record and no token, so they can't resume; restoring treats the restart
+  as their disconnect (SPEC §17): the longest-present human takes over, or the room is not restored.
+- **The page** (`net.js`): `restarting` (from `{t:'restart'}` or close 1012) keeps `me` and the
+  snapshots, so the last frame stays; `closed()` reconnects every 0.4–1 s until `RESTART_MS` (40 s),
+  then falls back to the normal backoff. The first welcome on each socket (the connection welcome,
+  before the resume's) goes through `compareVersion(page, m)`: `'outdated'` → `outdated()` sends
+  `leave` if it had a token or id (a player admin with other humans is refused by the server and then
+  simply expires), sets `halted` (nothing is sent or handled after), stops pings and calls
+  `net.onOutdated({playing, server})`; `'ui'` sets `net.uiStale`; an `expired` resume right after a
+  restart sets `net.lostToRestart`. `game.js`: the `#upd` dialog (OK or Enter reloads), `reloadOnce`
+  (`sessionStorage` `mp.reloadedFor`, once per server version), `quietReload` (every second: on the
+  room list, a viewer, nothing typed), the HUD's "SERVER UPDATING…" while `net.restarting()`.
 
 ## server/arena.js
 
@@ -1025,6 +1154,12 @@ editable physics.
 
 `npm test` runs `node --test test/*.test.js` and then `node test/hygiene.js`.
 
+- `persist.test.js` (SPEC §18): see "Restarts without losing games"; the normalizer, both hashes,
+  save/restore round trip, refusals, the trial step, pending admins, the extended grace, `net.js` over
+  a fake socket across two restarts, and a real server process (SIGTERM → close 1012, file 0600 →
+  restore on the same port). `test/lib.js` `startServer` passes `STATE_FILE=off` unless a test gives one
+  (no test server leaves rooms for the next) and honours `PORT` (a restart on the same port).
+
 - `sim.test.js`:
   - determinism (6 players, 3000 random ticks, a mid-run join and leave; serialized state and events
     compared; and resuming from a deserialized state),
@@ -1201,13 +1336,14 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   the lobby and the game; F toggles it; it follows `fullscreenchange`; on touch it also asks for
   landscape and replaces the old ⛶ button. The score strip leaves room for it (`--fsw`). An Escape
   pressed in full screen, or within 500 ms of leaving it, does not open the leave menu.
-- **Build id and caching** (`BUILD`, `hashTree`, `stampIndex` in `server/server.js`): a 10-hex hash
-  of everything under `public/` and `shared/`, taken at start. The served `index.html` gets a
-  `<meta name="build">` and `game.js?v=<id>`. Every static response has `Cache-Control: no-cache`
-  and an `ETag`, and a matching `If-None-Match` gets a 304. Every `welcome` carries `b` (the
-  `Arena` `build` option). The client (`net.onStale` in `game.js`) reloads once per build id
-  (remembered in `sessionStorage`) when its own id differs. The id is in the debug panel and in
-  debug reports (`env.build`).
+- **Build id and caching** (`BUILD` in `server/server.js`, `buildId` in `server/version.js`): a 10-hex
+  hash of everything under `public/` and `shared/`, taken at start from the in-memory copy the server
+  serves. The served `index.html` gets a `<meta name="build">`, a `<meta name="rules">` (SPEC §18) and
+  `game.js?v=<id>`. Every static response has `Cache-Control: no-cache` and an `ETag`, and a matching
+  `If-None-Match` gets a 304. Every `welcome` carries `b` (the `Arena` `build` option) and `r` (the
+  rules hash). What a page does about a difference is decided by the rules hash (see "Restarts
+  without losing games"); the build id alone only triggers the quiet reload on the room list. The
+  ids are in the debug panel (build) and in debug reports (`env.build`, `env.rules`).
 - **Breaking a long sword** (`shared/sim.js`, step 4b): a live sword box overlapping a lying long-sword
   pickup removes it and emits `{type:'break', tick, id, item, x, y}`. The client plays `sfx.smash`
   and a few sparks. Star pickups are not affected.
@@ -1218,13 +1354,14 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   the lobby and the game; F toggles it; it follows `fullscreenchange`; on touch it also asks for
   landscape and replaces the old ⛶ button. The score strip leaves room for it (`--fsw`). An Escape
   pressed in full screen, or within 500 ms of leaving it, does not open the leave menu.
-- **Build id and caching** (`BUILD`, `hashTree`, `stampIndex` in `server/server.js`): a 10-hex hash
-  of everything under `public/` and `shared/`, taken at start. The served `index.html` gets a
-  `<meta name="build">` and `game.js?v=<id>`. Every static response has `Cache-Control: no-cache`
-  and an `ETag`, and a matching `If-None-Match` gets a 304. Every `welcome` carries `b` (the
-  `Arena` `build` option). The client (`net.onStale` in `game.js`) reloads once per build id
-  (remembered in `sessionStorage`) when its own id differs. The id is in the debug panel and in
-  debug reports (`env.build`).
+- **Build id and caching** (`BUILD` in `server/server.js`, `buildId` in `server/version.js`): a 10-hex
+  hash of everything under `public/` and `shared/`, taken at start from the in-memory copy the server
+  serves. The served `index.html` gets a `<meta name="build">`, a `<meta name="rules">` (SPEC §18) and
+  `game.js?v=<id>`. Every static response has `Cache-Control: no-cache` and an `ETag`, and a matching
+  `If-None-Match` gets a 304. Every `welcome` carries `b` (the `Arena` `build` option) and `r` (the
+  rules hash). What a page does about a difference is decided by the rules hash (see "Restarts
+  without losing games"); the build id alone only triggers the quiet reload on the room list. The
+  ids are in the debug panel (build) and in debug reports (`env.build`, `env.rules`).
 - **Breaking a long sword** (`shared/sim.js`, step 4b): a live sword box overlapping a lying long-sword
   pickup removes it and emits `{type:'break', tick, id, item, x, y}`. The client plays `sfx.smash`
   and a few sparks. Star pickups are not affected.

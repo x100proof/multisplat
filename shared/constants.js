@@ -132,6 +132,7 @@ export const NET = Object.freeze({
   graceMs: 5000,           // a dropped player keeps its slot and score this long (resume token)
   heartbeatMs: 5000,       // the server closes a connection it has heard nothing from for this long
   timeoutClose: 4100,      // the close code for that: the client treats it as a network drop (resume), not a kick
+  restartClose: 1012,      // the server is restarting and saved the rooms (SPEC §18): reconnect and resume (the standard "service restart" code)
   pingMs: 500,             // the client pings twice a second, from socket open, in every mode
   idleMs: 120000,          // no input for this long sends a player back to the lobby
   inputRate: 90,           // input messages per second per connection

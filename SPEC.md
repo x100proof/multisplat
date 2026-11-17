@@ -191,7 +191,7 @@ ARCHITECTURE.md    the code as implemented
 ### 6.1 Protocol
 - Messages are JSON over WebSocket. Every message has a `t` type field.
   Client → server: `hello`, `input`, `ping`, `leave`, `chat`, `bots` (§15), `log` (§13.5). Server → client: `welcome`, `snapshot`, `event`,
-  `lobby`, `pong`, `kick`.
+  `lobby`, `pong`, `kick`, `restart` (§18).
 - **Inputs:** each tick the client sends `{t:'input', seq, keys}`, where `keys` is a bitmask
   (left, right, jump, run, slash). Inputs may be batched, at most 3 ticks per message.
 - **Snapshots:** the server sends at **30 Hz**. Each one carries the server tick, the last
@@ -220,6 +220,9 @@ ARCHITECTURE.md    the code as implemented
   the 5 s above run out without a resume.
 - A clock offset is estimated from `ping`/`pong`, and RTT is shown in the debug panel.
 - **Idle kick:** a player with no input for 120 s goes back to the lobby.
+- **Server restart (§18):** `{t:'restart'}` and close code 1012 mean the server is restarting with
+  the rooms saved: the client freezes its game, reconnects and resumes as after a drop (for up to
+  40 s), and every welcome carries the rules hash `r` that decides whether it may play on.
 - **Leaving:** Escape (or the ✕ button on touch) opens a menu asking the player to confirm.
   "Stay" is the default and the game carries on behind the menu. "Leave" sends `leave`: the
   server frees the slot or queue place at once, with no resume, and the connection stays open
@@ -347,6 +350,8 @@ committed.
 | `MAX_PER_IP` / `MAX_CONN` | `4` / `40` | Connection caps. |
 | `DEBUG_DIR` | `./debug-reports` | Where player debug reports are stored (§13). Git-ignored. |
 | `DEBUG_PORT` | unset | When set, a read-only admin listener (§13) on this port. It **always** binds `127.0.0.1`, whatever `HOST` is. |
+| `STATE_FILE` | `./state/rooms.json` | Where the rooms are saved on a restart (§18). Git-ignored; directory `0700`, file `0600`; `off` disables saving. |
+| `RULES_HASH` | unset | **Test only:** replaces the computed rules hash (§18). Refused when `NODE_ENV=production`. |
 | `NET_SIM` | unset | **Test only:** `delayMs,jitterPct` for artificial latency. Refused when `NODE_ENV=production`. |
 
 **Caching and versions (a refresh always gets the latest):**
@@ -357,9 +362,13 @@ committed.
   `shared/`. It puts the id into the served `index.html` (a `<meta name="build">` tag and a
   `?v=<id>` on the entry script) and into every `welcome`.
 - A page whose build id differs from the server's is stale, for example a tab left open across
-  a deploy, which reconnects to the new server. It shows "New version, reloading" and reloads
-  itself, at most once per build id so a mismatch can never loop. The build id is shown in the
-  debug panel and included in debug reports.
+  a deploy, which reconnects to the new server. What it does is decided by the **rules hash** (§18),
+  not by the build id: same rules → it plays on and reloads quietly later, on the room list; other
+  rules → the game stops with a message. Reloads happen at most once per server version so a
+  mismatch can never loop. The build id is shown in the debug panel and included in debug reports.
+  (A page older than §18 has no rules hash and still reloads on any build change.)
+- The static files are read once at start and served from memory, so a page never mixes files of
+  two versions and the ids describe exactly what was served.
 
 **WebSocket server limits:**
 - `maxPayload` 1 KB.
@@ -397,6 +406,16 @@ Write it for a stranger hosting their own copy:
 5. **Smoke test:** `node test/smoke.js wss://your.domain/ws` connects and expects `welcome`.
 
 ## 12. Testing
+
+- `test/persist.test.js` (§18): the rules-hash normalizer (comments and whitespace don't count, code
+  does, `//` in strings and regexes is safe, every served file still parses after normalizing), the
+  shape hash (stable, changes with a record field, non-plain data refused), save → restore on the
+  socket-less arena (scores, bots, settings, admins, resume with tokens, play on), mismatched hashes
+  and stale or broken files (an empty start, the file deleted), the trial step dropping a corrupted
+  room, `public/net.js` across a restart (same rules: resume in place; other rules: stop, `leave`,
+  the update message), and a real server process stopped with SIGTERM and started again on the same
+  file. `test/multiclient.js` `restartTest`: two browsers fighting across a restart, then a restart
+  under other rules (`RULES_HASH`).
 
 - `npm test`:
   - Unit tests for `shared/sim.js`: determinism (identical input streams produce identical
@@ -811,3 +830,68 @@ Every room has its own settings, edited by its admin; they apply to everyone in 
 - **AI players.** The bots' route table (§15) depends on the movement constants only; it is cached per
   level and per set of movement values (the 12 most recent), so a damage or gore change keeps it, and a
   movement change builds a table for the new values on the next bot tick (~30 ms, once).
+
+## 18. Restarts without losing games
+
+Deploying a new version restarts the server. Games in progress survive that whenever the new code
+can run them, and the players are told plainly when it can't. **Every compatibility decision is made
+by code**: no version number is maintained by hand anywhere.
+
+- **Two fingerprints, computed by the server at start:**
+  - the **rules hash**: what a page and a server must agree on to share a game. A sha256 over every
+    file under `shared/` (the deterministic sim, constants, level …) plus `public/net.js` (the client
+    end of the protocol), in path order, each normalized first: comments removed and whitespace runs
+    collapsed (one line break if the run had one, else one space), strings, template literals and
+    regex literals kept byte for byte. Editing a comment or re-indenting changes nothing; any other
+    change to those files does. The served `index.html` carries it (`<meta name="rules">`) next to
+    the build id, and every `welcome` carries it as `r`.
+  - the **shape hash**: what a save file must match to be loaded. The server builds a sample arena in
+    memory (rooms with a pending and a playing admin, humans connected and away, an AI player with its
+    brain, a queued player, non-default settings, pickups, a star in flight, a dropped long sword, a
+    chat bucket) and fingerprints the structure of exactly what the save routine would write: sorted
+    object keys and value types, arrays by the set of their elements' structures. The save routine
+    writes every field of a room and of a record except a short list of connection and per-moment
+    fields, so a field added to either changes the shape hash on its own.
+- **Saving.** On SIGTERM or SIGINT the server stops its tick, writes every room (sim state with its
+  RNG, players, pickups, stars, timers, scores; settings; admin; queue; AI players with their brains;
+  every record with name, colour, id, resume token and state) atomically (temp file, fsync, rename) to
+  `STATE_FILE` as `{rulesHash, shapeHash, savedAt, tick, nextId, nextRoom, rooms}`, sends every
+  connection `{t:'restart'}`, closes it with code **1012** (`NET.restartClose`, the standard "service
+  restart") and exits, in well under a second. Not saved: sockets, watchers, input queues, the
+  lag-compensation history, chat history, word ids and streamed logs. A server killed without a
+  signal leaves no file and the next one starts empty.
+- **Loading.** At start, before listening, the server reads `STATE_FILE` and deletes it at once (it is
+  never loaded twice). It loads it only if it is under **2 minutes** old and its rules hash **and**
+  shape hash equal the new server's; otherwise it starts empty and logs why (`restore: none (…)`).
+  Each room is first stepped **60 ticks** on a copy in a scratch arena, catching any exception, and
+  checked (records against slots, queue and sim players, tokens, admin, every number finite, players
+  inside the level); a room that fails is dropped and logged, the others come back with their ids.
+  The tick goes on from the saved one. Restored humans are away with an extended **30 s** grace to
+  resume, then the usual expiry applies. A room whose admin was **pending** (a connection, which has
+  no record or token): the role passes to the human who has been in the room longest, as when a
+  pending admin disconnects (§17); with no human in it the room is not restored.
+- **The page.** On `{t:'restart'}` or close code 1012 the game freezes on its last frame (nothing is
+  sent), shows "SERVER UPDATING…", and reconnects about every 0.7 s for up to 40 s, resuming with its
+  token as after a drop. Every welcome is compared with the page's own ids (`compareVersion` in
+  `net.js`):
+  - **same rules** → the game resumes in place with its score, no reload. If the build id differs too
+    (only UI files changed), the page reloads quietly later, when it is on the room list with nothing
+    typed (never mid-game or on a room's screen).
+  - **other rules** → the game stops: the page sends `leave` if it had a record, sends and handles
+    nothing more, and shows "The game was updated and this match can't continue on your version.
+    Press OK to load the new version." (OK, or Enter, reloads into the lobby). A page with nothing to
+    lose (a lobby visitor, a watcher) reloads at once with a short "New version, reloading…".
+  - **same rules, but the server could not restore the game** (a newer save format, a stale file,
+    a failed trial): the resume comes back `expired` and the page returns to the lobby with "The
+    server was updated and could not keep this game."
+  - A page older than this section knows no rules hash: it reloads whenever the build id changes, as
+    before (the server keeps sending `b`).
+- **What the fingerprints do not catch.** A change outside `shared/` and `public/net.js` that keeps a
+  field's name and type but changes its meaning (say, a record field reinterpreted by
+  `server/room.js`), and server-only protocol changes (`server/arena.js` sending a message an old
+  `net.js` misreads). Such a change needs the restart to start empty (stop the service, delete the
+  file or let it age past 2 minutes, start). The trial step is the safety net for the rest: a room the
+  new code can't step, or that steps into nonsense, is dropped rather than served.
+- **Deploying.** The service manager must deliver SIGTERM to `node` itself (run it directly or with
+  `exec`); saving takes milliseconds, far inside systemd's default stop timeout.
+

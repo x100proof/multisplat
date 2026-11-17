@@ -7,7 +7,7 @@
 // Every room steps once per server tick, so all rooms share one tick number (`arena.tickNo`): a
 // lobby visitor switching rooms keeps one continuous timeline and clock sync.
 import * as Sim from '../shared/sim.js';
-import { NET, TICK_MS, COLORS, KEY, BOT, FX } from '../shared/constants.js';
+import { NET, TICK_MS, COLORS, KEY, BOT, FX, VIEW_DEFAULTS, cleanSetting, cfgDiff } from '../shared/constants.js';
 import { newBrain, botKeys } from './ai.js';
 
 const SNAP_DIV = Math.round(60 / NET.snapshotHz);   // a snapshot every 2nd tick
@@ -19,13 +19,18 @@ const PRESS_BITS = KEY.JUMP | KEY.SLASH | KEY.THROW; // edge-triggered keys a sk
 // cooldown ends, up to RETRY_MAX times; plain presses on cooldown are still ignored, as the client
 // expects. Without this a quick second throw played its swish on the client but never flew.
 const RETRY_MAX = 3;
+const SAME = (a, b) => { for (const k in a) if (a[k] !== b[k]) return false; return true; };
 export const r2 = v => Math.round(v * 100) / 100;
 
 export class Room {
   // arena: the owning Arena (config, clock, logs, the global record and token maps).
   constructor(arena, { id, name, seed, creatorIp = null }) {
     this.arena = arena; this.id = id; this.name = name; this.creatorIp = creatorIp;
-    this.cfg = arena.cfg; this.level = arena.level; this.maxPlayers = arena.maxPlayers;
+    // The room's own settings (SPEC §17.1): the server's cfg plus the room-wide display switches,
+    // edited by the admin. A new frozen object per change (never mutated), so anything keyed on the
+    // object sees the change. They die with the room: a new room starts from the defaults again.
+    this.baseCfg = Object.freeze({ ...VIEW_DEFAULTS, ...arena.cfg });
+    this.cfg = this.baseCfg; this.level = arena.level; this.maxPlayers = arena.maxPlayers;
     this.adminId = null;          // the record id of the admin (a human in this room) — SPEC §17
     this.adminConn = null;        // or the pending admin: a connection with no record (created the room, not fighting)
     this.adminActAt = 0;          // the pending admin's last action (a room held only by it closes after ROOM.pendingMs)
@@ -153,6 +158,19 @@ export class Room {
     return hs[0] || null;
   }
 
+  // Room settings (SPEC §17.1). `set`: {key: value}, already checked by the caller; reset: back to
+  // the server's defaults. Returns the `cfg` event for the room's viewers (null: nothing changed):
+  // `cfg` is the whole new state (as a diff against ROOM_DEFAULTS), `ch` what this change set.
+  applyCfg(set, reset, by = null) {
+    const next = { ...(reset ? this.baseCfg : this.cfg) }, ch = {};
+    if (!reset) for (const k in set) { const v = cleanSetting(k, set[k]); if (v !== undefined && next[k] !== v) { next[k] = v; ch[k] = v; } }
+    if (reset ? SAME(this.cfg, this.baseCfg) : !Object.keys(ch).length) return null;
+    this.cfg = reset ? this.baseCfg : Object.freeze(next);
+    this.log(`room-cfg conn=${by ? by.id : '-'} ${reset ? 'reset' : Object.entries(ch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    this.event('room-cfg', by ? by.id : null, reset ? { reset: true } : { set: ch });
+    return { type: 'cfg', tick: this.state.tick, cfg: cfgDiff(this.cfg), ...(reset ? { reset: true } : { ch }) };
+  }
+
   // Make `rec` the admin. Returns the `admin` event for the room's viewers (the caller sends it).
   setAdmin(rec, why, by = null) {
     const from = this.adminId;
@@ -222,7 +240,7 @@ export class Room {
   // The room's half of a lobby message (SPEC §17): what a member or a visitor who selected it sees.
   detail() {
     return { room: this.id, rname: this.name, admin: this.adminId, players: this.roster(), queue: this.queueList(),
-      cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots() };
+      cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots(), cfg: cfgDiff(this.cfg) };
   }
   // One row of the room list every lobby visitor sees.
   summary() {
@@ -356,6 +374,7 @@ export class Room {
     const a = this.admin(), st = this.state;
     return { id: this.id, name: this.name, admin: a ? { id: a.id, name: a.name } : this.adminConn ? { pending: true, conn: this.adminConn.id, name: this.pendingName } : null, creatorIp: this.creatorIp,
       ageS: Math.round((this.arena.now() - this.createdAt) / 1000), bots: this.bots.length, watchers: this.watchers(),
+      cfg: cfgDiff(this.cfg),
       stepMs: r2(this.stepMs), stepMaxMs: r2(this.stepMax),
       items: (st.items || []).map(i => ({ ...i, kind: Sim.itemKind(i) })), itemInS: r2(Math.max(0, st.itemT) * TICK_MS / 1000),
       starInS: r2(Math.max(0, st.starT ?? 0) * TICK_MS / 1000),

@@ -4,7 +4,7 @@
 // The game simulates in world units (the view is 320x192 units, tiles are 16) but draws at the
 // screen's full resolution. All art is vector-drawn: paths, gradients and glows.
 import * as Sim from '/shared/sim.js';
-import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, NET, COLORS, PALETTE, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, cleanRoomName, CHAT, ROOM } from '/shared/constants.js';
+import { VW, VH, T, KEY, FX, ATK_LEN, DEFAULTS, VIEW_DEFAULTS, SETTINGS, SETTING_TOGGLES, cfgDiff, NET, COLORS, PALETTE, LONG_REACH, ITEM_W, ITEM_H, cleanName, cleanChat, cleanRoomName, CHAT, ROOM } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { PICK_TOL, pickAt, followTarget, cycleTarget } from '/shared/spectate.js';
 import { createNet } from './net.js';
@@ -22,6 +22,9 @@ let SCALE = 1;   // device pixels per world unit
 
 // ---------- tunables (edited live by the debug panel, D) ----------
 // Sim tunables come from shared/constants.js; the rest are client-only view and dummy switches.
+// Offline, the panel edits CFG (saved in this browser). Online the sim constants and the room-wide
+// display switches (gore, blood style) are the room's settings (SPEC §17.1), which only the room's
+// admin edits and every page in the room applies (net.cfg); hitboxes and music volume stay local.
 const CLIENT_DEFAULTS = { gameSpeed: 1, gore: true, realGore: false, musicVol: .5, hitboxes: false, dummyWander: true, dummySlash: false, invincible: false };
 const ALL_DEFAULTS = { ...DEFAULTS, ...CLIENT_DEFAULTS };
 const CFG = { ...ALL_DEFAULTS };
@@ -51,7 +54,12 @@ const BLOOD_STYLES = {
     pools: ['#b30a0a', '#a0060b', '#b00c08', '#8e0508', '#760309', '#5a0006'],   // darker, as blood that has gathered
     layerBlend: 'source-over', layerAlpha: .96, cut: ['#5a0006', '#e8100c', '#ff6a5a'] },
 };
-const bloodStyleName = () => (CFG.realGore ? 'real' : 'neon');
+// The room-wide display switches online (net.cfg, copied here by onRoomCfg: net is created further
+// down), CFG offline. styleOverride: a page-local blood style set by the __mp.gore.setStyle test hook.
+let roomView = { ...VIEW_DEFAULTS }, styleOverride = null;
+const viewCfg = () => (ONLINE ? roomView : CFG);
+const goreOn = () => !!viewCfg().gore;
+const bloodStyleName = () => styleOverride || (viewCfg().realGore ? 'real' : 'neon');
 let BSTYLE = BLOOD_STYLES[bloodStyleName()], BLOOD = BSTYLE.drops, POOL = BSTYLE.pools;
 // Switch the palette and repaint: the baked decal/pool layer is rebuilt from G (and the stained
 // spike tile, for levels that have spikes); nothing in the gore simulation changes.
@@ -572,7 +580,7 @@ const colorOf = id => {
   return id === ME ? COLORS[0] : COLORS[(id * 3) % COLORS.length];
 };
 const nameOf = id => { const m = metaOf(id); return m ? m.name : id === ME ? 'you' : 'dummy'; };
-const simCfg = () => (ONLINE ? DEFAULTS : CFG);
+const simCfg = () => (ONLINE ? net.cfg : CFG);   // online: the room's settings, as the server steps it
 let state = Sim.createWorld({ seed: (Math.random() * 2147483646 | 0) + 1 });
 let goreMs = 0, renderMs = 0, feedDirty = true;
 const eventLog = [];          // recent sim events, for scripted checks
@@ -597,7 +605,7 @@ function onEvents(evs) {
       if (e.move === 'star') sfx.starHit(near ? 1 : .7); else sfx.slice();
       popups.push({ x: e.x + 5, y: e.y - 4, t: 40, s: String(e.dmg) });
       if (near) S.shake = Math.max(S.shake, e.move === 'star' ? 3 : 4);
-      if (CFG.gore) {   // spurt along the blow: away from where we see the attacker (a star: along its flight)
+      if (goreOn()) {   // spurt along the blow: away from where we see the attacker (a star: along its flight)
         const a = Sim.getPlayer(state, e.attacker);
         goreHit(G, e, e.move === 'star' ? (e.dir || 0) : a ? (a.x <= e.x ? 1 : -1) : 0);
       }
@@ -611,7 +619,7 @@ function onEvents(evs) {
       if (music) music.intensity();
       const f = focus(), dx = f.x - e.x, dy = f.y - e.y;
       if (dx * dx + dy * dy <= 120 * 120) S.shake = Math.max(S.shake, near ? 10 : 7);   // anyone within 120 units feels it
-      if (CFG.gore) {
+      if (goreOn()) {
         const t0 = performance.now();
         goreKill(G, e, { meta: colorOf(e.victim) });
         // a holder's sword piece is not drawn: the server's real long-sword pickup lies there instead
@@ -1176,7 +1184,7 @@ function render() {
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
   }
 
-  if (CFG.hitboxes) {
+  if (CFG.hitboxes && (!ONLINE || net.isAdmin())) {   // online: a view for the admin's panel only
     ctx.lineWidth = .5;
     const box = (b, c) => { ctx.strokeStyle = c; ctx.strokeRect(b.x - cx, b.y, b.w, b.h); };
     for (const p of state.players) if (p.alive) {
@@ -1447,39 +1455,12 @@ const hudCache = {};
 function setText(id, s) { if (hudCache[id] !== s) { hudCache[id] = s; document.getElementById(id).textContent = s; } }
 
 // ---------- debug panel (D): NinjaRunner's, with combat tunables and dummy switches ----------
-const DBG_SPEC = [
-  ['Jump', [
-    ['jumpVel', 'Jump strength', 2, 12, .1],
-    ['jumpSpeedBonus', 'Run-jump bonus', 0, 1, .05],
-    ['gravity', 'Gravity', .1, 1, .01],
-    ['releaseGravity', 'Short-hop gravity', .1, 2, .05],
-    ['maxFall', 'Max fall speed', 2, 15, .5],
-    ['coyote', 'Coyote time (frames)', 0, 20, 1],
-    ['jumpBuffer', 'Jump buffer (frames)', 0, 20, 1],
-  ]],
-  ['Movement', [
-    ['walkSpeed', 'Walk speed', .5, 5, .1],
-    ['runSpeed', 'Run speed', .5, 6, .1],
-    ['groundAccel', 'Ground accel', .02, 1, .02],
-    ['airAccel', 'Air accel', .02, 1, .02],
-    ['groundFriction', 'Ground friction', .5, 1, .01],
-    ['airFriction', 'Air friction', .8, 1, .01],
-    ['pushDamp', 'Body contact damping', 0, 1, .05],
-  ]],
-  ['Combat', [
-    ['chopDmg', 'Chop damage', 0, 100, 1],
-    ['sweepDmg', 'Sweep damage', 0, 100, 1],
-    ['knockX', 'Knockback x', 0, 8, .25],
-    ['knockY', 'Knockback y', -8, 0, .25],
-    ['hitStun', 'Hit-stun (ticks)', 0, 40, 1],
-    ['spawnIframes', 'Spawn protection (ticks)', 0, 240, 5],
-    ['respawnTicks', 'Respawn delay (ticks)', 10, 300, 5],
-  ]],
-  ['World', [
-    ['gameSpeed', 'Game speed', .1, 2, .05],
-  ]],
-];
+// Offline it edits CFG. Online it is the room's settings panel (SPEC §17.1), for the room's admin
+// only (pending or playing): every slider and the gore switches change the room for everyone in it.
+// The slider table is shared with the server (SETTINGS), which checks every value against it.
+const DBG_SPEC = [...SETTINGS, ['World', [['gameSpeed', 'Game speed', .1, 2, .05]]]];   // game speed: offline only
 const panel = document.getElementById('dbg');
+const panelOk = () => !ONLINE || net.isAdmin();
 function saveCfg() {
   const changed = {};
   for (const k in CFG) if (CFG[k] !== ALL_DEFAULTS[k]) changed[k] = CFG[k];
@@ -1487,53 +1468,62 @@ function saveCfg() {
 }
 function fmt(v, step) { return step >= 1 ? String(v) : (+v).toFixed(step < .1 ? 2 : 1); }
 function jumpInfo() {
-  const h = CFG.jumpVel ** 2 / (2 * CFG.gravity) / T;
-  const air = 2 * CFG.jumpVel / CFG.gravity;
-  return `Jump height ≈ ${h.toFixed(1)} tiles · walk-jump ≈ ${(air * CFG.walkSpeed / T).toFixed(1)} tiles · run-jump ≈ ${(air * CFG.runSpeed / T).toFixed(1)} tiles`;
+  const c = simCfg();
+  const h = c.jumpVel ** 2 / (2 * c.gravity) / T;
+  const air = 2 * c.jumpVel / c.gravity;
+  return `Jump height ≈ ${h.toFixed(1)} tiles · walk-jump ≈ ${(air * c.walkSpeed / T).toFixed(1)} tiles · run-jump ≈ ${(air * c.runSpeed / T).toFixed(1)} tiles`;
+}
+// The value a panel control shows, and setting it: CFG offline; online the room's (sent to the
+// server, which echoes it back as a `cfg` event to everyone in the room, us included).
+const panelVal = key => (ONLINE && key in net.cfg ? net.cfg[key] : CFG[key]);
+function panelSet(key, v) {
+  if (ONLINE) { net.setCfg({ [key]: v }); return; }
+  CFG[key] = v; saveCfg();
+  if (key === 'gore') dbg('perf', 'gore: ' + (v ? 'on' : 'off'));
+  if (key === 'realGore') applyBloodStyle();
 }
 let fpsEl = null, netEl = null, errCv = null, reportEl = null, audioEl = null;
 function buildDebug() {
   panel.innerHTML = '';
-  const h = document.createElement('h2'); h.innerHTML = '<span>Debug</span><span style="color:#bbb;font-weight:400">D to close</span>';
+  const h = document.createElement('h2'); h.innerHTML = `<span>${ONLINE ? 'Room settings' : 'Debug'}</span><span style="color:#bbb;font-weight:400">D to close</span>`;
   panel.appendChild(h);
   fpsEl = document.createElement('div'); fpsEl.className = 'info stat'; fpsEl.style.whiteSpace = 'pre-line'; panel.appendChild(fpsEl);
   if (ONLINE) {
     netEl = document.createElement('div'); netEl.className = 'info stat'; netEl.style.whiteSpace = 'pre-line'; panel.appendChild(netEl);
     const gl = document.createElement('div'); gl.className = 'info'; gl.textContent = 'Prediction error (units, last 6 s; line = 2)'; panel.appendChild(gl);
     errCv = document.createElement('canvas'); errCv.width = 256; errCv.height = 48; errCv.className = 'graph'; panel.appendChild(errCv);
-    const lock = document.createElement('div'); lock.className = 'info'; lock.style.color = '#ff6ec7';
-    lock.textContent = 'Online: physics and combat values are the server\'s and are locked.'; panel.appendChild(lock);
+    const note = document.createElement('div'); note.className = 'info'; note.style.color = '#ff6ec7';
+    note.textContent = `You are the admin: these settings change ${net.lobby.rname || 'the room'} for everyone in it, until it closes.`; panel.appendChild(note);
   }
   const info = document.createElement('div'); info.className = 'info'; panel.appendChild(info);
   const refresh = () => { info.textContent = jumpInfo(); };
   for (const [group, items] of DBG_SPEC) {
+    if (ONLINE && group === 'World') continue;   // game speed: the server's clock is shared by every room
     const g = document.createElement('h3'); g.textContent = group; panel.appendChild(g);
     for (const [key, name, min, max, step] of items) {
       const lab = document.createElement('label');
       const n = document.createElement('span'); n.textContent = name;
-      const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(CFG[key], step);
+      const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(panelVal(key), step);
       const r = document.createElement('input');
-      Object.assign(r, { type: 'range', min, max, step, value: ONLINE ? ALL_DEFAULTS[key] : CFG[key], disabled: ONLINE });
-      if (ONLINE) v.textContent = fmt(ALL_DEFAULTS[key], step);
-      r.addEventListener('input', () => { CFG[key] = +r.value; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
-      r.addEventListener('dblclick', () => { CFG[key] = ALL_DEFAULTS[key]; r.value = CFG[key]; v.textContent = fmt(CFG[key], step); refresh(); saveCfg(); });
+      Object.assign(r, { type: 'range', min, max, step, value: panelVal(key) });
+      // offline every move applies at once; online the value goes to the server when the slider is let go
+      r.addEventListener('input', () => { v.textContent = fmt(+r.value, step); if (!ONLINE) { panelSet(key, +r.value); refresh(); } });
+      r.addEventListener('change', () => { if (ONLINE) panelSet(key, +r.value); });
+      r.addEventListener('dblclick', () => { r.value = ALL_DEFAULTS[key]; v.textContent = fmt(ALL_DEFAULTS[key], step); panelSet(key, ALL_DEFAULTS[key]); refresh(); });
       lab.append(n, v, r); panel.appendChild(lab);
     }
   }
-  const g = document.createElement('h3'); g.textContent = 'Cheats & view'; panel.appendChild(g);
-  const toggles = [['hitboxes', 'Show hitboxes'], ['gore', 'Gore (blood, body pieces)'], ['realGore', 'Real gore (red blood, not neon)'], ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
+  const g = document.createElement('h3'); g.textContent = ONLINE ? 'View' : 'Cheats & view'; panel.appendChild(g);
+  // hitboxes are this page's own view; gore and the blood style are the room's online
+  const toggles = [['hitboxes', 'Show hitboxes (only you)'], ...SETTING_TOGGLES, ['dummyWander', 'Dummy wanders'], ['dummySlash', 'Dummy slashes'], ['invincible', 'Invincible (not spikes)']];
   for (const [key, name] of ONLINE ? toggles.slice(0, 3) : toggles) {
     const lab = document.createElement('label'); lab.className = 'chk';
-    const c = document.createElement('input'); c.type = 'checkbox'; c.checked = CFG[key];
-    c.addEventListener('change', () => {
-      CFG[key] = c.checked; saveCfg();
-      if (key === 'gore') dbg('perf', 'gore: ' + (c.checked ? 'on' : 'off'));
-      if (key === 'realGore') applyBloodStyle();
-    });
+    const c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!(key === 'hitboxes' ? CFG.hitboxes : panelVal(key));
+    c.addEventListener('change', () => { if (key === 'hitboxes') { CFG.hitboxes = c.checked; saveCfg(); } else panelSet(key, c.checked); });
     lab.append(c, document.createTextNode(name)); panel.appendChild(lab);
   }
-  // sound: available online too (it is not physics)
-  const sh = document.createElement('h3'); sh.textContent = 'Sound'; panel.appendChild(sh);
+  // sound: this browser's own
+  const sh = document.createElement('h3'); sh.textContent = 'Sound (only you)'; panel.appendChild(sh);
   {
     const lab = document.createElement('label');
     const v = document.createElement('span'); v.className = 'v'; v.textContent = fmt(CFG.musicVol, .05);
@@ -1546,9 +1536,10 @@ function buildDebug() {
   }
   const btns = document.createElement('div'); btns.className = 'btns';
   const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); btns.appendChild(b); return b; };
-  mkBtn('Reset defaults', () => { Object.assign(CFG, ALL_DEFAULTS); saveCfg(); applyBloodStyle(); buildDebug(); });
+  if (ONLINE) mkBtn('Reset to defaults', () => net.resetCfg());   // the room's settings; the echo rebuilds the panel
+  else mkBtn('Reset defaults', () => { Object.assign(CFG, ALL_DEFAULTS); saveCfg(); applyBloodStyle(); buildDebug(); });
   const copy = mkBtn('Copy values', async () => {
-    try { await navigator.clipboard.writeText(JSON.stringify(CFG, null, 2)); copy.textContent = 'Copied!'; }
+    try { await navigator.clipboard.writeText(JSON.stringify(ONLINE ? net.cfg : CFG, null, 2)); copy.textContent = 'Copied!'; }
     catch (e) { copy.textContent = 'Copy failed'; }
     setTimeout(() => { copy.textContent = 'Copy values'; }, 1200);
   });
@@ -1565,7 +1556,7 @@ function buildDebug() {
     send.disabled = false;
   });
   const tip = document.createElement('div'); tip.className = 'info'; tip.style.marginTop = '6px';
-  tip.textContent = 'Double-click a slider to reset it. Settings are saved in this browser.';
+  tip.textContent = ONLINE ? 'Double-click a slider to reset it. Room settings last until the room closes.' : 'Double-click a slider to reset it. Settings are saved in this browser.';
   panel.appendChild(tip);
   refresh();
 }
@@ -1585,9 +1576,35 @@ function refreshNetDebug() {
   for (let i = 0; i < n; i++) { const x = W - (n - i) * W / 180, y = H - Math.min(max, e[i]) / max * H; i ? g.lineTo(x, y) : g.moveTo(x, y); }
   g.stroke();
 }
+// Online only the room's admin has the panel (SPEC §13, §17.1): for anyone else D does nothing.
 function toggleDebug() {
+  if (!panelOk()) { panel.classList.add('hidden'); return; }
   if (panel.classList.toggle('hidden')) return;
   buildDebug();
+}
+// The admin role moved, or the room we look at changed: close the panel if it is no longer ours,
+// and show the D hint only to the admin.
+function syncPanel() {
+  if (!ONLINE) return;
+  const ok = panelOk();
+  if (!ok && !panel.classList.contains('hidden')) { panel.classList.add('hidden'); dbg('life', 'settings panel closed: not admin'); }
+  const hd = document.getElementById('helpD');
+  hd.textContent = ' · D room settings'; hd.style.display = ok ? '' : 'none';
+}
+// The room's settings changed (net.cfg; ev: the server's `cfg` event, null from a welcome or lobby).
+// Apply the room-wide display switches, refresh an open panel, and tell everyone in a quiet line.
+const CFG_NAMES = { ...Object.fromEntries(SETTINGS.flatMap(([, items]) => items.map(([k, n]) => [k, n.replace(/ \(.*\)$/, '').toLowerCase()]))), gore: 'gore', realGore: 'real gore' };
+function onRoomCfg(ev) {
+  const style = bloodStyleName();
+  roomView = { gore: net.cfg.gore, realGore: net.cfg.realGore };
+  if (bloodStyleName() !== style) applyBloodStyle();
+  if (!panel.classList.contains('hidden') && panelOk()) buildDebug();
+  if (!ev) return;
+  const ch = ev.ch ? Object.entries(ev.ch) : [];
+  const what = ev.reset ? 'reset the room settings'
+    : ch.length === 1 ? `set ${CFG_NAMES[ch[0][0]] || ch[0][0]} ${typeof ch[0][1] === 'boolean' ? (ch[0][1] ? 'on' : 'off') : ch[0][1]}`
+      : `changed ${ch.length} room settings`;
+  sysLine(`Admin ${what}`);
 }
 
 // ---------- loop: fixed 60 Hz steps, render every frame ----------
@@ -1627,8 +1644,8 @@ function frame(t) {
 }
 
 // ---------- online: connection, lobby screen ----------
-const net = ONLINE ? createNet({ onLobby: () => { renderLobby(); if (leaveOpen) renderLeave(); }, onStatus: s => onNetStatus(s),
-  onRefused: m => onRefused(m), onClosed: m => onRoomClosed(m), onRoom: () => clearRoomView(),
+const net = ONLINE ? createNet({ onLobby: () => { renderLobby(); if (leaveOpen) renderLeave(); syncPanel(); }, onStatus: s => onNetStatus(s),
+  onRefused: m => onRefused(m), onClosed: m => onRoomClosed(m), onRoom: () => { clearRoomView(); syncPanel(); }, onCfg: ev => onRoomCfg(ev),
   onMadeAdmin: e => toast(`You are now the admin of ${net.lobby.rname || 'this room'}` + (e.why === 'auto' ? '\n(the previous admin left)' : '')) }) : null;
 // A short notice over the lobby or the game (#toast), gone after a few seconds.
 function toast(text, ms = 5000) {
@@ -1757,6 +1774,8 @@ const REFUSED = {
   'create name': ROOM_NAME_RULE, 'rename name': ROOM_NAME_RULE,
   'rename rate': 'Too many changes: wait a few seconds.', 'admin rate': 'Too many changes: wait a few seconds.',
   'rename admin': 'Only the admin can rename the room.', 'bots admin': "Only the room's admin can add AI players.",
+  'cfg admin': 'Only the admin can change the room settings.', 'cfg value': 'That setting is out of range.',
+  'cfg rate': 'Too many changes: wait a few seconds.',
   'admin admin': 'You are not the admin any more.', 'admin target': 'They can’t be made admin (have they left?).',
   'join gone': 'That room has closed.', 'leave admin': 'Make someone admin first.',
 };
@@ -2098,6 +2117,13 @@ function onChatEvent(e) {
   while (chatListEl.children.length > 5) chatListEl.firstChild.remove();
   setTimeout(() => row.remove(), CHAT.showMs);
 }
+// A quiet line in the chat list from the game itself (a room-settings change, SPEC §17.1).
+function sysLine(text) {
+  const row = document.createElement('div'); row.className = 'sys'; row.textContent = text;
+  chatListEl.appendChild(row);
+  while (chatListEl.children.length > 5) chatListEl.firstChild.remove();
+  setTimeout(() => row.remove(), CHAT.showMs);
+}
 // Word-wrap into at most 3 short lines (the rest is cut with an ellipsis; the list has it all).
 function chatLines(text) {
   const maxW = 80, out = [];
@@ -2176,9 +2202,9 @@ setReportSource(() => {
     token: ONLINE ? net.token : null,
     env: { build: BUILD, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
       touch: TOUCH_UI, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
-      online: ONLINE, cfg: changed, page: location.pathname,
+      online: ONLINE, cfg: changed, ...(ONLINE ? { roomCfg: cfgDiff(net.cfg), admin: net.isAdmin() } : {}), page: location.pathname,
       music: music ? { state: music.state, ...music.rendered, muted, musicOff } : null,
-      gore: { on: CFG.gore, style: bloodStyleName(), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
+      gore: { on: goreOn(), style: bloodStyleName(), parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, ...G.stats, layerMs: +GL.lastMs.toFixed(1), renderMs: +renderMs.toFixed(1) } },
     net: ONLINE ? { state: net.state, mode: net.mode, id: net.id, rttAvg: net.stats.rttAvg, rttMax: net.stats.rttMax,
       jitterMs: net.stats.jitter, predErrRms: net.predErrRms(), reconnects: net.stats.reconnects, snaps: net.stats.snaps,
       snapCorrections: net.stats.snapsSnapped, pending: net.pending(), queuePos: net.queuePos, fps: Math.round(fps) } : { fps: Math.round(fps) },
@@ -2190,6 +2216,7 @@ setReportSource(() => {
 if (ONLINE) {
   setupLobby();
   renderLobby();
+  syncPanel();
   document.body.classList.add('inlobby');
   document.getElementById('help').classList.add('gone');
   net.connect();
@@ -2214,7 +2241,13 @@ window.__mp = {
     get counts() { return { parts: G.parts.length, gibs: G.gibs.length, decals: G.decals.length, pools: G.pools.size, bloody: G.bloody.size, ...G.stats, layerRebuilds: GL.rebuilds, layerMs: GL.lastMs }; },
     // the blood style (SPEC §7), as the debug panel's "Real gore" toggle sets it (saved in localStorage)
     get style() { return bloodStyleName(); },
-    setStyle(st) { CFG.realGore = st === 'real'; saveCfg(); applyBloodStyle(); if (!panel.classList.contains('hidden')) buildDebug(); return bloodStyleName(); },
+    // offline: as the panel's toggle (saved); online the style is a room setting, so this is a
+    // page-local override for tests (not saved, not sent)
+    setStyle(st) {
+      if (ONLINE) styleOverride = st === 'real' ? 'real' : 'neon';
+      else { CFG.realGore = st === 'real'; saveCfg(); }
+      applyBloodStyle(); if (!panel.classList.contains('hidden')) buildDebug(); return bloodStyleName();
+    },
   },
   get strip() { return { builds: stripBuilds, chips: [...stripEl.children].map(c => ({ id: +c.dataset.id, me: c.classList.contains('me'), text: c.textContent })) }; },
   get throwHint() { return performance.now() < throwHintUntil ? throwHintText() : null; },   // the "X to throw" reminder while shown

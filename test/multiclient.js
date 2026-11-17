@@ -190,16 +190,15 @@ async function fightTest() {
   assert.ok(fps[0].fp && +fps[0].fp.split(':')[0] > 100, 'plenty of blood landed');
   for (const f of fps) assert.equal(f.fp, fps[0].fp, 'same gore on every page (neon and real-gore pages alike)');
   // switching style repaints the blood already there (the baked layer is rebuilt) and changes nothing
-  // in the simulation; the choice is saved in localStorage
+  // in the simulation (online the style is a room setting, SPEC §17.1: setStyle is a page-local test override)
   const sw = await A.page.evaluate(k => {
     const before = __mp.gore.counts.layerRebuilds;
     __mp.gore.setStyle('real');
-    const mid = { fp: __mp.gore.fingerprint(k), rebuilt: __mp.gore.counts.layerRebuilds > before, saved: JSON.parse(localStorage.getItem('multisplat-cfg') || '{}').realGore };
+    const mid = { fp: __mp.gore.fingerprint(k), rebuilt: __mp.gore.counts.layerRebuilds > before };
     __mp.gore.setStyle('neon');
     return { ...mid, back: __mp.gore.style, fp2: __mp.gore.fingerprint(k) };
   }, key);
   assert.ok(sw.rebuilt, 'switching style rebuilds the baked blood layer');
-  assert.equal(sw.saved, true, 'the style is saved');
   assert.equal(sw.fp, fps[0].fp); assert.equal(sw.fp2, fps[0].fp); assert.equal(sw.back, 'neon');
   assert.equal(await C.page.evaluate(() => __mp.gore.style), 'real');
   log('blood styles: real-gore page has the same fingerprint as the neon pages; switching repaints');
@@ -1248,6 +1247,59 @@ async function limitTest() {
   }
 }
 
+// Room settings (SPEC §17.1): only the room's admin gets the D panel (no panel, no D hint for anyone
+// else); the admin turning gore off switches it off on every page of that room and not in another
+// room; a slider change reaches the others' prediction cfg; Reset to defaults; handing the admin role
+// over closes the old admin's panel and gives the new one D.
+async function roomSettingsTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const srv = await startServer({ DEBUG_DIR: dir }); servers.push(srv);
+  const A = await openPlayer(srv, 'Ann', 0, { create: 'Cfg' }), B = await openPlayer(srv, 'Bob', 1, { room: A.room });
+  const O = await openPlayer(srv, 'Oz', 2, { create: 'Other' });
+  const panelOpen = p => p.page.evaluate(() => !document.getElementById('dbg').classList.contains('hidden'));
+  const hint = p => p.page.evaluate(() => getComputedStyle(document.getElementById('helpD')).display !== 'none');
+  // a non-admin's D opens nothing, and it has no D hint
+  await B.page.keyboard.press('KeyD'); await sleep(200);
+  assert.equal(await panelOpen(B), false, 'no panel for a non-admin');
+  assert.equal(await hint(B), false, 'no D hint for a non-admin');
+  assert.equal(await hint(A), true, 'the admin has the D hint');
+  // the admin opens it and turns gore off: every page in the room follows, the other room does not
+  await A.page.keyboard.press('KeyD');
+  await waitFor(() => panelOpen(A), { what: 'the admin\'s panel' });
+  assert.match(await A.page.textContent('#dbg h2'), /Room settings/);
+  for (const p of [A, B, O]) assert.equal(await p.page.evaluate(() => __mp.net.cfg.gore), true);
+  await A.page.evaluate(() => {
+    const lab = [...document.querySelectorAll('#dbg label.chk')].find(l => /^Gore/.test(l.textContent));
+    lab.querySelector('input').click();
+  });
+  for (const p of [A, B]) await waitFor(() => p.page.evaluate(() => __mp.net.cfg.gore === false), { what: `gore off on ${p.name}` });
+  await waitFor(() => B.page.evaluate(() => __mp.chat.lines.some(l => /Admin set gore off/.test(l))), { what: 'the quiet notice on Bob' });
+  await sleep(300);
+  assert.equal(await O.page.evaluate(() => __mp.net.cfg.gore), true, 'another room keeps gore on');
+  // a slider (let go: sent on change) reaches Bob's prediction cfg
+  await A.page.evaluate(() => {
+    const lab = [...document.querySelectorAll('#dbg label:not(.chk)')].find(l => /^Gravity/.test(l.textContent));
+    const r = lab.querySelector('input'); r.value = '0.4'; r.dispatchEvent(new Event('input')); r.dispatchEvent(new Event('change'));
+  });
+  await waitFor(() => B.page.evaluate(() => __mp.net.cfg.gravity === 0.4), { what: 'gravity 0.4 on Bob' });
+  assert.equal(await O.page.evaluate(() => __mp.net.cfg.gravity), 0.27);
+  // reset
+  await A.page.evaluate(() => [...document.querySelectorAll('#dbg button')].find(b => b.textContent === 'Reset to defaults').click());
+  await waitFor(() => B.page.evaluate(() => __mp.net.cfg.gore === true && __mp.net.cfg.gravity === 0.27), { what: 'defaults again on Bob' });
+  // the role moves: the old admin's panel closes, the new admin gets D
+  await A.page.evaluate(id => __mp.net.makeAdmin(id), B.id);
+  await waitFor(async () => !(await panelOpen(A)), { what: 'the old admin\'s panel closed' });
+  assert.equal(await hint(A), false);
+  await A.page.keyboard.press('KeyD'); await sleep(200);
+  assert.equal(await panelOpen(A), false, 'D does nothing for the old admin');
+  await waitFor(() => hint(B), { what: 'the D hint for the new admin' });
+  await B.page.keyboard.press('KeyD');
+  await waitFor(() => panelOpen(B), { what: 'the new admin\'s panel' });
+  log('room settings: admin-only panel, gore off on every page of the room only, slider and reset reach the others, hand-over closes the panel');
+  for (const p of [A, B, O]) await p.page.context().close();
+  await srv.stop();
+}
+
 async function main() {
   browser = await launchChromium();
   try {
@@ -1267,6 +1319,7 @@ async function main() {
     await roomsTest();
     await adminTest();
     await renameRoomTest();
+    await roomSettingsTest();
     await limitTest();
     assert.deepEqual(errors, [], 'no page errors');
     log('PASS');

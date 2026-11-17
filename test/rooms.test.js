@@ -34,10 +34,10 @@ function setup(opts = {}) {
   return { arena, conn, maker, creator, joiner, advance, tick, events, logs };
 }
 
-test('rooms: protocol 3; a new connection sees an empty room list', () => {
+test('rooms: protocol 4; a new connection sees an empty room list', () => {
   const { conn } = setup();
   const c = conn();
-  assert.equal(PROTOCOL, 3); assert.equal(c.msgs[0].v, 3);
+  assert.equal(PROTOCOL, 4); assert.equal(c.msgs[0].v, 4);
   const l = c.last('lobby');
   assert.deepEqual(l.rooms, []); assert.equal(l.maxRooms, ROOM.max); assert.equal(l.room, null);
   assert.equal(l.cap, 8); assert.equal(NET.maxPlayers, 8);

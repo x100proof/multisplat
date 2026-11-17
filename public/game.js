@@ -315,12 +315,19 @@ function initAudio() {
   }
 }
 let music = null;
+// Sound, music and full screen survive a reload (per browser, localStorage). Full screen can only be
+// asked for from a tap or a key, so a page that was full screen goes back to it on the first one.
+const LS_PREFS = 'multisplat-prefs';
+function prefsGet() { try { return JSON.parse(localStorage.getItem(LS_PREFS) || '{}') || {}; } catch (e) { return {}; } }
+function prefsSet(k, v) { try { localStorage.setItem(LS_PREFS, JSON.stringify({ ...prefsGet(), [k]: v })); } catch (e) { /* private mode */ } }
 function setMuted(m) {
+  prefsSet('muted', !!m);
   muted = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted');
   soundBtn('muteBtn', m, m ? 'Sound on (M)' : 'Mute all sound (M)');
 }
 // The ♪ button and N: the music alone (sound effects carry on).
 function setMusicOff(m) {
+  prefsSet('musicOff', !!m);
   musicOff = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'music off' : 'music on');
   soundBtn('musicBtn', m, m ? 'Music on (N)' : 'Music off (N)');
 }
@@ -559,6 +566,21 @@ musicBtn.addEventListener('pointerdown', e => e.stopPropagation());
 // Escape that only took us out of full screen must not also open the leave menu
 const escLeavesFullscreen = () => !!fsEl() || performance.now() - fsLeftAt < 500;
 syncFullscreen();
+// remember full screen as the player leaves it (button, F or Esc), and bring the saved choices back
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, () => prefsSet('fullscreen', !!fsEl()));
+{
+  const p = prefsGet();
+  if (p.muted) setMuted(true);
+  if (p.musicOff) setMusicOff(true);
+  if (p.fullscreen && FS_OK && !fsEl()) {
+    const again = e => {
+      if (e.target && e.target.closest && e.target.closest('#fsBtn')) return;   // that tap toggles it itself
+      for (const t of ['click', 'keydown', 'touchend']) document.removeEventListener(t, again, true);
+      if (!fsEl()) toggleFullscreen();
+    };
+    for (const t of ['click', 'keydown', 'touchend']) document.addEventListener(t, again, true);
+  }
+}
 
 function goLandscape(force) {
   if (triedLandscape || (!force && !TOUCH_UI)) return;

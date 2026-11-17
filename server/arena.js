@@ -9,7 +9,7 @@
 // AI players (SPEC §15) are records with `bot: true` and no connection; server/ai.js drives them.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName, cleanChat, cleanRoomName, defaultRoomName, CHAT, BOT, ROOM, SETTING_KEYS, cleanSetting, cfgDiff } from '../shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName, cleanChat, cleanRoomName, defaultRoomName, CHAT, BOT, ROOM, SETTING_KEYS, cleanSetting } from '../shared/constants.js';
 import { navOf } from './ai.js';
 import { createLogStore } from './logs.js';
 import { isWordId, LOG } from '../shared/logid.js';
@@ -495,7 +495,7 @@ export class Arena {
     const room = rec.room;
     this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, r: this.rules, id: rec.id, token: rec.token, resumed, state: rec.state,
       name: rec.name, color: rec.color, tick: this.tickNo, queuePos: room.queuePos(rec),
-      room: room.id, rname: room.name, admin: room.adminId, cfg: cfgDiff(room.cfg),
+      room: room.id, rname: room.name, admin: room.adminId, cfg: { ...room.cfg },
       players: room.roster(), queue: room.queueList(), cap: this.maxPlayers });
     this.send(conn, this.lobbyMsg(conn));
   }

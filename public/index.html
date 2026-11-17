@@ -115,6 +115,14 @@
   #muteBtn { right: var(--fsw); }
   #musicBtn { right: calc(var(--fsw) + var(--mbw)); font: 700 clamp(13px, 2vw, 18px)/1 system-ui, sans-serif; }
   body.touchui #musicBtn { font-size: 19px; }
+  /* the live ping, left of the ♫: on the room list, a room's screen and in game alike */
+  #ping { position: fixed; top: 2px; right: calc(var(--fsw) + 2 * var(--mbw) + 2px); z-index: 7; height: calc(clamp(17px, 2.6vw, 24px) + 2px);
+          box-sizing: border-box; display: flex; align-items: center; padding: 0 6px; border: 1px solid rgba(5,217,232,.35); border-radius: 5px;
+          background: rgba(5,3,10,.6); font: 700 clamp(10px, 1.4vw, 12px)/1 ui-monospace, Menlo, Consolas, monospace; white-space: nowrap;
+          pointer-events: none; font-variant-numeric: tabular-nums; }
+  #ping.good { color: #39ff88; } #ping.ok { color: #f9f871; } #ping.bad { color: #ff2a6d; } #ping.off { color: #6b6880; }
+  body.touchui #ping { height: 30px; top: max(2px, env(safe-area-inset-top)); right: calc(var(--fsw) + 2 * var(--mbw) + env(safe-area-inset-right) + 2px); font-size: 12px; }
+  body.rot #ping { display: none; }   /* the rotated phone layout has no room for it up there */
   /* off: a slash from lower left to upper right across the icon */
   #muteBtn.on::before, #musicBtn.on::before { content: ''; position: absolute; left: 12%; right: 12%; top: calc(50% - 1px); height: 2px;
                                               background: currentColor; border-radius: 1px; transform: rotate(-45deg); pointer-events: none;
@@ -410,6 +418,7 @@
   <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tT" aria-label="Throw a ninja star">✦</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
+<div id="ping" class="off" title="Round trip to the server (ms)">– ms</div>
 <button id="musicBtn" aria-label="Music off (N)" title="Music off (N)" aria-pressed="false">♫</button>
 <button id="muteBtn" aria-label="Mute all sound (M)" title="Mute all sound (M)" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h4l5-4v14l-5-4H3z" stroke-linejoin="round"/><path d="M16 8.5a5 5 0 0 1 0 7M19 5.5a9 9 0 0 1 0 13"/></svg></button>
 <button id="fsBtn" aria-label="Full screen (F)" title="Full screen (F)" aria-pressed="false"><svg class="in" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><svg class="out" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>

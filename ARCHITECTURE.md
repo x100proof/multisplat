@@ -17,11 +17,12 @@ Status: **M6** (in progress). This covers:
 shared/constants.js   tunables: physics (NinjaRunner DEFAULTS), combat, input bits, net constants, colours, name rule
 shared/level.js       the 26x18 arena (no spikes), tile queries, spawn points, item points (long swords and ninja stars), spawn picker
 shared/sim.js         deterministic 60 Hz world step (movement, player collision, combat, ninja stars, respawn, pickups)
-shared/protocol.js    the wire protocol (every message, field and event; snapshot packing); in the rules hash, held to by both ends
+shared/protocol.js    the wire protocol (every message, field and event; snapshot packing); a rules-hash part, held to by both ends
 server/server.js      config, static files, /ws upgrade (origin, caps, limits), NET_SIM, entry point
 server/arena.js       connections and protocol, rate limits, heartbeat, resume tokens, idle kick, the rooms and the one tick loop
 server/room.js        one room: its world, slots/queue, names, colours, bots, admin, sim step with lag comp, snapshots
 server/version.js     the served files (read once, served from memory), the build id, the rules hash and its JS normalizer
+server/fingerprint.js the prediction fingerprint: predictStep over a fixed seeded set of situations, hashed (a rules-hash part)
 server/persist.js     saving the rooms on SIGTERM, loading them at start (trial step), the shape hash
 server/debug.js       server event ring, POST /debug/report intake + storage, loopback admin listener
 server/logs.js        streamed client logs: per word id, the last hour in memory, with caps (SPEC §13.5)
@@ -380,14 +381,13 @@ code can go on under the new code, and there are two separate halves to it:
 | | **Rules hash** | **Shape hash** |
 |---|---|---|
 | Question it answers | Can this *page* share a game with this *server*? | Can this *server* load this *save file*? |
-| Computed from | the source of `shared/**`: the sim and `shared/protocol.js` | the structure of what the save routine writes for a sample arena |
+| Computed from | `shared/protocol.js` (normalized source), the level's data, and what `Sim.predictStep` *does* over a fixed set of situations | the structure of what the save routine writes for a sample arena |
 | Computed by | `rulesHash` in `server/version.js`, at start | `computeShapeHash` in `server/persist.js`, at start |
 | Where it travels | `<meta name="rules">` in the served page, `r` in every `welcome`, `rulesHash` in the save file | `shapeHash` in the save file |
 | Who compares | the page (`compareVersion` in `net.js`), and the loading server | the loading server (`loadState`) |
 
-Why two: the client runs the shared sim for prediction and speaks the protocol declared in
-`shared/protocol.js`, so a page may only stay in a game if both ends run the same sim and the same
-protocol. The save file, on the other hand,
+Why two: a page may only stay in a game if it predicts its movement like the server, in the same
+level, and speaks the same protocol. The save file, on the other hand,
 depends on the server's own data structures (`server/room.js` records, `server/ai.js` brains, room
 fields), which the page never sees; a server-side refactor can make an old save unreadable while
 every page stays perfectly compatible, and the reverse (a sim change with an unchanged save format)
@@ -398,12 +398,37 @@ start, so the decision can't be forgotten or got wrong by a person or an agent e
 
 ### How the rules hash is computed
 
-1. `readTree` reads every file under `public/` and `shared/` once, at start. The server serves
-   exactly those bytes from memory (`makeHandler`), so the hash always describes the page a browser
-   loaded, even though the service runs from a working tree that a deploy rewrites under it.
-2. The rules files (`isRulesFile`: `shared/**`) in path order are fed to sha256 as
-   `path \0 normalized-text \0`; the first 16 hex digits are the hash.
-3. `normalizeJs` removes comments and collapses whitespace runs: a run that contains a line break
+The question is narrow on purpose: what must an *open* page and a *new* server agree on for the game
+to go on? During a game the page runs only three things that depend on the server's code: the
+protocol, the level, and the prediction of its own movement. Combat, pickups, spawning, scoring, bots
+and every setting's default are the server's alone (the page draws what the snapshots and events say,
+and the room's settings arrive in full), so changing them never stops a game. `rulesHash` in
+`server/version.js` hashes three parts:
+
+1. **Protocol**: the source of `shared/protocol.js`, normalized (below). The file the server serves
+   from memory (`readTree` reads `public/` and `shared/` once, at start; `makeHandler` serves those
+   bytes), so it is always the page's own protocol.
+2. **Level**: `JSON.stringify(LEVEL)`: the tile grid, spawn points and item points. Moving one tile
+   counts; reformatting `level.js` does not.
+3. **Prediction**: `predictionFingerprint` in `server/fingerprint.js`. A page predicts its own
+   player with `Sim.predictStep` (movement, collisions with the level and other players, spikes); if
+   an open page and the server disagreed, the player would rubber-band on every jump until a reload.
+   So the server runs `predictStep` over a fixed, seeded set of situations at start (~0.2 s):
+   4 random room settings (each editable setting drawn inside its range: never the defaults,
+   because the settings arrive in full and a changed default alone must not count) × 500 starts
+   (a player anywhere in the level or near a spawn or item point, random velocity, facing, ground
+   flag, coyote and jump-buffer counters, stun, attack, long sword, 0–2 other players close by)
+   × 24 ticks of changing keys. Every outcome (all players' positions, velocities, ground flags,
+   facing, counters, and the spike result) goes into a sha256. Same behaviour, same hash, however
+   the code is written or whatever else changes in `sim.js`; any change to how a player moves changes
+   some outcome. Tests check both directions: server-only sim code and changed defaults leave it
+   alone; a 1e-6 drift, a 1 % higher jump, running ignored or another level each change it.
+
+The limit: a movement change that only shows in a situation the set never reaches would slip
+through. The cost would be rubber-banding until that page's next reload, not a broken game: the
+server's snapshots still correct the page.
+
+`normalizeJs` removes comments and collapses whitespace runs: a run that contains a line break
    becomes one `\n` (line breaks matter in JS: `return\nx` is not `return x`), any other run one space;
    a block comment counts as whitespace. It is a small scanner, not a regex: `'…'`, `"…"`, template
    literals (with `${…}` nested to any depth) and regex literals are copied byte for byte, so a `//`
@@ -477,9 +502,12 @@ pages:     freeze on the last frame, "SERVER UPDATING…", reconnect ~0.7 s apar
 
 ### What it deliberately does not catch, and the safety net
 
-- A change **outside** `shared/` that keeps a field's name and type but changes
-  its meaning (a record field reinterpreted by `server/room.js`, a brain field read differently by
-  `server/ai.js`): both hashes stay equal and the old value is loaded under the new meaning.
+- A change that keeps a saved field's name and type but changes its meaning (a record field
+  reinterpreted by `server/room.js`, a brain field read differently by `server/ai.js`, a sim state
+  field such as a pickup timer read differently by the server-only part of `shared/sim.js`): both
+  hashes stay equal and the old value is loaded under the new meaning.
+- A movement change that shows only in situations the prediction set never reaches: open pages
+  would rubber-band until they reload.
 - A protocol change of **meaning** with an unchanged shape (see above: bump `PROTOCOL`). Shape changes
   are caught, though `server/` is not in the hash: the server reads only what `protocol.js` declares
   and the tests hold what it sends to the same file.

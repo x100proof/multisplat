@@ -14,8 +14,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, sep, extname, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { Arena } from './arena.js';
+import * as C from '../shared/constants.js';
 import { DEFAULTS, TICK_HZ } from '../shared/constants.js';
+import * as Sim from '../shared/sim.js';
 import { readTree, buildId, rulesHash } from './version.js';
+import { predictionFingerprint } from './fingerprint.js';
 import { computeShapeHash, loadState, saveState } from './persist.js';
 import { LEVEL } from '../shared/level.js';
 import { createDebug, createEventRing } from './debug.js';
@@ -109,7 +112,11 @@ export function resolvePath(urlPath) {
 // the working tree under a running server can't make it serve a page that mixes versions.
 const FILES = readTree(ROOT, ['public', 'shared']);
 export const BUILD = buildId(FILES);
-export const RULES = rulesHash(FILES);
+export const RULES = rulesHash({
+  protocol: FILES.find(f => f.rel === 'shared/protocol.js').buf.toString('utf8'),
+  level: LEVEL,
+  prediction: predictionFingerprint(Sim, C, LEVEL),
+});
 const INDEX = join(PUBLIC, 'index.html');
 // index.html carries both ids: <meta name="build">, <meta name="rules"> and game.js?v=<build>.
 const stampIndex = (buf, rules) => Buffer.from(buf.toString('utf8')

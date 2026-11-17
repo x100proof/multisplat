@@ -184,7 +184,7 @@ export class Room {
 
   // Room settings (SPEC §17.1). `set`: {key: value}, already checked by the caller; reset: back to
   // the server's defaults. Returns the `cfg` event for the room's viewers (null: nothing changed):
-  // `cfg` is the whole new state (as a diff against ROOM_DEFAULTS), `ch` what this change set.
+  // `cfg` is the whole new state (every setting, SPEC §17.1), `ch` what this change set.
   applyCfg(set, reset, by = null) {
     const next = { ...(reset ? this.baseCfg : this.cfg) }, ch = {};
     if (!reset) for (const k in set) { const v = cleanSetting(k, set[k]); if (v !== undefined && next[k] !== v) { next[k] = v; ch[k] = v; } }
@@ -192,7 +192,7 @@ export class Room {
     this.cfg = reset ? this.baseCfg : Object.freeze(next);
     this.log(`room-cfg conn=${by ? by.id : '-'} ${reset ? 'reset' : Object.entries(ch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
     this.event('room-cfg', by ? by.id : null, reset ? { reset: true } : { set: ch });
-    return { type: 'cfg', tick: this.state.tick, cfg: cfgDiff(this.cfg), ...(reset ? { reset: true } : { ch }) };
+    return { type: 'cfg', tick: this.state.tick, cfg: { ...this.cfg }, ...(reset ? { reset: true } : { ch }) };
   }
 
   // Make the lobby visitor on `conn` (no record, looking at this room) the room's pending admin
@@ -282,7 +282,7 @@ export class Room {
     const lobby = this.visitors().map(c => ({ c: c.id, name: c.vname ?? null, ...(c.vwatch ? { w: true } : {}) }));
     return { room: this.id, rname: this.name, admin: this.adminId, padmin: this.adminConn ? this.adminConn.id : null, ...(this.seat && !this.adminConn ? { held: true } : {}),
       players: this.roster(), queue: this.queueList(), lobby,
-      cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots(), cfg: cfgDiff(this.cfg) };
+      cap: this.maxPlayers, bots: this.bots.length, botMax: this.maxBots(), cfg: { ...this.cfg } };
   }
   // One row of the room list every lobby visitor sees.
   summary() {

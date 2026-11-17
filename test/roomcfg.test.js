@@ -114,14 +114,15 @@ test('room settings: in the welcome, the lobby and a cfg event, to members and w
   a.say({ t: 'cfg', set: { gore: false, jumpVel: 9 } });
   for (const c of [a, v]) {
     const ev = c.events().find(e => e.type === 'cfg');
-    assert.deepEqual(ev.cfg, { gore: false, jumpVel: 9 }); assert.deepEqual(ev.ch, { gore: false, jumpVel: 9 });
+    assert.deepEqual(Object.keys(ev.cfg).sort(), Object.keys(ROOM_DEFAULTS).sort(), 'every setting, not a diff (SPEC §17.1)');
+    assert.deepEqual(cfgDiff(ev.cfg), { gore: false, jumpVel: 9 }); assert.deepEqual(ev.ch, { gore: false, jumpVel: 9 });
   }
   assert.equal(other.events().find(e => e.type === 'cfg'), undefined, 'another room hears nothing');
   tick(40);
-  assert.deepEqual(v.last('lobby').cfg, { gore: false, jumpVel: 9 });
-  assert.deepEqual(other.last('lobby').cfg, {}, 'another room keeps the defaults');
+  assert.deepEqual(cfgDiff(v.last('lobby').cfg), { gore: false, jumpVel: 9 });
+  assert.deepEqual(cfgDiff(other.last('lobby').cfg), {}, 'another room keeps the defaults');
   const b = joiner('Bob', 1);
-  assert.deepEqual(b.last('welcome').cfg, { gore: false, jumpVel: 9 });
+  assert.deepEqual(cfgDiff(b.last('welcome').cfg), { gore: false, jumpVel: 9 });
   // setting a value it already has: no event
   const n = a.events().filter(e => e.type === 'cfg').length;
   a.say({ t: 'cfg', set: { gore: false } });
@@ -129,7 +130,7 @@ test('room settings: in the welcome, the lobby and a cfg event, to members and w
   // reset
   a.say({ t: 'cfg', reset: true });
   const r = b.events().filter(e => e.type === 'cfg').at(-1);
-  assert.equal(r.reset, true); assert.deepEqual(r.cfg, {});
+  assert.equal(r.reset, true); assert.deepEqual(cfgDiff(r.cfg), {});
   assert.equal(arena.rooms.get(1).cfg, arena.rooms.get(1).baseCfg);
   assert.ok(Object.isFrozen(arena.rooms.get(1).cfg));
 });
@@ -164,15 +165,15 @@ test('room settings die with the room: a new room starts at the defaults', () =>
   const b = conn('ip-b'); b.say({ t: 'create', name: 'Bea' });
   const room = [...arena.rooms.values()][0];
   assert.deepEqual(cfgDiff(room.cfg), {});
-  assert.deepEqual(b.last('lobby').cfg, {});
+  assert.deepEqual(cfgDiff(b.last('lobby').cfg), {});
   b.say({ t: 'hello', name: 'Bea', color: 0, room: room.id });
-  assert.deepEqual(b.last('welcome').cfg, {});
+  assert.deepEqual(cfgDiff(b.last('welcome').cfg), {});
 });
 
 test('room settings: a server started with its own cfg resets to it; the diff describes it exactly', () => {
   const { arena, creator } = setup({ cfg: { ...DEFAULTS, itemMinTicks: 30, itemMaxTicks: 30 } });
   const a = creator('Ann'), room = arena.rooms.get(1);
-  assert.deepEqual(a.last('welcome').cfg, { itemMinTicks: 30, itemMaxTicks: 30 });
+  assert.deepEqual(cfgDiff(a.last('welcome').cfg), { itemMinTicks: 30, itemMaxTicks: 30 });
   a.say({ t: 'cfg', set: { gravity: .5 } });
   a.say({ t: 'cfg', reset: true });
   assert.equal(room.cfg.itemMinTicks, 30); assert.equal(room.cfg.gravity, DEFAULTS.gravity);

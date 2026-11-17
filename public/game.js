@@ -2309,6 +2309,22 @@ function takeDraft() {
 }
 if (net) setInterval(quietReload, 1000);
 
+// The live ping (#ping, top right on every screen): the round trip of the page's own pings (twice a
+// second, net.stats.rtt), smoothed a little so it doesn't flicker. Green under 80 ms, yellow under
+// 150, red above; grey "– ms" while not connected.
+const PING_OK = 80, PING_BAD = 150;
+let pingShown = null, pingSeen = 0;
+function showPing() {
+  const el = document.getElementById('ping'), s = net.stats;
+  if (net.state !== 'open' || !s.rtt) { el.textContent = '– ms'; el.className = 'off'; pingShown = null; return; }
+  if (s.rtt !== pingSeen) { pingSeen = s.rtt; pingShown = pingShown == null ? s.rtt : pingShown * .6 + s.rtt * .4; }
+  const ms = Math.round(pingShown);
+  el.textContent = `${ms} ms`;
+  el.className = ms < PING_OK ? 'good' : ms < PING_BAD ? 'ok' : 'bad';
+}
+if (net) setInterval(showPing, 500);
+else document.getElementById('ping').remove();   // offline: no server to ping
+
 function onNetStatus(s) {
   if (s === 'kicked') {
     dbg('life', 'back to lobby', { reason: net.kickReason });

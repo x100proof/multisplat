@@ -3,13 +3,16 @@
 // - the build id (SPEC §10): a short hash of every byte under public/ and shared/. Any change at all,
 //   a CSS tweak included, gives a new one. It is for diagnostics and for the quiet reload of a page
 //   whose UI is older than the server's.
-// - the rules hash: a hash of the code that client and server must agree on to share a game, i.e.
-//   every file under shared/: the deterministic sim, constants and level the page predicts with, and
-//   shared/protocol.js, every message and field on the wire. Each is normalized first (comments
-//   dropped, whitespace runs collapsed: see normalizeJs), so editing a comment or re-indenting does
-//   not count as a change. public/net.js is not in it: a page that is already running keeps its own
-//   net.js, so a new one only matters to new pages; what a running page and a new server must agree
-//   on is the protocol, and both ends are held to protocol.js (see there).
+// - the rules hash: what an open page and a new server must agree on to share a game, and nothing
+//   more. Three parts (rulesHash):
+//     1. the protocol: shared/protocol.js, normalized (comments dropped, whitespace runs collapsed:
+//        see normalizeJs), every message and field on the wire; both ends are held to it.
+//     2. the level: the map's data (tiles, spawn and item points), which the page draws and predicts in.
+//     3. prediction: what the page's movement code does (server/fingerprint.js), a hash of
+//        Sim.predictStep's outcomes over a fixed set of situations, not of its source.
+//   Everything else (combat, pickups, spawning, scoring, bots, settings' defaults: the server sends a
+//   room's settings in full) is the server's alone, so changing it never stops an open game. A
+//   running page keeps its own net.js and game.js, so those are not in it either.
 //
 // Nobody maintains either by hand: both are computed from the code the server is about to serve.
 // The files are kept in memory and served from there (server/server.js), so the page a browser
@@ -41,13 +44,13 @@ export function buildId(files) {
   return h.digest('hex').slice(0, 10);
 }
 
-// The files the rules hash covers: everything under shared/ (protocol.js included).
-export const isRulesFile = rel => rel.startsWith('shared/');
-
-// The rules hash: sha256 over "<path>\0<normalized text>\0" of each rules file in path order; 16 hex.
-export function rulesHash(files) {
+// The rules hash (16 hex) from its three parts: `protocol`, the source of shared/protocol.js;
+// `level`, the level object; `prediction`, predictionFingerprint's hash.
+export function rulesHash({ protocol, level, prediction }) {
   const h = createHash('sha256');
-  for (const f of files) if (isRulesFile(f.rel)) { h.update(f.rel + '\0'); h.update(normalizeJs(f.buf.toString('utf8')) + '\0'); }
+  h.update('protocol\0' + normalizeJs(protocol) + '\0');
+  h.update('level\0' + JSON.stringify(level) + '\0');
+  h.update('prediction\0' + prediction + '\0');
   return h.digest('hex').slice(0, 16);
 }
 

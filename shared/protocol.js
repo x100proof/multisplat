@@ -1,8 +1,7 @@
 // The wire protocol between the server and the page (SPEC §6, §17, §18): every message both ways,
 // every field, and every event a room broadcasts, plus the packed snapshot rows. This file is the
-// whole interface the two ends share, and it is part of the rules hash (server/version.js, SPEC §18):
-// a page and a server agree on the protocol exactly when they were built from the same text of this
-// file (comments and whitespace aside). public/net.js is deliberately *not* in that hash: a change to
+// whole interface the two ends share, and its text (comments and whitespace aside) is one of the three
+// parts of the rules hash (server/version.js, SPEC §18), with the level and the prediction fingerprint. public/net.js is deliberately *not* in that hash: a change to
 // how the page handles messages (its prediction, its reconnects, its sessionStorage) does not stop
 // a running game, because the old page keeps its old net.js and the server never sees it.
 //

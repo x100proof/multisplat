@@ -20,6 +20,9 @@ import { installBot, stopBot } from './bot.js';
 
 const log = (...a) => console.log('multiclient:', ...a);
 const errors = [];
+// while a test has the server down on purpose (a restart), the pages' refused reconnects are expected
+let serverDown = false;
+const expectedError = t => serverDown && /WebSocket connection to .* failed: .*ERR_CONNECTION_REFUSED/.test(t);
 let browser, servers = [], dirs = [];
 
 // A fresh browser context and page on the lobby, connected. Resolves to { page, name }.
@@ -27,7 +30,7 @@ async function openPage(srv, name, viewport = { width: 960, height: 576 }) {
   const ctx = await browser.newContext({ viewport });
   const page = await ctx.newPage();
   page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
-  page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: console: ${m.text()}`); });
+  page.on('console', m => { if (m.type() === 'error' && !expectedError(m.text())) errors.push(`${name}: console: ${m.text()}`); });
   await page.goto(srv.url);
   await page.waitForFunction(() => window.__mp && window.__mp.net && window.__mp.net.state === 'open');
   return { page, name };
@@ -910,11 +913,12 @@ async function restartTest() {
   const before = await scores(A);
   assert.deepEqual(await scores(B), before);
   assert.ok(before.some(([s]) => s > 0), 'somebody scored');
-  await srv.stop();
+  serverDown = true; await srv.stop();
   for (const p of both) await waitFor(() => p.page.evaluate(() => __mp.net.restarting() && document.getElementById('rov').className === 'up'), { what: `${p.name}: "server updating"` });
   srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file, PORT: srv.port, DEBUG_PORT: srv.adminPort }); servers.push(srv);
   assert.ok(srv.logs.some(l => /^restore: 1 room/.test(l)), 'the room was restored: ' + srv.logs.join(' | '));
   for (const p of both) await waitFor(() => p.page.evaluate(id => __mp.net.state === 'open' && __mp.net.mode === 'play' && __mp.net.id === id && !!__mp.net.me && !__mp.lobbyOpen, p.id), { timeout: 15000, what: `${p.name} resumed` });
+  serverDown = false;
   for (const p of both) {
     assert.equal(await p.page.evaluate(() => window.__marker), 1, `${p.name} did not reload`);
     assert.deepEqual(await scores(p), before, `${p.name}: the same scores`);
@@ -927,10 +931,11 @@ async function restartTest() {
   await stopBot(A.page); await stopBot(B.page);
   log('restart, same rules: both pages resumed in place with their scores and fought on');
 
-  await srv.stop();
+  serverDown = true; await srv.stop();
   srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file, PORT: srv.port, DEBUG_PORT: srv.adminPort, RULES_HASH: 'otherrules' }); servers.push(srv);
   assert.ok(srv.logs.some(l => /^restore: none \(rules hash/.test(l)), srv.logs.join(' | '));
   for (const p of both) await waitFor(() => p.page.evaluate(() => !document.getElementById('upd').classList.contains('hidden')), { timeout: 15000, what: `${p.name}: the update message` });
+  serverDown = false;
   for (const p of both) {
     assert.match(await p.page.textContent('#updText'), /updated.*can't continue on your version/);
     assert.equal(await p.page.evaluate(() => __mp.net.state), 'outdated');

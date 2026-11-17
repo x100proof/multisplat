@@ -11,7 +11,10 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { Arena } from '../server/arena.js';
-import { normalizeJs, rulesHash, readTree, isRulesFile } from '../server/version.js';
+import { normalizeJs, rulesHash, readTree } from '../server/version.js';
+import { predictionFingerprint } from '../server/fingerprint.js';
+import * as C from '../shared/constants.js';
+import { LEVEL } from '../shared/level.js';
 import { computeShapeHash, sampleArena, sampleSave, shapeHashOf, snapshotArena, saveState, loadState, checkRoom, RESTORE_GRACE_MS, STATE_MAX_AGE_MS } from '../server/persist.js';
 import * as Sim from '../shared/sim.js';
 import { TICK_MS, KEY, NET } from '../shared/constants.js';
@@ -46,18 +49,48 @@ test('rules hash: every served JS file normalizes to code that still parses, and
   }
 });
 
-test('rules hash: covers shared/ only (the sim and the protocol, not net.js), ignores comments', () => {
-  const base = { 'public/game.js': 'draw();', 'public/net.js': 'send(1); // proto', 'public/index.html': '<p>', 'shared/sim.js': 'step(); /* sim */' };
-  const h = rulesHash(files(base));
+test('rules hash: protocol (comments aside), level data and the prediction fingerprint, nothing else', async () => {
+  const parts = { protocol: 'export const UP = { a: 1 }; // proto', level: LEVEL, prediction: 'p1' };
+  const h = rulesHash(parts);
   assert.match(h, /^[0-9a-f]{16}$/);
-  assert.equal(rulesHash(files({ ...base, 'public/game.js': 'drawMore();' })), h, 'UI code is not in it');
-  assert.equal(rulesHash(files({ ...base, 'public/index.html': '<div>' })), h);
-  assert.equal(rulesHash(files({ ...base, 'shared/sim.js': '// new comment\nstep();' })), h, 'a comment is not a change');
-  assert.notEqual(rulesHash(files({ ...base, 'shared/sim.js': 'step(2);' })), h);
-  assert.equal(rulesHash(files({ ...base, 'public/net.js': 'send(2);' })), h, 'the page\'s message handling is not in it');
-  assert.notEqual(rulesHash(files({ ...base, 'shared/protocol.js': 'UP = {};' })), h, 'the protocol is');
-  assert.notEqual(rulesHash(files({ ...base, 'shared/new.js': 'x();' })), h, 'a new shared file counts');
-  assert.ok(isRulesFile('shared/level.js') && isRulesFile('shared/protocol.js') && !isRulesFile('public/net.js') && !isRulesFile('public/game.js') && !isRulesFile('server/room.js'));
+  assert.equal(rulesHash({ ...parts, protocol: '// a new comment\nexport const UP = { a: 1 };' }), h, 'a comment is not a change');
+  assert.notEqual(rulesHash({ ...parts, protocol: 'export const UP = { a: 2 };' }), h, 'the protocol is');
+  const grid = [...LEVEL.grid]; grid[1] = grid[1].replace('.', '#');
+  assert.notEqual(rulesHash({ ...parts, level: { ...LEVEL, grid } }), h, 'a moved tile is');
+  assert.notEqual(rulesHash({ ...parts, level: { ...LEVEL, spawns: LEVEL.spawns.slice(1) } }), h, 'the spawn points are');
+  assert.notEqual(rulesHash({ ...parts, prediction: 'p2' }), h, 'how the page moves is');
+  // the served RULES is exactly that, of the code being served
+  const { RULES } = await import('../server/server.js');
+  assert.equal(RULES, rulesHash({ protocol: readFileSync(new URL('../shared/protocol.js', import.meta.url), 'utf8'), level: LEVEL, prediction: predictionFingerprint(Sim, C, LEVEL) }));
+});
+
+test('prediction fingerprint: what predictStep does, not its source; stable across processes', () => {
+  const f = predictionFingerprint(Sim, C, LEVEL);
+  assert.match(f, /^[0-9a-f]{16}$/);
+  assert.equal(predictionFingerprint(Sim, C, LEVEL), f);
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import * as Sim from ${JSON.stringify(new URL('../shared/sim.js', import.meta.url).href)};
+     import * as C from ${JSON.stringify(new URL('../shared/constants.js', import.meta.url).href)};
+     import { LEVEL } from ${JSON.stringify(new URL('../shared/level.js', import.meta.url).href)};
+     import { predictionFingerprint } from ${JSON.stringify(new URL('../server/fingerprint.js', import.meta.url).href)};
+     console.log(predictionFingerprint(Sim, C, LEVEL))`]);
+  assert.equal(String(r.stdout).trim(), f, 'another process computes the same');
+  // server-only rules don't count: spawning, star bundles, combat, a whole other step()
+  const serverOnly = { ...Sim, step: () => [], drawStarAmount: () => 15, killPlayer: () => [], slashHits: () => [] };
+  assert.equal(predictionFingerprint(serverOnly, C, LEVEL), f, 'server-only sim code is not in it');
+  // nor do the settings' defaults (rooms send their settings in full), editable or not
+  const D = { ...C.ROOM_DEFAULTS, jumpVel: C.ROOM_DEFAULTS.jumpVel + 1, gravity: .9, starK: 3, starMinTicks: 1, chopDmg: 99 };
+  assert.equal(predictionFingerprint(Sim, { ...C, ROOM_DEFAULTS: D }, LEVEL), f, 'changed defaults are not in it');
+  // nor a new, removed or reordered setting that movement doesn't read (each draws from its own seed)
+  const extra = [['New', [['starK2', 'Something else', 0, 5, .5]]], ...[...C.SETTINGS].reverse()];
+  assert.equal(predictionFingerprint(Sim, { ...C, SETTINGS: extra }, LEVEL), f, 'the settings table order and unrelated entries are not in it');
+  // any change to how a player moves is
+  const wrap = after => ({ ...Sim, predictStep(st, id, k, o) { const r = Sim.predictStep(st, id, k, o); after(Sim.getPlayer(st, id), k); return r; } });
+  assert.notEqual(predictionFingerprint(wrap(p => { p.x += 1e-6; }), C, LEVEL), f, 'a tiny drift');
+  assert.notEqual(predictionFingerprint(wrap((p, k) => { if (k & KEY.JUMP && p.vy < 0) p.vy *= 1.01; }), C, LEVEL), f, 'a slightly higher jump');
+  assert.notEqual(predictionFingerprint({ ...Sim, predictStep: (st, id, k, o) => Sim.predictStep(st, id, k & ~KEY.RUN, o) }, C, LEVEL), f, 'running ignored');
+  const grid = [...LEVEL.grid]; grid[LEVEL.h - 3] = grid[LEVEL.h - 3].replace(/\./g, '#');
+  assert.notEqual(predictionFingerprint(Sim, C, { ...LEVEL, grid }), f, 'another level moves players differently');
 });
 
 test('rules hash: served in index.html and in every welcome', async () => {
@@ -173,7 +206,7 @@ test('save → restore: rooms, records, scores, bots, settings and admins come b
     const bob = B.conn('ip-b'); bob.say({ t: 'hello', name: 'Bob', color: 1, token: tokens.bob, resume: true });
     const wa = ann.last('welcome');
     assert.equal(wa.resumed, true); assert.equal(wa.id, A.ann.last('welcome').id); assert.equal(wa.room, 1); assert.equal(wa.admin, wa.id);
-    assert.equal(wa.r, 'R'); assert.deepEqual(wa.cfg, { gravity: .4, gore: false });
+    assert.equal(wa.r, 'R'); assert.deepEqual(C.cfgDiff(wa.cfg), { gravity: .4, gore: false });
     assert.equal(bob.last('welcome').resumed, true);
     const bot = r1.bots[0], botAt = { ...Sim.getPlayer(r1.state, bot.id) };
     const me0 = { ...Sim.getPlayer(r1.state, wa.id) };

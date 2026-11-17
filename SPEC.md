@@ -307,6 +307,10 @@ reverb) but **fast and aggressive**:
     detectable). **F** toggles it from the keyboard. On touch it replaces the ⛶ button in
     the top-left bar and also requests landscape, as that button did. It is hidden where the
     browser has no fullscreen support. The score strip and kill feed must not overlap it.
+  - **The live ping**, left of the ♫ and speaker buttons on every screen (room list, a room's
+    screen, in game): the round trip of the page's own pings (twice a second), lightly smoothed,
+    as "41 ms": green under 80 ms, yellow under 150, red above, grey "– ms" while not connected.
+    Not shown offline or in the rotated phone layout.
   - A respawn countdown while dead.
 - **Chat (C):** C opens a one-line text box at the bottom of the screen. Type and press Enter
   to send, Escape to cancel. On touch a 💬 button opens it. While the box is open the keyboard
@@ -827,8 +831,8 @@ Every room has its own settings, edited by its admin; they apply to everyone in 
   but the room's admin gets `refused` cfg/admin; a key outside the table or a value outside its range or
   off its step grid refuses the whole message (`refused` cfg/value); per connection burst 6, one more per
   second (`refused` cfg/rate, counting toward the flood kick). A change applies from the next tick.
-- **Broadcast.** The room's settings travel as a diff against `ROOM_DEFAULTS` (`cfg: {key: value}`, `{}`
-  for the defaults) in the join `welcome`, in every `lobby` message for the room the page looks at, and in
+- **Broadcast.** The room's settings travel **in full** (`cfg: {key: value}` for every setting), so a
+  page predicts with the server's values whatever defaults its own code has (§18), in the join `welcome`, in every `lobby` message for the room the page looks at, and in
   the event `{type:'cfg', cfg, ch?, reset?}` (`ch`: what this change set) to every viewer of the room
   (members and watchers). Client prediction uses the room's settings (the server steps the room with the
   same ones), and every page applies gore and the blood style at once. Every page in the room shows one
@@ -846,14 +850,22 @@ can run them, and the players are told plainly when it can't. **Every compatibil
 by code**: no version number is maintained by hand anywhere.
 
 - **Two fingerprints, computed by the server at start:**
-  - the **rules hash**: what a page and a server must agree on to share a game. A sha256 over every
-    file under `shared/` (the deterministic sim, constants, level …, and `shared/protocol.js`: every
-    message both ways with its fields and their kinds, every room event, the packed snapshot rows), in
-    path order, each normalized first: comments removed and whitespace runs
-    collapsed (one line break if the run had one, else one space), strings, template literals and
-    regex literals kept byte for byte. Editing a comment or re-indenting changes nothing; any other
-    change to those files does. The served `index.html` carries it (`<meta name="rules">`) next to
-    the build id, and every `welcome` carries it as `r`. `public/net.js` is not in it: a running page
+  - the **rules hash**: what an open page and a new server must agree on to share a game, and nothing
+    more. A sha256 of three parts:
+    1. the **protocol**: `shared/protocol.js` (every message both ways with its fields and their kinds,
+       every room event, the packed snapshot rows), normalized: comments removed and whitespace runs
+       collapsed (one line break if the run had one, else one space), strings, template literals and
+       regex literals kept byte for byte;
+    2. the **level**: its data (tile grid, spawn and item points);
+    3. **prediction**: what the page's movement code *does*. At start the server runs
+       `Sim.predictStep` (the only sim code a page runs during a game) over a fixed, seeded set of
+       situations (4 random room settings × 500 starts anywhere in the level, on floors, edges, walls,
+       next to other players, with random velocity, stun, attack and sword × 24 ticks of changing keys)
+       and hashes every outcome. Same behaviour, same hash.
+    Everything else is the server's alone and never stops a game: combat, damage, pickups, spawning,
+    star bundles, scoring, respawn, bots, and every setting's default (a room's settings are sent in
+    full, §17.1). The served `index.html` carries it (`<meta name="rules">`) next to the build id, and
+    every `welcome` carries it as `r`. `public/net.js` and `game.js` are not in it: a running page
     keeps its own `net.js`, so a change to how the page handles messages never ends a game. The
     server reads incoming messages only through `protocol.js` (undeclared fields are dropped, a wrong
     kind is a kick), and the unit tests check every message the server and `net.js` send against it,
@@ -903,8 +915,11 @@ by code**: no version number is maintained by hand anywhere.
     server was updated and could not keep this game."
   - A page older than this section knows no rules hash: it reloads whenever the build id changes, as
     before (the server keeps sending `b`).
-- **What the fingerprints do not catch.** A change outside `shared/` that keeps a field's name and
-  type but changes its meaning (say, a record field reinterpreted by `server/room.js`). Such a change needs the restart to start empty (stop the service, delete the
+- **What the fingerprints do not catch.** A change that keeps a saved field's name and type but
+  changes its meaning (say, a record field reinterpreted by `server/room.js`, or a sim timer that
+  now counts in other units: server-only sim code is not in the rules hash, so a save from before
+  it is loaded if its shape matches). And a movement change that shows only in situations the
+  prediction set never reaches (an open page would rubber-band until it reloads). Such a change needs the restart to start empty (stop the service, delete the
   file or let it age past 2 minutes, start). The trial step is the safety net for the rest: a room the
   new code can't step, or that steps into nonsense, is dropped rather than served.
 - **Deploying.** The service manager must deliver SIGTERM to `node` itself (run it directly or with

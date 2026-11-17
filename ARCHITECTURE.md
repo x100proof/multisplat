@@ -396,49 +396,148 @@ also happens. One hash would either reload pages needlessly or load saves wrongl
 **Nobody maintains a version number.** Both hashes are computed by the code from the code at every
 start, so the decision can't be forgotten or got wrong by a person or an agent editing the game.
 
-### How the rules hash is computed
+### The rules hash: what an open page needs from the server
 
-The question is narrow on purpose: what must an *open* page and a *new* server agree on for the game
-to go on? During a game the page runs only three things that depend on the server's code: the
-protocol, the level, and the prediction of its own movement. Combat, pickups, spawning, scoring, bots
-and every setting's default are the server's alone (the page draws what the snapshots and events say,
-and the room's settings arrive in full), so changing them never stops a game. `rulesHash` in
-`server/version.js` hashes three parts:
+**The question.** After a deploy, an open page reconnects to a server running newer code. Can it play
+on? The page keeps the JavaScript it loaded, so it is old code talking to new code. The game is fine
+as long as the two agree on everything the *page* relies on, and *only* on that. A broader hash
+stops games for nothing; the first version (every file under `shared/`, by source text) stopped
+every game for a change to star-bundle odds, which no page ever computes.
 
-1. **Protocol**: the source of `shared/protocol.js`, normalized (below). The file the server serves
-   from memory (`readTree` reads `public/` and `shared/` once, at start; `makeHandler` serves those
-   bytes), so it is always the page's own protocol.
-2. **Level**: `JSON.stringify(LEVEL)`: the tile grid, spawn points and item points. Moving one tile
-   counts; reformatting `level.js` does not.
-3. **Prediction**: `predictionFingerprint` in `server/fingerprint.js`. A page predicts its own
-   player with `Sim.predictStep` (movement, collisions with the level and other players, spikes); if
-   an open page and the server disagreed, the player would rubber-band on every jump until a reload.
-   So the server runs `predictStep` over a fixed, seeded set of situations at start (~0.2 s):
-   4 random room settings (each editable setting drawn inside its range: never the defaults,
-   because the settings arrive in full and a changed default alone must not count) × 500 starts
-   (a player anywhere in the level or near a spawn or item point, random velocity, facing, ground
-   flag, coyote and jump-buffer counters, stun, attack, long sword, 0–2 other players close by)
-   × 24 ticks of changing keys. Every outcome (all players' positions, velocities, ground flags,
-   facing, counters, and the spike result) goes into a sha256. Same behaviour, same hash, however
-   the code is written or whatever else changes in `sim.js`; any change to how a player moves changes
-   some outcome. Tests check both directions: server-only sim code and changed defaults leave it
-   alone; a 1e-6 drift, a 1 % higher jump, running ignored or another level each change it.
+**What a page relies on during a game.** The server is authoritative: it runs the whole sim (combat,
+damage, pickups, spawning, star bundles, scoring, respawn, bots) and sends the results as snapshots
+and events, which the page draws. The page computes only three things itself that depend on the
+server's code:
 
-The limit: a movement change that only shows in a situation the set never reaches would slip
-through. The cost would be rubber-banding until that page's next reload, not a broken game: the
-server's snapshots still correct the page.
+1. **The protocol**: the shape of every message, which it reads and writes.
+2. **The level**: the map it draws and predicts against.
+3. **Prediction of its own player**: to feel instant, the page moves its own ninja straight away
+   with `Sim.predictStep` (movement, collisions with the level and with other players, spikes)
+   instead of waiting a round trip, and then quietly corrects the small differences when the
+   server's snapshot arrives. If the page's movement code and the server's differ, the correction is
+   never small: the player jumps to the old height and snaps to the new one on every jump, for the
+   rest of the match.
 
-`normalizeJs` removes comments and collapses whitespace runs: a run that contains a line break
-   becomes one `\n` (line breaks matter in JS: `return\nx` is not `return x`), any other run one space;
-   a block comment counts as whitespace. It is a small scanner, not a regex: `'…'`, `"…"`, template
-   literals (with `${…}` nested to any depth) and regex literals are copied byte for byte, so a `//`
-   or `/*` inside them is never taken for a comment. Whether a `/` starts a regex is decided from the
-   previous token, as JS itself does (after an operator, `(`, `,`, `{`, `}`, `;` or a keyword like
-   `return`: a regex; after a name, a number or `)`/`]`: a division). The only promise it makes is
-   the safe one: sources that differ in anything but comments and the amount of whitespace give
-   different hashes. A test normalizes every served file and checks the result still parses.
+Everything else can change without stopping a game. That includes every setting's *default*,
+because a room's settings are sent **in full** (welcome, lobby, `cfg` event; SPEC §17.1). An open
+page predicts with the server's values, never its own defaults. Old pages handle a full set
+correctly, and they ignore settings they don't know.
 
-### Why `net.js` is not in it: the protocol file
+`rulesHash` in `server/version.js` is a sha256 of those three parts; the first 16 hex digits are the
+hash.
+
+#### Part 1: the protocol, by source
+
+`shared/protocol.js` declares every message both ways, every field and its kind, every room event,
+and the packed snapshot rows (see the next section). Its source is hashed after `normalizeJs`
+(below), so comments and whitespace don't count. Source is the right measure here, since the file is
+a declaration and any change to it is a change to the wire. It is the file the server serves from
+memory (`readTree` reads `public/` and `shared/` once at start; `makeHandler` serves those bytes),
+so it is always exactly the page's protocol.
+
+#### Part 2: the level, by data
+
+`JSON.stringify(LEVEL)`: the tile grid, spawn points and item points. Moving one tile counts;
+reformatting or commenting `level.js` doesn't.
+
+#### Part 3: prediction, by behaviour
+
+This is the part that makes the hash narrow. `sim.js` holds both the page's movement code and the
+server's combat, pickup and spawn code. Hashing its source would make any server-only edit look
+like a change the page must follow. So the server fingerprints what the page's movement code
+*does* instead.
+
+At start, `predictionFingerprint` in `server/fingerprint.js` runs `Sim.predictStep` over a fixed set
+of situations and hashes every outcome:
+
+```
+4 room-settings variants
+  × 500 starting situations
+    × 24 ticks of key presses
+= 48 000 prediction steps, ~0.2 s, once per server start
+```
+
+- **Situations.** A player placed anywhere in the level (inside walls too, to exercise the push-out)
+  or near a spawn or item point (so on floors, platform edges and ledges), with a random velocity,
+  facing, ground flag, coyote and jump-buffer counters, stun, attack and long sword, and 0–2 other
+  players close by to push against. The keys change at random every few ticks, across all 64
+  combinations. In the current level that gives about 1,700 landings and plenty of wall, platform
+  and player contact.
+- **What is hashed.** After every step: every player's position, velocity, ground flag, facing and
+  counters, and the spike result. These are exact floating-point values, so a difference in the
+  sixth decimal place shows.
+- **Deterministic.** One fixed seed (a small mulberry32 generator, not `Math.random`), and every
+  world is made with `Sim.createWorld({seed})`. Every server, every process and every run computes
+  the same hash for the same code. The page needs no fingerprinting of its own: it carries the hash
+  of the server that served it (`<meta name="rules">`) and compares it with the new server's (`r` in
+  the welcome).
+- **Settings are drawn, never the defaults.** Each variant gives every editable setting (`SETTINGS`)
+  a random value inside its range. Using the defaults would make a changed default look like a
+  movement change, which it isn't, since the settings travel in full.
+- **One seed per setting.** Each setting's value comes from its own generator, seeded by its name
+  and the variant. Without this, adding a setting to the table shifts the random sequence and every
+  value after it. That really happened: the star-rarity setting (`starK`, which movement never
+  reads) changed the hash before this was fixed. Now a new, removed or reordered setting is inert,
+  unless `predictStep` actually reads it.
+
+The result is *same behaviour, same hash*. A refactor, a renamed variable, new combat rules,
+different star odds, a new setting or an edit elsewhere in `sim.js` leave every outcome unchanged.
+A change to how a player moves changes some outcome, and with it the hash.
+
+#### What stops a game, and what doesn't
+
+| Change | Rules hash | Open games |
+|---|---|---|
+| Star odds, spawn interval, pickups on the ground | same | carry on |
+| Damage, knockback, hit-stun, respawn delay, scoring | same | carry on |
+| Bots, admin rules, room limits, lobby behaviour | same | carry on |
+| Any setting's default (jump strength, gravity …) | same | carry on (settings arrive in full) |
+| A new room setting | same | carry on |
+| `net.js`, `game.js`, `index.html`: the page's own code | same | carry on; a quiet reload later, in the lobby (build id) |
+| How movement or collision works (the code) | different | stop with the update message |
+| Player size, a tile, a spawn or item point | different | stop |
+| A message, field or event added, removed or changed | different | stop |
+
+#### How it is verified
+
+- **Unit tests** (`test/persist.test.js`) check both directions:
+  - unchanged: the same hash in another process; server-only sim code replaced wholesale (`step`,
+    the star draw, combat); every default changed; the settings table reversed with an unrelated
+    entry added;
+  - changed: a 1e-6 drift in x, a jump 1 % stronger, running ignored, a different level.
+  - The served `RULES` equals the hash of the served files' parts.
+- **History check.** The fingerprint was computed for past commits: the commits before and after
+  the star-bundle change give the same hash, and so do the room-settings and persistence commits
+  (none of them changed movement).
+
+#### Limits
+
+- A movement change that only shows in a situation the set never reaches would slip through. The
+  cost would be rubber-banding on open pages until they reload, not a broken game: the server's
+  snapshots still correct the page. The set can be widened by raising `SITUATIONS`, `TICKS` or
+  `CFG_VARIANTS`, which costs startup time.
+- A protocol change of *meaning* with an unchanged shape is invisible to code: bump `PROTOCOL` in
+  `protocol.js`.
+- The rules hash also gates loading a save (with the shape hash). Server-only sim code is no longer
+  in it, so a save from before a server-only sim change loads if its shape matches. The trial step
+  catches a room that no longer steps sanely (see "What it deliberately does not catch").
+
+#### `normalizeJs`
+
+It removes comments and collapses whitespace runs. A run that contains a line break becomes one
+`\n` (line breaks matter in JS: `return\nx` is not `return x`); any other run becomes one space; a
+block comment counts as whitespace. It is a small scanner, not a regex: `'…'`, `"…"`, template
+literals (with `${…}` nested to any depth) and regex literals are copied byte for byte, so a `//` or
+`/*` inside them is never taken for a comment. Whether a `/` starts a regex is decided from the
+previous token, as JS itself does:
+- after an operator, `(`, `,`, `{`, `}`, `;` or a keyword like `return`, it starts a regex;
+- after a name, a number or `)`/`]`, it is a division.
+
+The only promise it makes is the safe one: sources that differ in anything but comments and the
+amount of whitespace give different hashes. A test normalizes every served file and checks the
+result still parses.
+
+### The protocol file, and why `net.js` is not in the hash
 
 A running page keeps the `net.js` it loaded; a new `net.js` only ever reaches new pages. So a change
 to how the page *handles* messages (its prediction, reconnects, sessionStorage, the seat it keeps)
@@ -462,7 +561,7 @@ held to it by code:
   thing no code can see: bump `PROTOCOL` in the same file.
 
 `RULES_HASH` (tests only, refused in production) replaces the computed value, so a test can restart
-the server as if `shared/` had changed.
+the server as if the rules had changed.
 
 ### How the shape hash is computed
 

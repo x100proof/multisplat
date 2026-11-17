@@ -153,9 +153,11 @@ ARCHITECTURE.md    the code as implemented
 - **Spawning:** ninja-star pickups appear fairly often: one every 5–10 s, with at most **4**
   lying in the arena at once. They use the same item points and free-point rule as long swords
   (a point holds one pickup of either kind). Seeded RNG, as for everything in the sim.
-- **Bundles:** each pickup holds **5, 10 or 15** stars, drawn when it appears. A bigger bundle is
-  rarer: the odds are inversely proportional to the amount, 1/5 : 1/10 : 1/15 = 6 : 3 : 2
-  (about 55 %, 27 %, 18 %).
+- **Bundles:** each pickup holds **3, 5, 10 or 15** stars, drawn when it appears. A bigger bundle is
+  rarer: n is drawn with weight **n^-k**, k = **1.25** by default (about 53 %, 28 %, 12 %, 7 %: a 15
+  roughly once in 14 pickups). k is a room setting (D panel, "Big star bundles rarer", 0–3): 0 makes
+  every size alike, 1 gives every size the same share of the stars handed out, higher makes the big
+  bundles rarer still.
 - **Picking up:** touching a pickup gives its stars. A player can carry at most **30**; a player
   already at 30 leaves the pickup where it is. A player with less room takes what fits, and the
   rest stays lying as a smaller pickup (e.g. at 27, a 10 gives 3 and leaves a 7).
@@ -366,7 +368,7 @@ committed.
   `?v=<id>` on the entry script) and into every `welcome`.
 - A page whose build id differs from the server's is stale, for example a tab left open across
   a deploy, which reconnects to the new server. What it does is decided by the **rules hash** (§18),
-  not by the build id: same rules → it plays on and reloads quietly later, on the room list; other
+  not by the build id: same rules → it plays on and reloads quietly later, in the lobby; other
   rules → the game stops with a message. Reloads happen at most once per server version so a
   mismatch can never loop. The build id is shown in the debug panel and included in debug reports.
   (A page older than §18 has no rules hash and still reloads on any build change.)
@@ -888,8 +890,10 @@ by code**: no version number is maintained by hand anywhere.
   token as after a drop. Every welcome is compared with the page's own ids (`compareVersion` in
   `net.js`):
   - **same rules** → the game resumes in place with its score, no reload. If the build id differs too
-    (only UI files changed), the page reloads quietly later, when it is on the room list with nothing
-    typed (never mid-game or on a room's screen).
+    (only UI files changed), the page reloads quietly later, when it is in the lobby (the room list
+    or a room's screen) and not fighting, watching, typing or in a dialog. It comes back where it was:
+    the same room's screen, half-typed name fields kept (for the tab), a pending admin still admin
+    (its seat, §17).
   - **other rules** → the game stops: the page sends `leave` if it had a record, sends and handles
     nothing more, and shows "The game was updated and this match can't continue on your version.
     Press OK to load the new version." (OK, or Enter, reloads into the lobby). A page with nothing to

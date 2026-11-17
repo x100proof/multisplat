@@ -36,10 +36,10 @@ export const DEFAULTS = Object.freeze({
   // long-sword pickups (SPEC §5.1): a new one 20-40 s after the previous appeared, at most 2 lying
   // at once, at an item point with no player within itemClear units
   itemMinTicks: 1200, itemMaxTicks: 2400, itemMax: 2, itemClear: 32,
-  // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; bundles of 5, 10 or 15
-  // (STAR_BUNDLES), carry 30; throw
-  // cooldown 15 ticks; flight 6 units/tick for 240 units; 20 damage and a small knockback
-  starMinTicks: 300, starMaxTicks: 600, starMax: 4, starCarry: 30,
+  // ninja stars (SPEC §5.2): pickups every 5-10 s, at most 4 lying; bundles of 3, 5, 10 or 15
+  // (STAR_BUNDLES), each n drawn with weight n^-starK (bigger is rarer; 0: all alike), carry 30;
+  // throw cooldown 15 ticks; flight 6 units/tick for 240 units; 20 damage and a small knockback
+  starMinTicks: 300, starMaxTicks: 600, starMax: 4, starCarry: 30, starK: 1.25,
   throwCd: 5, starSpeed: 6, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
 });
 
@@ -77,6 +77,9 @@ export const SETTINGS = Object.freeze([
     ['hitStun', 'Hit-stun (ticks)', 0, 40, 1],
     ['spawnIframes', 'Spawn protection (ticks)', 0, 240, 5],
     ['respawnTicks', 'Respawn delay (ticks)', 10, 300, 5],
+  ]],
+  ['Pickups', [
+    ['starK', 'Big star bundles rarer (k)', 0, 3, .05],
   ]],
 ]);
 // The room-wide on/off switches: [key, label].
@@ -116,9 +119,9 @@ export function cfgFromDiff(d) {
 export const LONG_REACH = 1.6;
 // A pickup's body, centred on its item point's x and resting on the point's surface (y).
 export const ITEM_W = 8, ITEM_H = 14;
-// Ninja-star bundles (SPEC §5.2): a star pickup holds n stars, drawn when it appears with weights
-// 6 : 3 : 2 (likelihood inversely proportional to n). Not in DEFAULTS: the debug panel edits numbers.
-export const STAR_BUNDLES = [{ n: 5, w: 6 }, { n: 10, w: 3 }, { n: 15, w: 2 }];
+// Ninja-star bundles (SPEC §5.2): a star pickup holds n stars, one of these, drawn when it appears
+// with weight n^-k (cfg.starK, a room setting).
+export const STAR_BUNDLES = Object.freeze([3, 5, 10, 15]);
 export const STAR_LEGACY_N = 3;   // a star pickup without n (made before bundles) holds this many
 export const STAR_W = 4, STAR_H = 4;    // a flying star's box (centred on its x, y)
 export const STAR_HAND = 6;             // a star leaves the hand this far below the body's top

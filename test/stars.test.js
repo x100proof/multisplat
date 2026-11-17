@@ -110,30 +110,27 @@ test('stars: a pickup gives its bundle, carrying at most 30; at 30 the pickup st
   assert.equal(r.stars, 5);
 });
 
-test('stars: bundles of 5, 10 and 15 with odds 6 : 3 : 2 (inversely proportional to the amount)', () => {
-  assert.deepEqual(STAR_BUNDLES.map(b => b.n), [5, 10, 15]);
-  assert.deepEqual(STAR_BUNDLES.map(b => b.w), [6, 3, 2]);
-  // the draw itself, over many seeds: each share within 1.5 points of 6/11, 3/11, 2/11
-  const N = 66000, count = { 5: 0, 10: 0, 15: 0 };
-  const w = S.createWorld({ seed: 12345 });
-  for (let i = 0; i < N; i++) {
-    const before = w.rng, n = S.drawStarAmount(w);
-    assert.notEqual(w.rng, before, 'one RNG draw');
-    count[n]++;
+test('stars: bundles of 3, 5, 10 and 15, drawn with weight n^-k (k = cfg.starK, 1.25 by default)', () => {
+  assert.deepEqual([...STAR_BUNDLES], [3, 5, 10, 15]);
+  assert.equal(DEFAULTS.starK, 1.25);
+  const draw = (k, N) => {
+    const count = { 3: 0, 5: 0, 10: 0, 15: 0 }, w = S.createWorld({ seed: 12345 }), cfg = { ...DEFAULTS, starK: k };
+    for (let i = 0; i < N; i++) {
+      const before = w.rng, n = S.drawStarAmount(w, cfg);
+      assert.notEqual(w.rng, before, 'one RNG draw');
+      count[n]++;
+    }
+    assert.equal(count[3] + count[5] + count[10] + count[15], N, 'only 3, 5, 10 or 15');
+    return count;
+  };
+  // each share within 1.5 points of n^-k / sum
+  for (const k of [0, 1, 1.25, 2]) {
+    const N = 40000, c = draw(k, N), w = S.starWeights(k), sum = w.reduce((a, b) => a + b, 0);
+    STAR_BUNDLES.forEach((n, i) => assert.ok(Math.abs(c[n] / N - w[i] / sum) < .015, `k ${k}, ${n}: ${c[n] / N} vs ${w[i] / sum}`));
   }
-  assert.equal(count[5] + count[10] + count[15], N, 'only 5, 10 or 15');
-  for (const [n, share] of [[5, 6 / 11], [10, 3 / 11], [15, 2 / 11]]) assert.ok(Math.abs(count[n] / N - share) < .015, `${n}: ${count[n] / N}`);
-  // the same draw is what real spawns get: 4 pickups x 300 seeds, each with its n on the item and event
-  const real = { 5: 0, 10: 0, 15: 0 };
-  for (let seed = 1; seed <= 300; seed++) {
-    const ws = S.createWorld({ seed });
-    const ev = of(run(ws, 2500), 'item').filter(e => e.kind === 'star');
-    for (const e of ev) { real[e.n]++; assert.equal(ws.items.find(i => i.id === e.id).n, e.n); }
-  }
-  const tot = real[5] + real[10] + real[15];
-  assert.ok(tot >= 1000, 'enough spawns: ' + tot);
-  for (const [n, share] of [[5, 6 / 11], [10, 3 / 11], [15, 2 / 11]]) assert.ok(Math.abs(real[n] / tot - share) < .05, `spawned ${n}: ${real[n] / tot}`);
-  assert.ok(real[5] > real[10] && real[10] > real[15], 'bigger bundles are rarer');
+  // the default: about 53 / 28 / 12 / 7 %
+  const w = S.starWeights(1.25), sum = w.reduce((a, b) => a + b, 0);
+  assert.deepEqual(w.map(x => Math.round(x / sum * 1000) / 10), [53.1, 28, 11.8, 7.1]);
 });
 
 test('stars: the snapshot packs a star pickup amount and the page unpacks it (absent from an old server: 3)', async () => {
@@ -350,7 +347,7 @@ test('determinism with stars in play (same inputs -> identical serialized state 
   assert.equal(a.state, b.state);
   assert.equal(a.events, b.events);
   assert.ok(of(a.log, 'pickup').filter(e => e.kind === 'star').length >= 3, 'star pickups happened');
-  assert.ok(of(a.log, 'item').filter(e => e.kind === 'star').every(e => [5, 10, 15].includes(e.n)), 'star bundles drawn');
+  assert.ok(of(a.log, 'item').filter(e => e.kind === 'star').every(e => STAR_BUNDLES.includes(e.n)), 'star bundles drawn');
   assert.ok(of(a.log, 'throw').length >= 5, 'stars were thrown');
   assert.ok(of(a.log, 'hit').some(e => e.move === 'star'), 'stars hit');
   assert.notEqual(play(22).state, a.state);

@@ -374,10 +374,13 @@ async function longSwordTest() {
   assert.equal(death.held, true, 'kill event says the victim held a long sword');
   for (const p of all) {
     const h = await waitFor(async () => { const d = await drawn(p, H.id); return d && d.alive ? d : null; }, { timeout: 6000, what: `holder respawn on ${p.name}` });
-    assert.equal(h.long, false, `${p.name}: no long sword after death`); assert.equal(h.reach, 18);
+    // (a new long sword picked up right after the respawn is fine: it has its own pickup event)
+    const again = await p.page.evaluate(([id, t]) => __mp.events.some(e => e.type === 'pickup' && e.kind === 'long' && e.id === id && e.tick > t), [H.id, death.tick]);
+    if (!again) { assert.equal(h.long, false, `${p.name}: no long sword after death`); assert.equal(h.reach, 18); }
   }
   const me = await H.page.evaluate(() => ({ long: __mp.net.me.long, w: __mp.sim.swordBoxOf({ ...__mp.net.me, atkType: 'chop' }).w }));
-  assert.equal(me.long, false); assert.equal(me.w, 18);
+  const tookAnother = await H.page.evaluate(([id, t]) => __mp.events.some(e => e.type === 'pickup' && e.kind === 'long' && e.id === id && e.tick > t), [H.id, death.tick]);
+  if (!tookAnother) { assert.equal(me.long, false); assert.equal(me.w, 18); }
   assert.ok((await H.page.evaluate(() => __mp.debug.entries())).some(e => e.cat === 'life' && e.msg === 'long sword lost'));
   log(`holder died (${death.move}) and is back to the standard sword on all 3 pages`);
 
@@ -514,9 +517,9 @@ async function starTest() {
     const u = await T.page.evaluate(() => ({ hint: __mp.throwHint, hud: document.getElementById('hStars').textContent,
       shown: getComputedStyle(document.getElementById('hStars')).display !== 'none', me: __mp.net.me && __mp.net.me.stars,
       life: __mp.debug.entries().filter(e => e.cat === 'life').map(e => e.msg) }));
-    return u.me === pick.stars && u.hud === `★ ${pick.stars}` ? u : null;   // the count the pickup gave (5, 10 or 15)
+    return u.me === pick.stars && u.hud === `★ ${pick.stars}` ? u : null;   // the count the pickup gave (3, 5, 10 or 15)
   }, { timeout: 3000, what: 'the star count after the pickup' });
-  assert.ok([5, 10, 15].includes(pick.gain) && pick.stars === pick.gain, `a first pickup gives a whole bundle: ${pick.gain}`);
+  assert.ok([3, 5, 10, 15].includes(pick.gain) && pick.stars === pick.gain, `a first pickup gives a whole bundle: ${pick.gain}`);
   assert.equal(ui.hint, 'X to throw', 'the reminder above our Kanbei');
   assert.ok(ui.shown); assert.ok(ui.life.includes('stars gained'));
   for (const p of all) await waitFor(() => p.page.evaluate(([id, item]) => __mp.events.some(e => e.type === 'pickup' && e.id === id && e.item === item && e.kind === 'star'), [T.id, pick.item]),
@@ -869,7 +872,20 @@ async function staleBuildTest() {
   await page.evaluate(() => { window.__marker = 2; __mp.net.build = 'deadbeef00'; __mp.net.drop(); });
   await sleep(3000);
   assert.equal(await page.evaluate(() => window.__marker), 2, 'no second reload for the same build');
-  log('stale build: the page reloaded itself once and does not loop');
+  // on a room's screen too, as its (pending) admin with a name typed: it comes back to the same
+  // screen, still the admin, with the name field as it was
+  const p2 = await (await browser.newContext({ viewport: { width: 960, height: 576 } })).newPage();
+  p2.on('pageerror', e => errors.push(`Stale2: ${e.message}`));
+  await p2.goto(srv.url); await p2.waitForFunction(() => window.__mp?.net?.state === 'open' && __mp.net.serverBuild);
+  await p2.fill('#lRoomName', 'Kept'); await p2.click('#lCreate');
+  await p2.waitForFunction(() => __mp.net.isAdmin() && __mp.net.lobby.rname === 'Kept');
+  await p2.fill('#lName', 'Typed'); await p2.evaluate(() => document.activeElement.blur());
+  await p2.evaluate(() => { window.__marker = 1; __mp.net.build = 'deadbeef00'; __mp.net.drop(); });
+  await p2.waitForFunction(() => !window.__marker && window.__mp?.net?.state === 'open' && __mp.net.lobby.rname === 'Kept' && __mp.net.isAdmin(), null, { timeout: 10000 });
+  assert.equal(await p2.inputValue('#lName'), 'Typed', 'the typed name survives');
+  assert.equal(await p2.evaluate(() => __mp.lobbyOpen && !document.getElementById('scrRoom').classList.contains('hidden')), true, "back on the room's screen");
+  log("stale build: the page reloaded itself once and does not loop; on a room's screen it comes back there, still admin, fields kept");
+  await p2.context().close();
   await ctx.close(); await srv.stop();
 }
 
@@ -1191,7 +1207,7 @@ async function adminTest() {
   // the new admin has the buttons and the AI controls, the old one has neither
   const ctl = p => p.page.evaluate(() => ({ mk: [...document.querySelectorAll('#lPlayers button.mkadm')].map(b => b.dataset.name),
     hid: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).classList.contains('hidden2')),
-    dis: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).disabled), rename: !document.getElementById('lRenameRow').classList.contains('hidden2') }));
+    dis: ['lBotDec', 'lBotInc'].map(id => document.getElementById(id).disabled), rename: !document.getElementById('lRenameOpen').classList.contains('hidden2') }));
   // (Ann never pressed FIGHT, so she has no player record and is not in the roster: Bob has nobody to
   // hand admin to yet; the Esc-menu check below has her fight first)
   await waitFor(async () => (await ctl(B)).rename, { what: 'the admin controls on the new admin' });
@@ -1254,7 +1270,7 @@ async function adminTest() {
   assert.equal(await roomsOpen(srv), 1);
   // Bob stops watching (his room's screen, with the admin controls) and FIGHT keeps him admin
   await B.page.keyboard.press('Escape');
-  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && !document.getElementById('lRenameRow').classList.contains('hidden2')), { what: 'Bob on the room screen with the admin controls' });
+  await waitFor(() => B.page.evaluate(() => __mp.lobbyOpen && !__mp.watching.on && !document.getElementById('lRenameOpen').classList.contains('hidden2')), { what: 'Bob on the room screen with the admin controls' });
   await B.page.click('#lFight');
   await waitFor(() => B.page.evaluate(() => __mp.net.id != null && __mp.net.lobby.admin === __mp.net.id && __mp.net.isAdmin()), { what: 'Bob fighting, still admin' });
   // the sole admin leaves the fight onto the room's screen; ← Rooms with nobody else looking closes it
@@ -1281,19 +1297,28 @@ async function renameRoomTest() {
   const V = await openViewer(srv, 'V', A.room);
   const seen = (p, name) => waitFor(() => p.page.evaluate(n => __mp.net.lobby.rname === n && document.getElementById('lRoomTitle').textContent === n &&
     [...document.querySelectorAll('#lRoomList button .rn')].some(e => e.textContent === n), name), { what: `room named ${name} on ${p.name}` });
-  assert.ok(await B.page.evaluate(() => document.getElementById('lRenameRow').classList.contains('hidden2')), 'no rename row for a non-admin');
-  await A.page.fill('#lRenameIn', 'New Name'); await A.page.click('#lRenameBtn');
+  assert.ok(await B.page.evaluate(() => document.getElementById('lRenameOpen').classList.contains('hidden2')), 'no Rename button for a non-admin');
+  const dlg = p => p.page.evaluate(() => !document.getElementById('rnm').classList.contains('hidden'));
+  // Rename opens a dialog with the current name selected; Rename (or Enter) renames and closes it
+  await A.page.click('#lRenameOpen');
+  assert.equal(await dlg(A), true); assert.equal(await A.page.inputValue('#lRenameIn'), 'Old', 'the dialog starts from the current name');
+  await A.page.keyboard.type('New Name'); await A.page.click('#lRenameBtn');
   for (const p of [A, B, V]) await seen(p, 'New Name');
-  assert.equal(await A.page.inputValue('#lRenameIn'), '', 'the field is cleared');
-  // a second rename, then a bad name is refused with its rule and changes nothing; the Esc menu has
-  // no rename (the user asked: renaming is a lobby thing)
-  await A.page.fill('#lRenameIn', "Third's-Try"); await A.page.click('#lRenameBtn');
+  assert.equal(await dlg(A), false, 'closed after renaming');
+  // Escape cancels; Enter renames
+  await A.page.click('#lRenameOpen'); await A.page.keyboard.type('Nope'); await A.page.keyboard.press('Escape');
+  assert.equal(await dlg(A), false); await sleep(200);
+  assert.equal(await A.page.evaluate(() => __mp.net.lobby.rname), 'New Name', 'cancelled: unchanged');
+  await A.page.click('#lRenameOpen'); await A.page.keyboard.type("Third's-Try"); await A.page.keyboard.press('Enter');
   for (const p of [A, B, V]) await seen(p, "Third's-Try");
-  await A.page.fill('#lRenameIn', 'a<b>'); await A.page.click('#lRenameBtn');
+  // a bad name: the rule shows in the dialog, which stays open, and nothing changes
+  await A.page.click('#lRenameOpen'); await A.page.keyboard.type('a<b>'); await A.page.click('#lRenameBtn');
+  assert.equal(await dlg(A), true); assert.match(await A.page.textContent('#rnmErr'), /1–20/);
+  await A.page.click('#rnmNo');
   await sleep(300);
   assert.equal(await B.page.evaluate(() => __mp.net.lobby.rname), "Third's-Try");
   assert.equal(await A.page.evaluate(() => document.getElementById('lvRenameIn')), null, 'no rename in the Esc menu');
-  log('rooms: renames from the lobby show on every page, list included; none in the Esc menu');
+  log('rooms: Rename dialog (current name, Enter, Escape, bad name kept open) renames on every page, list included; none in the Esc menu');
   for (const p of [A, B, V]) await p.page.context().close();
   await srv.stop();
 }

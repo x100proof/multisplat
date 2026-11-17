@@ -425,11 +425,14 @@ const drawItemT = (state, cfg) => cfg.itemMinTicks + Math.floor(nextRand(state) 
 export const itemKind = it => (it.kind === 'star' ? 'star' : 'long');   // pre-M6 items are long swords
 // How many stars a star pickup holds (one made before bundles holds STAR_LEGACY_N).
 export const starAmount = it => (it.n > 0 ? it.n : STAR_LEGACY_N);
-// A new star pickup's bundle size: 5, 10 or 15 with weights 6 : 3 : 2 (SPEC §5.2), one rng draw.
-export function drawStarAmount(state) {
-  let r = nextRand(state) * STAR_BUNDLES.reduce((a, b) => a + b.w, 0);
-  for (const b of STAR_BUNDLES) if ((r -= b.w) < 0) return b.n;
-  return STAR_BUNDLES[STAR_BUNDLES.length - 1].n;
+// The weight of each bundle size in STAR_BUNDLES for exponent k: n^-k (SPEC §5.2).
+export const starWeights = k => STAR_BUNDLES.map(n => n ** -k);
+// A new star pickup's bundle size, one rng draw: n with probability n^-k over the sum (k: cfg.starK).
+export function drawStarAmount(state, cfg = DEFAULTS) {
+  const w = starWeights(cfg.starK ?? DEFAULTS.starK);
+  let r = nextRand(state) * w.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < w.length; i++) if ((r -= w[i]) < 0) return STAR_BUNDLES[i];
+  return STAR_BUNDLES[STAR_BUNDLES.length - 1];
 }
 const drawStarT = (state, cfg) => cfg.starMinTicks + Math.floor(nextRand(state) * (cfg.starMaxTicks - cfg.starMinTicks + 1));
 
@@ -483,7 +486,7 @@ function spawnKind(state, cfg, L, events, kind, key, max, draw) {
   if (!free.length) return;
   const pt = free[Math.floor(nextRand(state) * free.length) % free.length];
   const it = { id: ++state.itemSeq, x: pt.x, y: pt.y, kind };
-  if (kind === 'star') it.n = drawStarAmount(state);
+  if (kind === 'star') it.n = drawStarAmount(state, cfg);
   state.items.push(it);
   state[key] = draw(state, cfg);
   events.push({ type: 'item', tick: state.tick, id: it.id, kind, x: it.x, y: it.y, ...(kind === 'star' ? { n: it.n } : {}) });

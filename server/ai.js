@@ -222,7 +222,7 @@ function think(b, me, state, seen, cfg, L) {
     const kind = Sim.itemKind(it);
     // stars: worth it while there is room for the whole pickup or for at least a smallest bundle
     // (5 of the 30); a near-full bot leaves the bundles to others
-    if (kind === 'long' ? me.long : cfg.starCarry - (me.stars | 0) < Math.min(Sim.starAmount(it), STAR_BUNDLES[0].n)) continue;
+    if (kind === 'long' ? me.long : cfg.starCarry - (me.stars | 0) < Math.min(Sim.starAmount(it), STAR_BUNDLES[0])) continue;
     const c = far(cx, feet, it.x, it.y);
     if (c < icost) { icost = c; item = it; }
   }

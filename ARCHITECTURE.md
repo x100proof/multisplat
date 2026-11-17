@@ -68,8 +68,8 @@ from `/shared/*.js`.
   because the offline debug panel edits `cfg` and reach must always match the server.
   `ITEM_W 8`, `ITEM_H 14` is a pickup's body (both kinds). `STAR_W 4`, `STAR_H 4` is a flying star's
   box (centred on its x, y) and `STAR_HAND 6` its height below the thrower's top. `STAR_BUNDLES`
-  (`[{n: 5, w: 6}, {n: 10, w: 3}, {n: 15, w: 2}]`) are the star-pickup amounts and their weights
-  (odds inversely proportional to the amount); `STAR_LEGACY_N 3` is the amount of a star pickup
+  (`[3, 5, 10, 15]`) are the star-pickup amounts, drawn with weight `n^-cfg.starK` (`starWeights`,
+  `drawStarAmount`; `starK` 1.25 by default, a room setting); `STAR_LEGACY_N 3` is the amount of a star pickup
   without `n` (made before bundles).
 - `NET` holds the netcode values:
   - `historyMs 200`, `rewindCapMs 150`,

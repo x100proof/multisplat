@@ -324,8 +324,9 @@ function setMuted(m) {
   prefsSet('muted', !!m);
   muted = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'muted' : 'unmuted');
   soundBtn('muteBtn', m, m ? 'Sound on (M)' : 'Mute all sound (M)');
+  document.getElementById('musicBtn')?.classList.toggle('dim', !!m);   // all sound off: the music can't play either
 }
-// The ♪ button and N: the music alone (sound effects carry on).
+// The ♫ button and N: the music alone (sound effects carry on).
 function setMusicOff(m) {
   prefsSet('musicOff', !!m);
   musicOff = m; if (music) { music.muted = muted || musicOff; music.apply(); } dbg('audio', m ? 'music off' : 'music on');
@@ -439,9 +440,10 @@ function heldBits() {
 addEventListener('keydown', e => {
   if (chatKey(e)) return;   // the chat box owns the keyboard while open; C opens it
   if (updOpen) { if (e.code === 'Enter' || e.code === 'Space') location.reload(); e.preventDefault(); return; }   // the update dialog (SPEC §18): only OK
-  if (admOpen) { if (e.code === 'Escape') { e.preventDefault(); admDialog(null); } return; }   // the confirm dialog: Enter presses the focused button (Cancel by default)
+  if (admOpen) { if (e.code === 'Escape') { e.preventDefault(); admDialog(null); } return; }
+  if (rnmOpen) { if (e.code === 'Escape') { e.preventDefault(); renameDialog(false); } else if (e.code === 'Enter' && e.target.id === 'lRenameIn') renameRoom('lRenameIn'); return; }   // the confirm dialog: Enter presses the focused button (Cancel by default)
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') {   // Enter in a lobby or menu field does that field's job
-    if (e.code === 'Enter') ({ lRoomName: createRoom, lRenameIn: () => renameRoom('lRenameIn') }[e.target.id] || fight)();
+    if (e.code === 'Enter') ({ lRoomName: createRoom }[e.target.id] || fight)();
     else if (e.code === 'Escape' && leaveOpen) leaveMenu(false);
     return;
   }
@@ -935,9 +937,9 @@ function shuriken(r, spin, fill, edge) {
 }
 // A star pickup: a spinning neon shuriken hovering over a magenta light pool, with a spinning
 // violet halo ring: clearly not the long sword's upright cyan blade. x centre, y the surface.
-// A bigger bundle (SPEC §5.2: 5, 10 or 15 stars) has a slightly bigger, brighter shuriken.
+// A bigger bundle (SPEC §5.2: 3, 5, 10 or 15 stars) has a slightly bigger, brighter shuriken.
 function drawStarItem(it, x, y) {
-  const n = Sim.starAmount(it), big = Math.max(0, Math.min(10, n - 5)) / 10;   // 0 for 5 (or fewer), 1 for 15
+  const n = Sim.starAmount(it), big = Math.max(0, Math.min(12, n - 3)) / 12;   // 0 for 3, 1 for 15
   const t = S.tick + it.id * 23, bob = Math.sin(t * .07) * 1.2, pulse = .6 + .4 * Math.sin(t * .12) + big * .15;
   const cy = y - 7 + bob;
   ctx.save();
@@ -1808,11 +1810,23 @@ const ROOM_NAME_RULE = "Room name: 1–20 letters, digits, space, ' _ or -";
 function renameRoom(inputId) {
   const el = document.getElementById(inputId);
   const n = cleanRoomName(el.value);
-  if (!n) { showNotice(ROOM_NAME_RULE); return; }
+  if (!n) { setText('rnmErr', ROOM_NAME_RULE); el.focus(); return; }
   showNotice('');
   net.rename(n);
   el.value = '';
+  renameDialog(false);
 }
+// The rename dialog (the room screen's Rename, admin only): the current name, selected, to type over.
+var rnmOpen = false;   // var: renderLobby may run before this line is reached
+function renameDialog(open) {
+  rnmOpen = open;
+  document.getElementById('rnm').classList.toggle('hidden', !open);
+  setText('rnmErr', '');
+  if (open) { const el = document.getElementById('lRenameIn'); el.value = net.lobby.rname || ''; el.focus(); el.select(); }
+}
+document.getElementById('lRenameOpen').addEventListener('click', () => renameDialog(true));
+document.getElementById('rnmNo').addEventListener('click', () => renameDialog(false));
+document.getElementById('rnm').addEventListener('click', e => { if (e.target.id === 'rnm') renameDialog(false); });
 // What the server's `refused` reasons mean to a player (SPEC §17).
 const REFUSED = {
   'create full': `${ROOM.max} rooms are open, the most there can be. Join one, or try again later.`,
@@ -1939,7 +1953,8 @@ function renderLobby() {
   setText('lRoomTitle', rname || '');
   document.getElementById('lBack').classList.toggle('hidden2', member);
   const list = document.getElementById('lPlayers'), admin = net.isAdmin(), adm = net.lobby.admin;
-  document.getElementById('lRenameRow').classList.toggle('hidden2', !admin);
+  document.getElementById('lRenameOpen').classList.toggle('hidden2', !admin);
+  if (!admin && rnmOpen) renameDialog(false);   // no longer the admin
   const sorted = [...players].sort((a, b) => b.score - a.score);
   if (!sameList(list, [admin, adm, net.id, sorted])) for (const p of sorted) list.appendChild(rosterRow(p, { me: p.id === net.id }));
   if (!players.length && !list.children.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'Nobody is fighting yet.'; list.appendChild(li); }
@@ -2047,6 +2062,7 @@ function leaveGame() {
 function backToLobby(message) {
   if (watching) watchUi(false);
   if (admOpen) admDialog(null);
+  if (rnmOpen) renameDialog(false);
   lobbyOpen = true;
   lobbyEl.classList.remove('hidden');
   document.body.classList.add('inlobby');
@@ -2269,12 +2285,27 @@ if (net) net.onOutdated = ({ playing, server }) => {
   document.getElementById('updOk').focus();
 };
 document.getElementById('updOk').addEventListener('click', () => location.reload());
+// A newer UI (build id) with the same rules: reload when nothing is lost by it, i.e. in the lobby (the
+// room list or a room's screen), not fighting, watching or in a dialog. The page comes back where it
+// was: the room it looked at and the half-typed name fields (this tab only, LS_DRAFT); a pending
+// admin's role comes back with its seat (net.resumeSeat).
+const LS_DRAFT = 'multisplat-draft', DRAFT_FIELDS = ['lName', 'lRoomName'];
 function quietReload() {
-  if (!net || !net.uiStale || net.halted() || !lobbyOpen || net.mode !== 'viewer' || net.lobby.room || updOpen) return;
-  const a = document.activeElement;
-  if (a && a.tagName === 'INPUT' && a.type === 'text' && a.value) return;   // something typed on the room list
-  if (reloadOnce('b:' + net.uiStale)) dbg('net', 'quiet reload for a newer UI', { page: BUILD, server: net.uiStale });
+  if (!net || !net.uiStale || net.halted() || !lobbyOpen || net.mode !== 'viewer' || watching || updOpen || admOpen || rnmOpen || chatOpen) return;
+  if (document.activeElement && document.activeElement.tagName === 'INPUT' && document.activeElement.type === 'text') return;   // typing right now
+  const draft = { room: net.lobby.room || 0 };
+  for (const id of DRAFT_FIELDS) draft[id] = document.getElementById(id).value;
+  try { sessionStorage.setItem(LS_DRAFT, JSON.stringify(draft)); } catch { /* no storage: the room list after the reload */ }
+  if (reloadOnce('b:' + net.uiStale)) dbg('net', 'quiet reload for a newer UI', { page: BUILD, server: net.uiStale, room: draft.room });
   else net.uiStale = null;
+}
+// After a quiet reload: back to the room's screen with the fields as they were (once).
+function takeDraft() {
+  let d = null;
+  try { d = JSON.parse(sessionStorage.getItem(LS_DRAFT) || 'null'); sessionStorage.removeItem(LS_DRAFT); } catch { /* none */ }
+  if (!d || typeof d !== 'object') return 0;
+  for (const id of DRAFT_FIELDS) if (typeof d[id] === 'string' && d[id]) { const el = document.getElementById(id); el.value = d[id].slice(0, 20); el.dispatchEvent(new Event('input')); }
+  return Number.isInteger(d.room) && d.room > 0 ? d.room : 0;
 }
 if (net) setInterval(quietReload, 1000);
 
@@ -2321,7 +2352,10 @@ if (ONLINE) {
   document.body.classList.add('inlobby');
   document.getElementById('help').classList.add('gone');
   if (net.resumeSaved()) { goLandscape(); closeLobby(); }   // this tab was playing before a reload: straight back in
-  else net.resumeSeat();                                     // or held a room as its admin: back on its screen
+  else {
+    const back = takeDraft();                               // a quiet reload for a newer UI: where it was
+    if (!net.resumeSeat() && back) net.viewRoom(back);      // or held a room as its admin: back on its screen
+  }
   net.connect();
 } else {
   lobbyEl.classList.add('hidden');

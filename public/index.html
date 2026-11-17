@@ -111,14 +111,17 @@
   :root { --fsw: calc(clamp(17px, 2.6vw, 24px) + 12px); --mbw: calc(clamp(17px, 2.6vw, 24px) + 8px); }
   body.nofs { --fsw: 0px; }
   /* left of the full screen button (where that is hidden, from its place): the speaker mutes all
-     sound, the ♪ left of it only the music; --mbw is the room each takes. Lit up while off. */
+     sound, the ♫ left of it only the music; --mbw is the room each takes. Lit up while off. */
   #muteBtn { right: var(--fsw); }
   #musicBtn { right: calc(var(--fsw) + var(--mbw)); font: 700 clamp(13px, 2vw, 18px)/1 system-ui, sans-serif; }
   body.touchui #musicBtn { font-size: 19px; }
   /* off: a slash from lower left to upper right across the icon */
   #muteBtn.on::before, #musicBtn.on::before { content: ''; position: absolute; left: 12%; right: 12%; top: calc(50% - 1px); height: 2px;
-                                              background: currentColor; border-radius: 1px; transform: rotate(-45deg); pointer-events: none; }
+                                              background: currentColor; border-radius: 1px; transform: rotate(-45deg); pointer-events: none;
+                                              box-shadow: 0 0 0 1.5px #07040f; }   /* a dark gap either side: the slash cuts the icon, it doesn't hide it */
   #muteBtn.on, #musicBtn.on, #muteBtn.on:hover, #musicBtn.on:hover { border-color: #ff2a6d; color: #ff2a6d; box-shadow: 0 0 10px rgba(255,42,109,.75); }
+  #musicBtn.on::before { height: 1.5px; }   /* thinner over the ♫: both notes stay readable */
+  #musicBtn.dim, #musicBtn.dim:hover, #musicBtn.dim.on, #musicBtn.dim.on:hover { color: #6b6880; border-color: #3b3850; box-shadow: none; opacity: .55; }   /* all sound muted */
   #fsBtn { right: 4px; }
   #fsBtn, #muteBtn, #musicBtn { position: fixed; top: 2px; z-index: 7; width: calc(clamp(17px, 2.6vw, 24px) + 4px); height: calc(clamp(17px, 2.6vw, 24px) + 2px);
            padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; touch-action: none;
@@ -327,8 +330,8 @@
   #lRoomHead { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
   #lRoomTitle { flex: 1; font-size: clamp(26px, 5vw, 36px); line-height: 1.15; font-weight: 800; color: #f9f871; overflow-wrap: anywhere;   /* names are at most 20 characters: wrap, never cut */
                  text-shadow: 0 0 10px rgba(249,248,113,.55), 2px 2px 0 #000; }   /* the room's name: the screen's heading */
-  #lBack { margin-left: auto; flex: none; min-height: 40px; font: inherit; font-size: 13px; font-weight: 700; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.45); border-radius: 6px; cursor: pointer; padding: 0 12px; touch-action: manipulation; white-space: nowrap; }
-  #lBack:hover { background: rgba(154,216,255,.12); }
+  .hbtn { flex: none; min-height: 40px; font: inherit; font-size: 13px; font-weight: 700; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.45); border-radius: 6px; cursor: pointer; padding: 0 12px; touch-action: manipulation; white-space: nowrap; }
+  .hbtn:hover { background: rgba(154,216,255,.12); }
   #lFoot .links { margin-left: auto; white-space: nowrap; }
   #lBotRO, #lvBotRO { font-size: 12px; color: #9ad8ff; }
   /* the admin's marker and the small "Make admin" button next to other humans in a roster */
@@ -352,15 +355,18 @@
   #leave #lvYes:disabled { opacity: .35; cursor: not-allowed; }
   #leave .rowin button { margin: 0; }
   /* the confirm dialog for an admin transfer: above everything, Cancel focused, 44 px targets */
-  #adm { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 9; background: rgba(5,3,14,.7); touch-action: none; }
-  #adm.hidden { display: none; }
-  #adm .box { width: min(380px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px; border: 2px solid #f9f871; border-radius: 10px; background: rgba(13,8,32,.97);
+  #adm, #rnm { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 9; background: rgba(5,3,14,.7); touch-action: none; }
+  #adm.hidden, #rnm.hidden { display: none; }
+  #adm .box, #rnm .box { width: min(380px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px; border: 2px solid #f9f871; border-radius: 10px; background: rgba(13,8,32,.97);
     box-shadow: 0 0 24px rgba(249,248,113,.35); text-align: center; color: #d1f7ff; font: 15px ui-monospace, Menlo, Consolas, monospace; }
-  #adm p { margin: 0 0 14px; } #adm p b { color: #f9f871; }
-  #adm button { min-height: 44px; min-width: 110px; margin: 0 6px; padding: 8px 16px; border-radius: 6px; border: 2px solid #05d9e8; background: transparent;
+  #adm p, #rnm p { margin: 0 0 14px; } #adm p b { color: #f9f871; }
+  #rnm input { width: 100%; box-sizing: border-box; margin: 0 0 6px; min-height: 44px; padding: 8px 10px; font: inherit; font-size: 16px; color: #f9f871;
+    background: rgba(5,3,14,.8); border: 1px solid rgba(154,216,255,.45); border-radius: 6px; }
+  #rnmErr { min-height: 1.2em; margin: 0 0 10px; font-size: 12px; color: #ff6ec7; }
+  #adm button, #rnm button { min-height: 44px; min-width: 110px; margin: 0 6px; padding: 8px 16px; border-radius: 6px; border: 2px solid #05d9e8; background: transparent;
     color: #d1f7ff; font: inherit; font-weight: 800; cursor: pointer; touch-action: manipulation; }
-  #adm #admYes { border-color: #f9f871; color: #f9f871; }
-  #adm button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
+  #adm #admYes, #rnm #lRenameBtn { border-color: #f9f871; color: #f9f871; }
+  #adm button:focus, #rnm button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   /* the game was updated and this page can't play on (SPEC §18): above everything, one OK */
   #upd { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 11; background: rgba(5,3,14,.75); touch-action: none; }
   #upd.hidden { display: none; }
@@ -404,7 +410,7 @@
   <div class="grp"><button id="tRun" aria-label="Run">»</button><button id="tT" aria-label="Throw a ninja star">✦</button><button id="tS" aria-label="Slash">⚔</button><button id="tJ" aria-label="Jump">⤒</button></div>
 </div>
 </div>
-<button id="musicBtn" aria-label="Music off (N)" title="Music off (N)" aria-pressed="false">♪</button>
+<button id="musicBtn" aria-label="Music off (N)" title="Music off (N)" aria-pressed="false">♫</button>
 <button id="muteBtn" aria-label="Mute all sound (M)" title="Mute all sound (M)" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h4l5-4v14l-5-4H3z" stroke-linejoin="round"/><path d="M16 8.5a5 5 0 0 1 0 7M19 5.5a9 9 0 0 1 0 13"/></svg></button>
 <button id="fsBtn" aria-label="Full screen (F)" title="Full screen (F)" aria-pressed="false"><svg class="in" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg><svg class="out" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg></button>
 <div id="howto" class="hidden" role="dialog" aria-modal="true" aria-labelledby="hwTitle">
@@ -429,14 +435,14 @@
       <tr class="touchonly"><td>⚔</td><td>Slash. Tap again right after a chop for a sweep.</td></tr>
       <tr class="touchonly"><td>✦</td><td>Throw a ninja star, if you have any.</td></tr>
       <tr class="touchonly"><td>💬</td><td>Chat: type a line and send it; everyone sees it above your head.</td></tr>
-      <tr class="touchonly"><td>? · ✕</td><td>This screen · leave the fight. At the top right: ♪ turns the music on or off, the speaker mutes all sound (each crossed out and lit up while off).</td></tr>
+      <tr class="touchonly"><td>? · ✕</td><td>This screen · leave the fight. At the top right: ♫ turns the music on or off, the speaker mutes all sound (each crossed out and lit up while off).</td></tr>
     </table>
     <h3>Fighting</h3>
     <p>You have 100 HP. A chop does 34 damage and a sweep 25. For a moment after respawning you flash and can't be hurt, until you attack.</p>
     <h3>Long swords</h3>
     <p>A glowing blade sometimes appears in the arena. Walk into it to take it: your sword reaches further until you die. A ninja with a long sword carries a longer, glowing scabbard. When they are killed the sword drops where they fell, and anyone can take it. Slash a sword lying on the ground to smash it.</p>
     <h3>Ninja stars</h3>
-    <p>Spinning stars appear often. Each pickup gives 5, 10 or 15 (the number floats over it; big bundles are rarer), and you can carry 30. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
+    <p>Spinning stars appear often. Each pickup gives 3, 5, 10 or 15 (the number floats over it; big bundles are rarer), and you can carry 30. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
     <h3>Rooms</h3>
     <p>The first screen lists the open rooms (at most 10), each with its admin (★) and how many are fighting (of 8). Tap one to open it: pick a name and colour, then Fight or Watch. If it is full you wait in its queue. ← Rooms goes back to the list.</p>
     <p>Create a room at the bottom of the list (the name is optional): you are its admin and land on its screen, where you can rename it and add or remove AI players (they take slots) before you press Fight. Going back to the list before anyone has joined closes it again. The admin also has the room settings (D, on a keyboard): gravity, jumps, speeds, damage, gore and the blood style, for everyone in the room until it closes. With the small Make admin button next to a player, or next to someone in the lobby of the room ("In the lobby"), you hand the role to someone else (it asks first); while others are playing in the room you must do that before you leave it. If the admin's connection is lost for good, the player who has been there longest takes over, else whoever has been looking at the room longest. A room closes when nobody is left in it or looking at it.</p>
@@ -467,6 +473,14 @@
     <button id="admNo" type="button">Cancel</button><button id="admYes" type="button">Confirm</button>
   </div>
 </div>
+<div id="rnm" class="hidden" role="dialog" aria-modal="true" aria-labelledby="rnmText">
+  <div class="box">
+    <p id="rnmText">Rename the room</p>
+    <input id="lRenameIn" type="text" maxlength="20" autocomplete="off" spellcheck="false" aria-label="Room name">
+    <div id="rnmErr"></div>
+    <button id="rnmNo" type="button">Cancel</button><button id="lRenameBtn" type="button">Rename</button>
+  </div>
+</div>
 <div id="upd" class="hidden" role="alertdialog" aria-modal="true" aria-labelledby="updText">
   <div class="box">
     <p id="updText"><b>The game was updated</b> and this match can't continue on your version. Press OK to load the new version.</p>
@@ -488,14 +502,13 @@
     </div>
     <!-- screen 2: one room, like the old single-arena lobby -->
     <div id="scrRoom" class="hidden">
-      <div id="lRoomHead"><span id="lRoomTitle"></span><button id="lBack" type="button">Leave</button></div>
+      <div id="lRoomHead"><span id="lRoomTitle"></span><button id="lRenameOpen" class="hbtn hidden2" type="button">Rename</button><button id="lBack" class="hbtn" type="button">Leave</button></div>
       <label for="lName">Name</label>
       <input id="lName" type="text" maxlength="16" autocomplete="off" spellcheck="false" placeholder="ninja name">
       <label>Colour</label>
       <div id="lColors"></div>
       <div id="lActs"><button id="lFight">FIGHT</button><button id="lWatch" type="button">WATCH</button></div>
       <div id="lInfo"></div>
-      <div id="lRenameRow" class="rowin"><input id="lRenameIn" type="text" maxlength="20" autocomplete="off" spellcheck="false" placeholder="room name" aria-label="Room name"><button id="lRenameBtn" type="button">RENAME</button></div>
       <div id="lBots"><label><span class="dot"></span>AI players</label><span id="lBotRO"></span><div class="ctl"><button id="lBotDec" type="button" aria-label="Fewer AI players">−</button><span id="lBotN" aria-live="polite">0</span><button id="lBotInc" type="button" aria-label="More AI players">+</button></div></div>
       <label>In the room</label>
       <ul id="lPlayers"></ul>

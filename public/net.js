@@ -2,7 +2,7 @@
 // backoff and resume, clock sync, client-side prediction with reconciliation for the local player,
 // and interpolation of remote players 100 ms in the past.
 import * as Sim from '/shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, PW, PH, KEY, FX } from '/shared/constants.js';
+import { NET, TICK_MS, PW, PH, KEY, FX, cfgDiff, cfgFromDiff } from '/shared/constants.js';
 import { LEVEL } from '/shared/level.js';
 import { dbg, dbgv, sendReport, setWordId, setLogSink } from './debug.js';
 import { isWordId } from '/shared/logid.js';
@@ -33,8 +33,9 @@ const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).
 
 // Rooms (SPEC §17): onRefused({what, why}) for a request the server turned down, onClosed({room, name,
 // why}) when the room we looked at closed, onRoom(id) when the room whose world we see changes (the
-// game then clears what it drew of the old one).
-export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {}, onMadeAdmin = () => {} } = {}) {
+// game then clears what it drew of the old one). onCfg(ev) when the room's settings (SPEC §17.1)
+// changed: ev is the server's `cfg` event, or null when they came with a welcome or lobby message.
+export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = () => {}, onRefused = () => {}, onClosed = () => {}, onRoom = () => {}, onMadeAdmin = () => {}, onCfg = () => {} } = {}) {
   const net = {
     id: null, state: 'idle', mode: 'viewer',           // viewer (lobby) | play | queue
     token: null, kickReason: null, queuePos: 0, cap: NET.maxPlayers,
@@ -47,7 +48,19 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       predErr: [], predErrSum: 0, predErrN: 0, snaps_: 0, extrapolating: false, corrections: 0, snapsSnapped: 0 },
     serverTick: 0,
     word: lsWord(),                                    // log word id: offered on connect, set by the welcome
+    // the settings of the room we look at (SPEC §17.1): the sim constants prediction must use (the
+    // server steps the room with exactly these) and the room-wide display switches (gore, blood style)
+    cfg: cfgFromDiff({}),
   };
+  let cfgSig = '{}';
+  // Take the room's settings from a diff against ROOM_DEFAULTS (welcome, lobby or `cfg` event).
+  function setCfg(diff, ev = null) {
+    const cfg = cfgFromDiff(diff), sig = JSON.stringify(cfgDiff(cfg));
+    if (sig === cfgSig && !ev) return;
+    cfgSig = sig; net.cfg = cfg;
+    dbg('life', 'room settings', { n: Object.keys(cfgDiff(cfg)).length, ...(ev && ev.reset ? { reset: true } : {}) });
+    onCfg(ev);
+  }
   if (net.word) setWordId(net.word);
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
@@ -194,6 +207,9 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   net.rename = function rename(name) { dbg('life', 'rename room', { len: name.length }); send({ t: 'rename', name }); };
   net.makeAdmin = function makeAdmin(id) { dbg('life', 'make admin', { id }); send({ t: 'admin', id }); };
   net.isAdmin = () => !!net.lobby.mine;
+  // Admin only (the server checks): change the room's settings ({key: value}) or reset them (SPEC §17.1).
+  net.setCfg = function setCfgMsg(set) { dbg('life', 'room setting', { keys: Object.keys(set).join(',') }); send({ t: 'cfg', set }); };
+  net.resetCfg = function resetCfg() { dbg('life', 'room settings reset'); send({ t: 'cfg', reset: true }); };
   // Forget what we drew of the room we looked at (another room, or none, is coming).
   function resetView() {
     snaps.length = 0; evq.length = 0; taken.clear(); arrOff = null; walk.clear();
@@ -281,7 +297,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     for (const p of m.players) net.meta.set(p.id, { ...p });
     for (const q of m.queue) if (!net.meta.has(q.id)) net.meta.set(q.id, { ...q, score: 0, deaths: 0 });
     net.meta.set(m.id, { ...(net.meta.get(m.id) || { score: 0, deaths: 0 }), id: m.id, name: m.name, color: m.color });
-    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap, mine: m.admin === m.id });
+    onLobbyMsg({ ...net.lobby, room: m.room, rname: m.rname, admin: m.admin, players: m.players, queue: m.queue, cap: m.cap, mine: m.admin === m.id, cfg: m.cfg });
     dbg('life', m.state === 'play' ? 'in arena' : 'queued', { id: m.id, queuePos: m.queuePos, resumed: m.resumed });
     if (wasDrop) sendReport('auto', 'reconnected after drop');
     status('open');
@@ -296,6 +312,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       room, rname: m.rname ?? null, admin: m.admin ?? null, mine: !!m.mine,
       players: m.players || [], queue: m.queue || [], cap: m.cap || net.cap,
       bots: Number.isInteger(m.bots) ? m.bots : net.lobby.bots, botMax: Number.isInteger(m.botMax) ? m.botMax : net.lobby.botMax };
+    // the room's settings come with every lobby message (none from an older server: the defaults)
+    setCfg(room ? m.cfg : null);
     if (net.lobby.mine && net.id == null && room) viewWant = room;   // our new room (create), looked at after a reconnect too
     for (const p of net.lobby.players) net.meta.set(p.id, { ...(net.meta.get(p.id) || {}), ...p });
     if (net.id != null && net.mode === 'queue') {
@@ -335,6 +353,8 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         if (e.id === net.id) dbg('life', 'made admin', { why: e.why });
         onLobby(net.lobby);
         if (e.id != null && e.id === net.id) onMadeAdmin(e);   // tell them, in the lobby or in game
+      } else if (e.type === 'cfg') {      // the admin changed the room's settings (SPEC §17.1)
+        setCfg(e.cfg, e);
       } else if (e.type === 'room') {     // the admin renamed the room
         net.lobby.rname = e.name;
         for (const r of net.lobby.rooms) if (r.id === e.id) r.name = e.name;
@@ -406,7 +426,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     pending = pending.filter(p => p.seq > m.seq);
     localThrows = localThrows.filter(t => t > m.seq);   // throws up to m.seq are already in me.stars
     const world = { tick: m.tick, rng: 1, players: obstacles(m.tick, me) };
-    for (const p of pending) Sim.predictStep(world, me.id, p.keys, { cfg: DEFAULTS, level: LEVEL });
+    for (const p of pending) Sim.predictStep(world, me.id, p.keys, { cfg: net.cfg, level: LEVEL });
     net.me = me;
     if (!before || !before.alive || !me.alive) { smooth = { x: 0, y: 0, n: 0 }; return; }
     const ex = before.x + smooth.x * smooth.n / NET.smoothFrames - me.x;
@@ -446,7 +466,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       pending.push({ seq, keys });
       if (pending.length > PENDING_MAX) pending.shift();
       const world = { tick: 0, rng: 1, players: obstacles(0, net.me) };
-      Sim.predictStep(world, net.me.id, keys, { cfg: DEFAULTS, level: LEVEL });
+      Sim.predictStep(world, net.me.id, keys, { cfg: net.cfg, level: LEVEL });
       // A throw is not predicted (no star, no count change: both come from the server), but its
       // sound and arm flick play at once: the FX bit is set when the press would be accepted.
       localThrowCd = Math.max(0, localThrowCd - 1);
@@ -456,7 +476,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       // cooldown, and take off the stars of our throws the server has not processed yet (seq > the
       // snapshot's m.seq; reconcile drops the rest, which me.stars already counts).
       if ((keys & KEY.THROW) && !(prevKeys & KEY.THROW) && me.alive && (me.stars | 0) - localThrows.length > 0 && me.stun <= 0 && localThrowCd <= 0) {
-        me.fx |= FX.THROW; localThrowCd = DEFAULTS.throwCd; localThrows.push(seq);
+        me.fx |= FX.THROW; localThrowCd = net.cfg.throwCd; localThrows.push(seq);
       }
     }
     prevKeys = keys;

@@ -9,7 +9,7 @@
 // AI players (SPEC §15) are records with `bot: true` and no connection; server/ai.js drives them.
 import { randomBytes } from 'node:crypto';
 import * as Sim from '../shared/sim.js';
-import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName, cleanChat, cleanRoomName, defaultRoomName, CHAT, BOT, ROOM } from '../shared/constants.js';
+import { DEFAULTS, NET, TICK_MS, COLORS, KEY_MASK, cleanName, cleanChat, cleanRoomName, defaultRoomName, CHAT, BOT, ROOM, SETTING_KEYS, cleanSetting, cfgDiff } from '../shared/constants.js';
 import { navOf } from './ai.js';
 import { createLogStore } from './logs.js';
 import { isWordId, LOG } from '../shared/logid.js';
@@ -17,7 +17,8 @@ import { Room, r2 } from './room.js';
 
 // 2: rooms (SPEC §17). hello needs a room id; create, view, rename and admin are new; bots is admin-only.
 // 3: create no longer joins (its connection is the room's pending admin); lobby carries `mine`.
-export const PROTOCOL = 3;
+// 4: room settings (SPEC §17.1): `cfg` message (admin only), `cfg` event, cfg in welcome and lobby.
+export const PROTOCOL = 4;
 const MAX_QUEUED_INPUTS = 12;                       // ~200 ms of buffered inputs per player
 const LOBBY_MIN_MS = 500;                           // lobby broadcasts are coalesced to 2/s
 const PING_RATE = 10;                               // non-input messages per second
@@ -207,6 +208,7 @@ export class Arena {
       case 'view': return this.onView(conn, m);
       case 'rename': return this.onRename(conn, m);
       case 'admin': return this.onAdmin(conn, m);
+      case 'cfg': return this.onCfg(conn, m);
       case 'leave': return this.onLeave(conn);
       case 'chat': return this.onChat(conn, m);
       case 'bots': return this.onBots(conn, m);
@@ -449,7 +451,7 @@ export class Arena {
     const room = rec.room;
     this.send(conn, { t: 'welcome', v: PROTOCOL, b: this.build, id: rec.id, token: rec.token, resumed, state: rec.state,
       name: rec.name, color: rec.color, tick: this.tickNo, queuePos: room.queuePos(rec),
-      room: room.id, rname: room.name, admin: room.adminId,
+      room: room.id, rname: room.name, admin: room.adminId, cfg: cfgDiff(room.cfg),
       players: room.roster(), queue: room.queueList(), cap: this.maxPlayers });
     this.send(conn, this.lobbyMsg(conn));
   }
@@ -501,6 +503,29 @@ export class Arena {
     room.broadcastEvents([room.setAdmin(to, 'transfer', conn)]);
   }
 
+  // {t:'cfg', set: {key: value, …}} or {t:'cfg', reset: true}: the admin changes its room's settings
+  // (SPEC §17.1). A message of the wrong shape (no or both of set/reset, set not a plain object of
+  // 1..all keys, a value that is neither a number nor a boolean) is a `malformed` kick. Only the
+  // room's admin (playing or pending) may send it: anyone else gets `refused` cfg/admin. A key outside
+  // the allowlist or a value outside its range or off its step grid refuses the whole message
+  // (cfg/value). Own bucket per connection (ROOM.cfgBurst, one more every ROOM.cfgRefillMs). The
+  // change goes to the room's viewers as a `cfg` event and applies from the next tick.
+  onCfg(conn, m) {
+    const hasSet = m.set !== undefined, hasReset = m.reset !== undefined;
+    if (hasSet === hasReset || (hasReset && m.reset !== true)) return this.kick(conn, 'malformed');
+    if (hasSet) {
+      if (!m.set || typeof m.set !== 'object' || Array.isArray(m.set)) return this.kick(conn, 'malformed');
+      const ks = Object.keys(m.set);
+      if (!ks.length || ks.length > SETTING_KEYS.length || ks.some(k => !['number', 'boolean'].includes(typeof m.set[k]))) return this.kick(conn, 'malformed');
+    }
+    if (!take(conn, 'cfgBucket', ROOM.cfgBurst, ROOM.cfgRefillMs, this.now())) { this.dropped(conn); return this.refuse(conn, 'cfg', 'rate'); }
+    const room = this.adminRoom(conn);
+    if (!room) return this.refuse(conn, 'cfg', 'admin');
+    if (hasSet && Object.keys(m.set).some(k => cleanSetting(k, m.set[k]) === undefined)) return this.refuse(conn, 'cfg', 'value');
+    const ev = room.applyCfg(hasSet ? m.set : null, hasReset, conn);
+    if (ev) { room.broadcastEvents([ev]); this.lobbyDirty = true; }
+  }
+
   onInput(conn, m) {
     const rec = conn.rec;
     const batch = Array.isArray(m.keys) ? m.keys : [m.keys];
@@ -534,7 +559,7 @@ export class Arena {
     const room = conn.room;
     let detail;
     if (room) detail = cache ? cache[room.id] || (cache[room.id] = room.detail()) : room.detail();
-    else detail = { room: null, rname: null, admin: null, players: [], queue: [], cap: this.maxPlayers, bots: 0, botMax: Math.max(0, this.maxPlayers - 1) };
+    else detail = { room: null, rname: null, admin: null, players: [], queue: [], cap: this.maxPlayers, bots: 0, botMax: Math.max(0, this.maxPlayers - 1), cfg: {} };
     // mine: this connection is the admin of the room it looks at (pending, or as its player)
     const mine = !!room && (room.adminConn === conn || (!!conn.rec && conn.rec.room === room && room.adminId === conn.rec.id));
     return { t: 'lobby', rooms, maxRooms: this.maxRooms, ...detail, mine };

@@ -18,8 +18,8 @@ export const ATK_LEN = 12;     // ticks a swing lasts
 export const ATK_CD = 16;      // ticks between swings
 export const COMBO_T = 40;     // ticks after a chop in which the next swing is a sweep
 
-// The full tunable set. The sim reads everything through a cfg object of this shape, so a client
-// debug panel can edit a copy; the server always uses these defaults.
+// The full tunable set. The sim reads everything through a cfg object of this shape: the offline
+// debug panel edits a copy, and online every room has its own (SPEC §17.1), edited by its admin.
 export const DEFAULTS = Object.freeze({
   // NinjaRunner movement
   gravity: .27, jumpVel: 7.2, jumpSpeedBonus: .25, releaseGravity: .8, maxFall: 7,
@@ -43,8 +43,76 @@ export const DEFAULTS = Object.freeze({
   throwCd: 5, starSpeed: 6, starDmg: 20, starKnockX: 1.6, starKnockY: -1.6,
 });
 
+// Room settings (SPEC §17.1). Every room has its own cfg: DEFAULTS plus these room-wide display
+// switches, which the room's admin edits from the D panel and every page in the room applies.
+export const VIEW_DEFAULTS = Object.freeze({ gore: true, realGore: false });
+export const ROOM_DEFAULTS = Object.freeze({ ...DEFAULTS, ...VIEW_DEFAULTS });
+// The editable sim constants, grouped as the panel shows them: [key, label, min, max, step]. The
+// server accepts a value only inside [min, max] and on the step grid (cleanSetting), so the client's
+// sliders and the server agree.
+export const SETTINGS = Object.freeze([
+  ['Jump', [
+    ['jumpVel', 'Jump strength', 2, 12, .1],
+    ['jumpSpeedBonus', 'Run-jump bonus', 0, 1, .05],
+    ['gravity', 'Gravity', .1, 1, .01],
+    ['releaseGravity', 'Short-hop gravity', .1, 2, .05],
+    ['maxFall', 'Max fall speed', 2, 15, .5],
+    ['coyote', 'Coyote time (frames)', 0, 20, 1],
+    ['jumpBuffer', 'Jump buffer (frames)', 0, 20, 1],
+  ]],
+  ['Movement', [
+    ['walkSpeed', 'Walk speed', .5, 5, .1],
+    ['runSpeed', 'Run speed', .5, 6, .1],
+    ['groundAccel', 'Ground accel', .02, 1, .02],
+    ['airAccel', 'Air accel', .02, 1, .02],
+    ['groundFriction', 'Ground friction', .5, 1, .01],
+    ['airFriction', 'Air friction', .8, 1, .01],
+    ['pushDamp', 'Body contact damping', 0, 1, .05],
+  ]],
+  ['Combat', [
+    ['chopDmg', 'Chop damage', 0, 100, 1],
+    ['sweepDmg', 'Sweep damage', 0, 100, 1],
+    ['knockX', 'Knockback x', 0, 8, .25],
+    ['knockY', 'Knockback y', -8, 0, .25],
+    ['hitStun', 'Hit-stun (ticks)', 0, 40, 1],
+    ['spawnIframes', 'Spawn protection (ticks)', 0, 240, 5],
+    ['respawnTicks', 'Respawn delay (ticks)', 10, 300, 5],
+  ]],
+]);
+// The room-wide on/off switches: [key, label].
+export const SETTING_TOGGLES = Object.freeze([['gore', 'Gore (blood, body pieces)'], ['realGore', 'Real gore (red blood, not neon)']]);
+const SETTING_RANGE = new Map([
+  ...SETTINGS.flatMap(([, items]) => items.map(([k, , min, max, step]) => [k, { min, max, step }])),
+  ...SETTING_TOGGLES.map(([k]) => [k, { bool: true }]),
+]);
+export const SETTING_KEYS = Object.freeze([...SETTING_RANGE.keys()]);
+// The value the server stores for room setting `k`, or undefined: an unknown key, the wrong type,
+// outside [min, max] or off the step grid. A number on the grid is snapped (no float noise).
+export function cleanSetting(k, v) {
+  const r = typeof k === 'string' ? SETTING_RANGE.get(k) : undefined;
+  if (!r) return undefined;
+  if (r.bool) return typeof v === 'boolean' ? v : undefined;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < r.min - 1e-9 || v > r.max + 1e-9) return undefined;
+  const n = (v - r.min) / r.step, i = Math.round(n);
+  if (Math.abs(n - i) > 1e-6) return undefined;
+  return Math.round((r.min + i * r.step) * 1e6) / 1e6;
+}
+// A room's settings as sent to clients: only what differs from ROOM_DEFAULTS (over every DEFAULTS
+// key, so a server started with a non-default cfg is still described exactly).
+export function cfgDiff(cfg) {
+  const d = {};
+  for (const k in ROOM_DEFAULTS) if (cfg[k] !== ROOM_DEFAULTS[k]) d[k] = cfg[k];
+  return d;
+}
+// The full room cfg from such a diff; keys outside ROOM_DEFAULTS or of the wrong type are ignored.
+export function cfgFromDiff(d) {
+  const cfg = { ...ROOM_DEFAULTS };
+  if (d && typeof d === 'object') for (const k in ROOM_DEFAULTS) if (typeof d[k] === typeof ROOM_DEFAULTS[k]) cfg[k] = d[k];
+  return cfg;
+}
+
 // Long sword (SPEC §5.1): the holder's swordBoxOf length is scaled by this, for chop and sweep.
-// Not in DEFAULTS on purpose: the client debug panel edits cfg, and reach must match the server.
+// Not in DEFAULTS on purpose: the debug panel edits cfg, and reach must match the server.
 export const LONG_REACH = 1.6;
 // A pickup's body, centred on its item point's x and resting on the point's surface (y).
 export const ITEM_W = 8, ITEM_H = 14;
@@ -85,6 +153,7 @@ export function cleanName(s) {
 // the apostrophe (so the default "Ann's room" is a name one could type), 1-20 characters.
 export const ROOM = Object.freeze({ max: 10, perIp: 2, nameMax: 20,
   createBurst: 2, createRefillMs: 15000, editBurst: 4, editRefillMs: 2000,
+  cfgBurst: 6, cfgRefillMs: 1000,   // room-settings changes (SPEC §17.1): per connection, burst 6, one more a second
   pendingMs: 600000 });   // a room held open only by its pending admin closes after 10 min without an admin action
 export const ROOM_NAME_RE = /^[A-Za-z0-9 _'-]{1,20}$/;
 export function cleanRoomName(s) {

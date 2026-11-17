@@ -230,13 +230,14 @@ ARCHITECTURE.md    the code as implemented
 Port NinjaRunner's blood system: `blood` particles, `L.decals`, `L.pools` that grow into
 puddles, blood-stained spikes (`L.bloody`) and screen shake.
 
-**Two blood styles**, chosen in the debug panel and remembered in `localStorage`:
+**Two blood styles**, chosen in the debug panel (offline: remembered in `localStorage`; online: a room
+setting chosen by the room's admin, §17.1):
 - **Neon (the default):** NinjaRunner's multi-colour neon blood (`BLOOD = NEON_LIST`) with its
   glowing 'lighter' blend.
 - **Real gore:** a small palette of reds, bright for fresh spurts and fountains and darker
   crimson for pools and old decals, blended so stacked blood still reads as red.
 
-The style is purely a per-client look. It must not change the simulation: the same `kill.seed`
+The style is purely a look. It must not change the simulation: the same `kill.seed`
 gives the same particles, decals and pools in both styles, and switching style repaints the
 blood already on the arena.
 
@@ -255,7 +256,8 @@ blood already on the arena.
   client sees the same spatter. The server never simulates blood.
 - **Persistence:** decals and pools stay through respawns and fade out, each piece vanishing
   15 s (`BLOOD_TTL_TICKS` = 900 gore ticks) after it was created, fading smoothly over the last 2 s. Cap decals at 6000 and drop the oldest first. A late joiner starts with a clean arena.
-- A `CFG.gore` toggle is available in the debug panel and is on by default.
+- A gore toggle is available in the debug panel and is on by default. Online it is a room setting
+  (§17.1): when the room's admin turns gore off it is off on every page in that room.
 
 ## 8. Music (new, combat style)
 
@@ -328,7 +330,8 @@ reverb) but **fast and aggressive**:
   the new name; kill-feed and chat lines already shown keep the old one. The resume token is
   unchanged.
 - **D** toggles the debug panel: tunables, hitboxes, RTT and FPS, snapshot jitter, and a
-  prediction-error graph.
+  prediction-error graph. Online it is the room's settings panel and exists **only for the room's admin**
+  (§17.1): for anyone else D does nothing and the help line has no D hint. Offline it is unchanged.
 
 ## 10. Configuration and security
 
@@ -451,7 +454,8 @@ wrong for a player, without access to that player's browser.
   jitter, prediction-error RMS, reconnect count), the local player's state, and the ring
   buffer. It is capped at **16 KB**; the oldest entries are dropped to fit.
 - Reports are sent:
-  - **Manually**, from a "Send debug report" button in the debug panel. (The lobby's "Report a
+  - **Manually**, from a "Send debug report" button in the debug panel (online: the room's admin only,
+    §17.1). (The lobby's "Report a
     problem" link is gone: the streamed log, §13.5, covers that case, and the lobby shows the word
     id to quote instead.)
   - **Automatically** on an uncaught error, a kick, a refused resume, and after reconnecting
@@ -725,7 +729,7 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
   open rooms created from one address** (the client IP as in §10, `TRUST_PROXY` included). Creating is
   limited per connection (burst 2, then one per 15 s); renames and admin transfers share another bucket
   (burst 4, then one per 2 s); a request over a bucket is refused and counts toward the flood kick.
-- **Protocol** (version 3; an older page reloads through the build check, §10):
+- **Protocol** (version 4 since room settings, §17.1; an older page reloads through the build check, §10):
   - client → server: `{t:'create', room, name?}` (create a room named `room`, '' for the default; `name`
     is the creator's player name, optional; the sender becomes its pending admin and looks at it, and does
     not join); `{t:'hello', name, color, room: id}` (join; a resume `hello` with its token
@@ -738,11 +742,48 @@ Players fight in rooms instead of one global arena. (This replaces "one global a
     admin, pending or as its player); the join `welcome` carries `room`, `rname` and `admin`; `{t:'refused',
     what, why}` turns a request down without a kick (`create`: `full` | `ip` | `rate` | `name`; `join`:
     `gone`; `leave`: `admin`; `rename`: `admin` | `name` | `rate`; `admin`: `admin` | `target` | `rate`;
-    `bots`: `admin`); `{t:'closed', room, name, why}`; events `{type:'admin', id, from, why}` and
+    `bots`: `admin`; `cfg`: `admin` | `value` | `rate`); `{t:'closed', room, name, why}`; events `{type:'admin', id, from, why}` and
     `{type:'room', id, name}`.
 - **Debugging.** `/state` and `tools/debug.js state` show every room (id, name, admin, players, bots,
-  queue, watchers, pickups, its share of the tick); ring events and log lines of a room carry its id
-  (`room-create`, `room-rename`, `admin`, `room-close`, `refused-req` …); streamed client log entries are
+  queue, watchers, pickups, its settings as a diff against the defaults (`cfg`), its share of the tick); ring events and log lines of a room carry its id
+  (`room-create`, `room-rename`, `room-cfg`, `admin`, `room-close`, `refused-req` …); streamed client log entries are
   tagged with the room (§13.5). The admin listener stays loopback-only.
-- **Help.** How to play has a "Rooms" section; the lobby itself has no explanatory text.
+- **Help.** How to play has a "Rooms" section (it mentions the admin's D panel); the lobby itself has no explanatory text.
 - **CPU.** 10 rooms × 8 fighters (one human and 7 bots each) must stay well inside the 16.7 ms tick.
+
+### 17.1 Room settings
+
+Every room has its own settings, edited by its admin; they apply to everyone in the room and die with it.
+
+- **What they are.** The sim constants the debug panel has always shown (jump, movement and combat:
+  `jumpVel`, `jumpSpeedBonus`, `gravity`, `releaseGravity`, `maxFall`, `coyote`, `jumpBuffer`, `walkSpeed`,
+  `runSpeed`, `groundAccel`, `airAccel`, `groundFriction`, `airFriction`, `pushDamp`, `chopDmg`, `sweepDmg`,
+  `knockX`, `knockY`, `hitStun`, `spawnIframes`, `respawnTicks`) and two room-wide display switches, **gore**
+  (on/off) and **real gore** (the blood style, §7). The table of keys, labels, min, max and step lives in
+  `shared/constants.js` (`SETTINGS`, `SETTING_TOGGLES`, `cleanSetting`) so the client's sliders and the
+  server agree. A room starts from the server's cfg (normally `DEFAULTS`) with gore on and neon blood.
+- **Local, not room settings:** "Show hitboxes" (a view for the admin's own page, shown only while it
+  is the admin), the music volume, the FPS and net statistics and the prediction-error graph, and Send
+  debug report. Offline only: game speed (the server's one clock steps every room, so a per-room speed
+  is not offered), the dummy switches and Invincible.
+- **Who.** Only the room's admin (§17, pending or playing) has the panel: D opens it, for anyone else D
+  does nothing and the help line shows no D hint. There is no touch control for it. If the admin role
+  moves away while the panel is open, it closes. Offline (`?offline`) the panel is as before.
+- **Changing.** A slider is sent when let go (double-click: back to its default), a checkbox at once;
+  "Reset to defaults" puts the room back to its starting settings. Client → server `{t:'cfg', set:
+  {key: value, …}}` or `{t:'cfg', reset: true}`. A wrong shape (neither or both of set/reset, set not a
+  non-empty plain object, a value that is neither a number nor a boolean) is a `malformed` kick; anyone
+  but the room's admin gets `refused` cfg/admin; a key outside the table or a value outside its range or
+  off its step grid refuses the whole message (`refused` cfg/value); per connection burst 6, one more per
+  second (`refused` cfg/rate, counting toward the flood kick). A change applies from the next tick.
+- **Broadcast.** The room's settings travel as a diff against `ROOM_DEFAULTS` (`cfg: {key: value}`, `{}`
+  for the defaults) in the join `welcome`, in every `lobby` message for the room the page looks at, and in
+  the event `{type:'cfg', cfg, ch?, reset?}` (`ch`: what this change set) to every viewer of the room
+  (members and watchers). Client prediction uses the room's settings (the server steps the room with the
+  same ones), and every page applies gore and the blood style at once. Every page in the room shows one
+  quiet italic line in the chat list for a change ("Admin set gore off", "Admin set gravity 0.4", "Admin
+  reset the room settings").
+- **Lifetime.** Settings belong to the room: when it closes they are gone; a new room starts at the defaults.
+- **AI players.** The bots' route table (§15) depends on the movement constants only; it is cached per
+  level and per set of movement values (the 12 most recent), so a damage or gore change keeps it, and a
+  movement change builds a table for the new values on the next bot tick (~30 ms, once).

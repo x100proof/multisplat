@@ -55,6 +55,11 @@ from `/shared/*.js`.
   `itemMax 2`, `itemClear 32`, and the ninja-star tunables (SPEC §5.2): `starMinTicks 300`,
   `starMaxTicks 600` (5–10 s), `starMax 4`, `starCarry 30`, `throwCd 15`, `starSpeed 6`,
   `starDmg 20`, `starKnockX 1.6`, `starKnockY -1.6` (a small knockback).
+- Room settings (SPEC §17.1): `VIEW_DEFAULTS` (`gore: true, realGore: false`), `ROOM_DEFAULTS`
+  (`DEFAULTS` + those), `SETTINGS` (the panel's slider table, `[group, [[key, label, min, max, step]…]]`),
+  `SETTING_TOGGLES`, `SETTING_KEYS`, `cleanSetting(k, v)` (the stored value, snapped to the step grid,
+  or undefined: unknown key, wrong type, out of range, off the grid), `cfgDiff(cfg)` / `cfgFromDiff(d)`
+  (the wire form: only what differs from `ROOM_DEFAULTS`). `ROOM.cfgBurst 6`, `ROOM.cfgRefillMs 1000`.
 - `LONG_REACH = 1.6` (the holder's sword-box length factor) is a separate constant, not in `DEFAULTS`,
   because the offline debug panel edits `cfg` and reach must always match the server.
   `ITEM_W 8`, `ITEM_H 14` is a pickup's body (both kinds). `STAR_W 4`, `STAR_H 4` is a flying star's
@@ -242,8 +247,8 @@ gravity does not cut the knock-up short. Starting a swing clears `iframes`.
   snapshot needs it, or it should send it.
 - `predictStep` runs exactly the movement code that `step` runs (a test checks they match for a lone
   player). Other players are fixed obstacles in it.
-- A client may edit `cfg` (the debug panel does). An online client should use `DEFAULTS` so its
-  prediction matches the server.
+- A client may edit `cfg` (the offline debug panel does). An online client uses its room's settings
+  (`net.cfg`, SPEC §17.1), which the server steps the room with, so its prediction matches.
 
 ## Protocol (SPEC §6.1)
 
@@ -264,6 +269,9 @@ Client → server:
 { t: 'view', room /* id, or 0 = none */ }  // the room a lobby visitor looks at (roster, snapshots, events)
 { t: 'rename', name }                   // admin: rename the room (cleanRoomName)
 { t: 'admin', id }                      // admin: hand the role to human player `id` of the same room
+{ t: 'cfg', set: { key: value, … } } | { t: 'cfg', reset: true }
+                                        // admin: the room's settings (SPEC §17.1); allowlist + range + step
+                                        // (cleanSetting), else `refused` cfg/value; wrong shape: `malformed`
 { t: 'input', seq, keys }              // keys: bitmask, or an array of 1-3 masks for seq, seq+1, …
 { t: 'ping', id, ct /* client clock, echoed */ }
 { t: 'leave' }                          // give up the slot or queue place now; the socket stays as a viewer
@@ -319,6 +327,8 @@ render identical gore. There are also:
 { type: 'chat',  id, text }                  // a chat line, to the room's connections (viewers too); no position, so it is released at once
 { type: 'admin', tick, id, from, why }       // SPEC §17: the admin role moved ('transfer' or 'auto' at the old admin's release)
 { type: 'room',  tick, id, name }            // SPEC §17: the room was renamed
+{ type: 'cfg',   tick, cfg, ch?, reset? }     // SPEC §17.1: the room's settings changed; cfg = the whole new
+                                             // state as a diff against ROOM_DEFAULTS, ch = what this change set
 ```
 
 If a player leaves within `creditTicks` of being hit, it is first killed with `move: 'leave'`, so
@@ -382,6 +392,11 @@ is the viewers without a record there). Handlers:
   sends the welcome plus a lobby.
 - `onView`: a non-negative integer (else `malformed`); ignored for members; a pending admin looking
   away while humans are in its room is refused (`leave admin`); lobby at once.
+- `onCfg` (SPEC §17.1): shape checks (`malformed`), the per-connection `cfgBucket` (`refused` cfg/rate
+  + a flood drop), admin only (`adminRoom`, else `refused` cfg/admin), every key through `cleanSetting`
+  (else `refused` cfg/value, nothing applied), then `room.applyCfg(set, reset, conn)` and its `cfg` event
+  to the room's viewers; the lobby is marked dirty (its detail carries `cfg`). The join `welcome` carries
+  `cfg` too. `PROTOCOL` is 4.
 - `onRename` / `onAdmin`: type checks (`malformed`), the shared edit bucket (`editBucket`), admin only
   (`adminRoom(conn)`: the room whose `adminId` is the sender's record, or whose pending admin it is), then `cleanRoomName` (rename,
   event `{type:'room'}` to the room's viewers) or a target that is another human record of the room
@@ -484,6 +499,10 @@ else the queue), `activate`, `promote`, `freeColor` (unique among this room's fi
 `broadcastEvents` (to `viewers` only), `step(now)` (inputs, bots' keys, `Sim.step` with the rewind,
 history, events, a snapshot every 2nd tick), `drainBacklog`, `snapshot()` (to `viewers` only), `recView`
 and `adminView()`. Logs end in `room=<id>` and ring events carry `room`.
+Settings (SPEC §17.1): `baseCfg` (frozen: `VIEW_DEFAULTS` + the arena's cfg) and `cfg` (the room's own,
+a new frozen object per change, `baseCfg` itself after a reset), used by `activate`, `release` (credit),
+`step` (the sim and `botKeys`); `applyCfg(set, reset, by)` returns the `cfg` event (null if nothing
+changed) and logs `room-cfg`; `detail()` and `adminView()` carry `cfgDiff(cfg)`. They die with the Room.
 `release(rec, reason, by)` frees the slot, name and token as before and then applies the room rules:
 with no human left (`humans()`: records without `bot`, playing, queued or away) it calls
 `arena.closeRoom` (why `left` for a leave, else `empty`); when the admin went, `setAdmin(successor(),
@@ -635,7 +654,9 @@ U+FFFD, so a stored report cannot drive the terminal even if intake cleaning wer
   - The distance between the old and new prediction is the prediction error (`predErrRms()`,
     `resetPredErr()`). Under 2 units, the drawn position eases from the old one over 6 frames.
     Otherwise it snaps and logs to `sync`.
-  - Physics always use `DEFAULTS`.
+  - Physics use `net.cfg`, the room's settings (SPEC §17.1): `cfgFromDiff` of the `cfg` in the join
+    welcome, every lobby message (the defaults while looking at no room) and the `cfg` event;
+    `onCfg(ev)` tells the game (ev null for a welcome/lobby). `setCfg(set)` / `resetCfg()` send `cfg`.
 - **Ninja stars.** `unpack` reads the count (`p[12]`, 0 if absent), `unpackItems` the kind (`it[3]`,
   long if absent) and `unpackFlying` the stars in flight (`st`, none if absent), so an older server's
   snapshots still work. `me.stars` only ever comes from the server. `localTick` plays our own throw at
@@ -777,7 +798,13 @@ editable physics.
   - `blitTile` and the background/tile/rain parts of `render`,
   - `drawPip` (here `drawKanbei`), `drawTails`, `drawSword` and the `iframes` flashing,
   - the audio (`initAudio`, `audioOut`, `tone`, `noise`, `sfx`, `LITE_AUDIO`),
-  - the debug panel (`DBG_SPEC`, `buildDebug`, `toggleDebug`, `saveCfg`).
+  - the debug panel (`DBG_SPEC` = `SETTINGS` + offline game speed, `buildDebug`, `toggleDebug`, `saveCfg`).
+    Online it is the room's settings panel for the admin only (`panelOk()` = `net.isAdmin()`;
+    `syncPanel()` on every lobby update and room change closes it and hides the help line's D hint
+    (`#helpD`) otherwise). Sliders send on `change`, checkboxes at once (`panelSet`); the echo (`cfg`
+    event) reaches `onRoomCfg`, which copies gore/realGore into `roomView` (`viewCfg()`, `goreOn()`),
+    repaints if the blood style changed, rebuilds an open panel and adds a quiet `.sys` line to the chat
+    list (`sysLine`). Hitboxes (drawn online only while admin) and music volume stay in `CFG`.
 - **Ninja stars (§5.2).**
   - `drawStarItem`: a star pickup is a spinning four-pointed neon shuriken (`shuriken()`, white-pink
     with a magenta glow and a hole) hovering over a magenta light pool, inside a turning dashed violet
@@ -880,11 +907,12 @@ editable physics.
     - **real gore** (`CFG.realGore`): the reds (arterial to dark crimson, darker pools), the layer
       drawn normally (alpha .96); flying drops still use `'lighter'`, which keeps stacked red red.
 
-    The choice is the debug panel's "Real gore" checkbox (online too), saved with the other client
-    settings in `localStorage` (`multisplat-cfg`). `applyBloodStyle()` switches the palettes and
+    The choice is the debug panel's "Real gore" checkbox: offline saved with the other client
+    settings in `localStorage` (`multisplat-cfg`); online a room setting (SPEC §17.1) set by the admin. `applyBloodStyle()` switches the palettes and
     rebuilds the baked layer (and the stained-spike tile), so blood already on the arena is repainted.
     The style never reaches gore.js, so the particles, decals, pools and fingerprints are the same in
-    both. `__mp.gore.style` / `setStyle('neon'|'real')` read and set it; reports' `env.gore.style`
+    both. `__mp.gore.style` / `setStyle('neon'|'real')` read and set it (online `setStyle` is a page-local
+    test override, not saved or sent); reports' `env.gore.style`
     carries it. Player colours still tint headbands and glows.
 - **Music.** `initAudio` (on the first key, pointer or Fight) creates `music` unless `?nomusic`.
   M toggles `muted`, which silences both the SFX and the music. A hidden tab suspends the context.
@@ -1025,7 +1053,15 @@ editable physics.
   a non-array `e` kicked; the 6 + 1/s bucket and the flood kick; one-hour pruning of entries and
   ids; the per-id, id-count and byte caps; `/logs` and `/logs/<word|name|ip>` on the admin
   handler; `w` in reports and the server view.
-- `rooms.test.js` (SPEC §17; no sockets, fake clock): protocol 2 and the empty list, create (admin,
+- `roomcfg.test.js` (SPEC §17.1): the shared table (allowlist, range, step grid, defaults valid),
+  admin-only changes (pending and playing; refused for a member, a watcher and a former admin), unknown
+  key / bad value refused as a whole, malformed shapes kicked, the rate limit, `cfg` in the welcome, the
+  lobby and the event to members and watchers only, reset, a change moving that room's players and not
+  another's, settings dying with the room, a server started with its own cfg, the bots' route table
+  following movement changes only, determinism with a non-default cfg, and `public/net.js` run in Node
+  (a module hook for its `/shared/` imports, a fake WebSocket into an in-process Arena) predicting a jump
+  with the room's settings.
+- `rooms.test.js` (SPEC §17; no sockets, fake clock): protocol 4 and the empty list, create (admin,
   default and cleaned names, refusals), the room-name rule, 10 rooms / 2 per address / the create
   bucket, one room per connection, hello needs a room and `view`, 8 slots and a queue per room,
   isolation of snapshots, events and chat, per-room names and colours (and a freed name passed on in its
@@ -1083,6 +1119,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
 - `npm run test:multi` (`test/multiclient.js`) uses headless Chromium through playwright-core.
   Chromium comes from `PLAYWRIGHT_CHROMIUM`, playwright's own lookup, or the newest build in its
   cache. The test:
+  - (`roomSettingsTest`, SPEC §17.1) checks a non-admin's D opens nothing and shows no D hint, the
+    admin's panel turning gore off on every page of its room but not another room, a slider and Reset
+    reaching the others' `net.cfg`, and an admin hand-over closing the old admin's panel;
   - joins 3 players (Ash, Bea, Cy),
   - drives Ash and Bea with `test/bot.js` (down to the floor, jump the low centre block, meet on the
     left half, slash) until
@@ -1216,7 +1255,9 @@ Slower tests, run on their own (each starts its own server on a spare port, neve
   brain.delay)`; the `rewind` callback returns null for a bot. Grace expiry, idle kicks, the
   heartbeat and per-IP record counting all key on `rec.conn`/`rec.ip`, so they skip bots without
   special cases. `roster`, `joinEvent`, `recView` and `adminState` mark bots.
-  `server/ai.js`: `navOf(level, cfg)` (cached) cuts the level into surfaces (runs of standable
+  `server/ai.js`: `navOf(level, cfg)` (cached per level and per movement values, `navKey(cfg)`: the 14
+  movement constants, 12 kept LRU, so a room's movement change gets its own table on the next bot tick
+  and damage/gore changes keep it; SPEC §17.1) cuts the level into surfaces (runs of standable
   tiles), links them by simulating with `Sim.movePlayer` a standing and a running jump both ways
   from every 3 units of each surface plus a run off each end (`fly`), and keeps a first-hop table
   from a BFS per surface (about 25 ms, built in the `Arena` constructor). `newBrain(seed)` holds

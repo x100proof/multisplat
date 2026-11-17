@@ -134,6 +134,7 @@
      (top centre on touch, clear of the phone keyboard). Lines are plain text and fade after ~6 s. */
   #chatlist { position: absolute; left: .8em; bottom: .8em; width: min(26em, 46%); display: flex; flex-direction: column; gap: .15em;
               pointer-events: none; z-index: 6; font-weight: 700; font-size: clamp(10px, 1.6vw, 15px); text-shadow: 0 0 4px #000, 1px 1px 0 #000; }
+  #chatlist > div.sys { color: #9fb4c8; font-style: italic; background: rgba(5,3,10,.35); }
   #chatlist > div { background: rgba(5,3,10,.55); padding: .1em .5em; border-radius: 4px; color: #e6f3ff; overflow-wrap: anywhere;
                     animation: chatfade 1s linear 5s forwards; }
   @keyframes chatfade { to { opacity: 0; } }
@@ -366,7 +367,7 @@
   <div id="watch" class="hidden"><div class="txt"><div><span class="tag">WATCHING</span> <span id="wWho"></span><span id="wWhy"></span></div>
     <div class="hint"><span class="keyshelp">Click a ninja to follow them · ← → switch · ↓ leader · Esc lobby</span><span class="touchhelp">Tap a ninja to follow them</span></div></div>
     <button id="wLeader" type="button" aria-label="Follow the leader">LEADER</button><button id="wLobby" type="button" aria-label="Back to the lobby">LOBBY</button></div>
-  <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · C chat · D debug · F full screen · Esc leave · H how to play</div>
+  <div id="help">← → move · ↑ / Z jump · Shift run · Space slash · X throw star · Tab scores · C chat<span id="helpD"> · D debug</span> · F full screen · Esc leave · H how to play</div>
 </div>
 <div id="touch">
   <div class="grp"><button id="tL" aria-label="Left">◀</button><button id="tR" aria-label="Right">▶</button></div>
@@ -391,6 +392,7 @@
       <tr class="keysonly"><td>F · M · N</td><td>Full screen · mute all sound · music on or off (also the buttons at the top right).</td></tr>
       <tr class="keysonly"><td>Esc</td><td>Leave the fight (it asks first).</td></tr>
       <tr class="keysonly"><td>H</td><td>This screen.</td></tr>
+      <tr class="keysonly"><td>D</td><td>Room admin only: the room settings (jump, speed, damage, gore …). They change the room for everyone in it, until it closes.</td></tr>
       <tr class="keysonly"><td>Gamepad</td><td>Stick or d-pad to move, A jump, X or B slash, Y throw, bumpers run.</td></tr>
       <tr class="touchonly"><td>◀ ▶</td><td>Move. Tap » to switch running on or off.</td></tr>
       <tr class="touchonly"><td>⤒</td><td>Jump. Hold it longer to jump higher.</td></tr>
@@ -407,7 +409,7 @@
     <p>Spinning stars appear often. Each pickup gives 5, 10 or 15 (the number floats over it; big bundles are rarer), and you can carry 30. A thrown star flies straight ahead and does 20 damage. The number you hold shows above your head and next to your HP. You lose them when you die.</p>
     <h3>Rooms</h3>
     <p>The first screen lists the open rooms (at most 10), each with its admin (★) and how many are fighting (of 8). Tap one to open it: pick a name and colour, then Fight or Watch. If it is full you wait in its queue. ← Rooms goes back to the list.</p>
-    <p>Create a room at the bottom of the list (the name is optional): you are its admin and land on its screen, where you can rename it and add or remove AI players (they take slots) before you press Fight. Going back to the list before anyone has joined closes it again. With the small Make admin button next to a player you hand the role to someone else (it asks first); while others are in the room you must do that before you leave it. If the admin's connection is lost for good, the player who has been there longest takes over. A room closes when its last player leaves.</p>
+    <p>Create a room at the bottom of the list (the name is optional): you are its admin and land on its screen, where you can rename it and add or remove AI players (they take slots) before you press Fight. Going back to the list before anyone has joined closes it again. The admin also has the room settings (D, on a keyboard): gravity, jumps, speeds, damage, gore and the blood style, for everyone in the room until it closes. With the small Make admin button next to a player you hand the role to someone else (it asks first); while others are in the room you must do that before you leave it. If the admin's connection is lost for good, the player who has been there longest takes over. A room closes when its last player leaves.</p>
     <h3>Watching</h3>
     <p>Press Watch in the lobby to see the fight without joining: no name needed, and it takes no slot, so it works even when the room is full. The camera follows the leader. <span class="keysonly">Click a ninja to follow them, or use ← → to switch and ↓ to go back to the leader. Esc or the Lobby button takes you back to the lobby, where you can still press Fight.</span><span class="touchonly">Tap a ninja to follow them, and the Leader button to go back to following the leader. The Lobby button or ✕ takes you back to the lobby, where you can still press Fight.</span></p>
     <h3>Privacy</h3>

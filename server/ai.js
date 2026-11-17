@@ -37,12 +37,24 @@ export function newBrain(seed) {
 }
 
 // ---------- navigation ----------
+// The route table depends only on the level and the movement constants, so it is cached per level
+// under a key made of those values (not per cfg object): a room whose admin changes damage or gore
+// keeps its table, one whose movement changes (SPEC §17.1) gets a table built for the new values on
+// the next bot tick (~30 ms), and switching back to earlier values is free. At most NAV_KEEP tables
+// per level are kept (least recently used out).
+const NAV_KEYS = ['gravity', 'jumpVel', 'jumpSpeedBonus', 'releaseGravity', 'maxFall', 'walkSpeed', 'runSpeed',
+  'groundAccel', 'airAccel', 'groundFriction', 'airFriction', 'coyote', 'jumpBuffer', 'stunMoveMul'];
+const NAV_KEEP = 12;
 const navCache = new WeakMap();
+export const navKey = cfg => NAV_KEYS.map(k => cfg[k]).join(',');
 export function navOf(L = LEVEL, cfg = DEFAULTS) {
-  let byCfg = navCache.get(L);
-  if (!byCfg) navCache.set(L, byCfg = new WeakMap());
-  let nav = byCfg.get(cfg);
-  if (!nav) byCfg.set(cfg, nav = buildNav(L, cfg));
+  let byKey = navCache.get(L);
+  if (!byKey) navCache.set(L, byKey = new Map());
+  const key = navKey(cfg);
+  let nav = byKey.get(key);
+  if (nav) { byKey.delete(key); byKey.set(key, nav); return nav; }   // most recently used last
+  byKey.set(key, nav = buildNav(L, cfg));
+  while (byKey.size > NAV_KEEP) byKey.delete(byKey.keys().next().value);
   return nav;
 }
 

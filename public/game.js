@@ -431,6 +431,7 @@ function heldBits() {
 }
 addEventListener('keydown', e => {
   if (chatKey(e)) return;   // the chat box owns the keyboard while open; C opens it
+  if (updOpen) { if (e.code === 'Enter' || e.code === 'Space') location.reload(); e.preventDefault(); return; }   // the update dialog (SPEC §18): only OK
   if (admOpen) { if (e.code === 'Escape') { e.preventDefault(); admDialog(null); } return; }   // the confirm dialog: Enter presses the focused button (Cancel by default)
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') {   // Enter in a lobby or menu field does that field's job
     if (e.code === 'Enter') ({ lRoomName: createRoom, lRenameIn: () => renameRoom('lRenameIn') }[e.target.id] || fight)();
@@ -1407,6 +1408,8 @@ function hudOnline() {
   setText('hScore', m && !lobbyOpen ? `SCORE ${m.score}` : '');
   let msg = '', sub = '';
   if (staleBuild) msg = 'NEW VERSION · RELOADING…';
+  else if (updOpen) msg = '';
+  else if (net.restarting()) { msg = 'SERVER UPDATING…'; sub = 'your game continues in a moment'; }
   else if (net.state === 'reconnecting' || (net.state === 'connecting' && !lobbyOpen)) msg = 'RECONNECTING…';
   else if (!lobbyOpen && net.mode === 'queue') {
     msg = `ROOM FULL · QUEUE #${net.queuePos}`;
@@ -2164,20 +2167,46 @@ function drawChatBubble(p, px, py) {
   ctx.restore();
 }
 
-// ---------- versions (SPEC §10): a page older than the server reloads itself, once per build ----------
+// ---------- versions (SPEC §10, §18) ----------
+// The page's build id and rules hash come from its index.html (the server stamps both). net.js
+// compares them with every welcome (compareVersion): the same rules → the game goes on, even across
+// a server restart; other rules → net.onOutdated: a player's game stops with a message and OK reloads
+// into the lobby, a lobby viewer just reloads. Only the UI older (other build, same rules) → a quiet
+// reload the next time the page is on the room list with nothing typed (quietReload).
 const BUILD = (document.querySelector('meta[name="build"]') || {}).content || '';
-let staleBuild = false;
-if (net) net.build = BUILD;
-if (net) net.onStale = serverBuild => {
-  dbg('net', 'stale build', { page: BUILD, server: serverBuild });
+const RULES = (document.querySelector('meta[name="rules"]') || {}).content || '';
+let staleBuild = false, updOpen = false;
+if (net) { net.build = BUILD; net.rules = RULES; }
+// Reload at most once per server version (`key`), so a mismatch can never loop. false: already tried.
+function reloadOnce(key) {
   let done = null;
-  try { done = sessionStorage.getItem('mp.reloadedFor'); sessionStorage.setItem('mp.reloadedFor', serverBuild); } catch { /* no storage: reload anyway, once per page life */ }
-  if (done === serverBuild || net.onStale.fired) return;   // already tried for this build: never loop
-  net.onStale.fired = true;
-  document.getElementById('lStatus').textContent = 'New version, reloading…';
-  staleBuild = true;
+  try { done = sessionStorage.getItem('mp.reloadedFor'); sessionStorage.setItem('mp.reloadedFor', key); } catch { /* no storage: once per page life */ }
+  if (done === key || reloadOnce.fired) return false;
+  reloadOnce.fired = true;
   setTimeout(() => location.reload(), 600);
+  return true;
+}
+if (net) net.onOutdated = ({ playing, server }) => {
+  leaveMenu(false); if (admOpen) admDialog(null); if (chatOpen) chatScreen(false);
+  if (!playing && reloadOnce('r:' + server)) {
+    document.getElementById('lStatus').textContent = 'New version, reloading…';
+    staleBuild = true;
+    return;
+  }
+  // the game stops where it is (net sends and handles nothing more); the dialog says why
+  updOpen = true;
+  document.getElementById('upd').classList.remove('hidden');
+  document.getElementById('updOk').focus();
 };
+document.getElementById('updOk').addEventListener('click', () => location.reload());
+function quietReload() {
+  if (!net || !net.uiStale || net.halted() || !lobbyOpen || net.mode !== 'viewer' || net.lobby.room || updOpen) return;
+  const a = document.activeElement;
+  if (a && a.tagName === 'INPUT' && a.type === 'text' && a.value) return;   // something typed on the room list
+  if (reloadOnce('b:' + net.uiStale)) dbg('net', 'quiet reload for a newer UI', { page: BUILD, server: net.uiStale });
+  else net.uiStale = null;
+}
+if (net) setInterval(quietReload, 1000);
 
 function onNetStatus(s) {
   if (s === 'kicked') {
@@ -2188,9 +2217,11 @@ function onNetStatus(s) {
   if (s === 'expired') {   // reconnected after the 5 s resume window (a long network drop or a background tab)
     dbg('life', 'back to lobby', { reason: 'expired' });
     leaveMenu(false);
-    backToLobby(`Connection lost for over ${NET.graceMs / 1000} s: your slot and score were released. Press Fight to play again.`);
+    backToLobby(net.lostToRestart ? 'The server was updated and could not keep this game. Press Fight to play again.'
+      : `Connection lost for over ${NET.graceMs / 1000} s: your slot and score were released. Press Fight to play again.`);
   }
-  document.getElementById('lStatus').textContent = s === 'open' ? '' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…' : '';
+  document.getElementById('lStatus').textContent = s === 'open' ? '' : net.restarting() ? 'server updating…' : s === 'connecting' ? 'connecting…' : s === 'reconnecting' ? 'reconnecting…'
+    : '';
 }
 
 setTickSource(() => (ONLINE ? net.serverTick : state.tick));
@@ -2200,7 +2231,7 @@ setReportSource(() => {
   const me = ONLINE ? net.me : Sim.getPlayer(state, ME);
   return {
     token: ONLINE ? net.token : null,
-    env: { build: BUILD, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
+    env: { build: BUILD, rules: RULES, ua: navigator.userAgent, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
       touch: TOUCH_UI, audio: AC ? `${LITE_AUDIO ? 'lite' : 'full'} ${AC.state} ${AC.sampleRate}` : 'none',
       online: ONLINE, cfg: changed, ...(ONLINE ? { roomCfg: cfgDiff(net.cfg), admin: net.isAdmin() } : {}), page: location.pathname,
       music: music ? { state: music.state, ...music.rendered, muted, musicOff } : null,

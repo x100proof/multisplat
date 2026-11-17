@@ -12,6 +12,7 @@ const EXTRAP_TICKS = NET.extrapMs / TICK_MS;          // 6
 const SNAP_KEEP = 60;                                  // ~2 s of snapshots
 const PENDING_MAX = 120;
 const ERR_KEEP = 180;                                  // prediction-error samples for the graph
+const RESTART_MS = 40000;                              // how long to keep reconnecting to a restarting server (SPEC §18)
 const LS_WORD = 'multisplat-id';                       // the log word id (SPEC §13.5), kept per browser
 const lsWord = () => { try { const w = localStorage.getItem(LS_WORD); return isWordId(w) ? w : null; } catch { return null; } };
 
@@ -30,6 +31,19 @@ const unpackItems = it => (Array.isArray(it) ? it.filter(Array.isArray).map(a =>
   : { id: a[0], x: a[1], y: a[2], kind: 'long' })) : []);
 // Ninja stars in flight, from a snapshot's `st` ([[id, x, y, vx, owner]]); none from an older server.
 const unpackFlying = st => new Map(Array.isArray(st) ? st.filter(Array.isArray).map(a => [a[0], { id: a[0], x: a[1], y: a[2], vx: a[3], owner: a[4] }]) : []);
+
+// Can this page share a game with the server whose welcome is `m` (SPEC §18)? page: {rules, build}, the
+// page's own ids (from its index.html). 'same': yes, and it is the same build; 'ui': yes, only files
+// outside the rules (the UI) differ, so the page may reload quietly when nothing is lost; 'outdated':
+// no, the game must stop and the page reload. A server without a rules hash (older than SPEC §18)
+// is judged by the build id alone, as before.
+export function compareVersion(page, m) {
+  if (typeof m.r === 'string' && m.r) {
+    if (!page.rules || m.r !== page.rules) return 'outdated';
+    return m.b && page.build && m.b !== page.build ? 'ui' : 'same';
+  }
+  return m.b && page.build && m.b !== page.build ? 'outdated' : 'same';
+}
 
 // Rooms (SPEC §17): onRefused({what, why}) for a request the server turned down, onClosed({room, name,
 // why}) when the room we looked at closed, onRoom(id) when the room whose world we see changes (the
@@ -64,6 +78,12 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   if (net.word) setWordId(net.word);
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
+  // Restarts (SPEC §18): `restarting` from the server's {t:'restart'} or its NET.restartClose until the
+  // next welcome (the game stays frozen on its last frame meanwhile; reconnects are paced for
+  // RESTART_MS); `halted` once a welcome said this page's rules differ from the server's: nothing is
+  // sent or handled any more, and the page (game.js, net.onOutdated) reloads.
+  let restarting = false, restartUntil = 0, halted = false, resumeAfterRestart = false;
+  net.lostToRestart = false;                           // an `expired` resume right after a restart: the server couldn't keep the game
   let viewWant = 0;                                    // the room picked in the lobby (asked for again after a reconnect)
   let heardAt = 0;                                     // when the server last sent anything (heartbeat watchdog)
   // Inputs go out only after this socket's welcome: until then `seq` still counts the old session,
@@ -103,7 +123,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       clearInterval(pingTimer);
       ping(); pingTimer = setInterval(ping, NET.pingMs);
     };
-    sock.onmessage = e => { if (sock === ws && !frozen) { heardAt = performance.now(); onMessage(e.data); } };
+    sock.onmessage = e => { if (sock === ws && !frozen && !halted) { heardAt = performance.now(); onMessage(e.data); } };
     sock.onclose = e => { if (sock !== ws) return; if (frozen) frozen.close = e.code; else closed(e.code); };
   };
 
@@ -115,6 +135,19 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     clearInterval(pingTimer);
     dbg('net', 'close', { code });
     ws = null;
+    if (halted) return;
+    // The server is restarting (SPEC §18): keep the last frame (our player, the snapshots) and
+    // reconnect every ~0.7 s for RESTART_MS, resuming with our token as after a drop.
+    if (code === NET.restartClose || restarting) {
+      if (!restarting) { restarting = true; restartUntil = performance.now() + RESTART_MS; dbg('net', 'server restarting'); }
+      if (performance.now() < restartUntil) {
+        if (want) dropped = true;
+        status('restarting');
+        retryTimer = setTimeout(net.connect, 400 + Math.random() * 600);
+        return;
+      }
+      restarting = false;                              // too long: carry on as after any drop
+    }
     net.me = null; snaps.length = 0; arrOff = null;
     if (code === NET.timeoutClose) dbg('net', 'server closed a silent connection (heartbeat)');
     if (kicked || (code >= 4000 && code < 5000 && code !== NET.timeoutClose)) {
@@ -154,7 +187,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (document.hidden) return;
     watchdog();
     if (ws && ws.readyState === 1) ping();
-    else if (net.state === 'reconnecting') { attempts = 0; net.connect(); }
+    else if (net.state === 'reconnecting' || net.state === 'restarting') { attempts = 0; net.connect(); }
   });
 
   function send(obj) { if (!frozen && ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -254,6 +287,10 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
         dbg('life', 'room closed', { room: m.room, why: m.why });
         if (viewWant === m.room) viewWant = 0;
         return onClosed(m);
+      case 'restart':                                  // the server is about to restart (SPEC §18)
+        restarting = true; restartUntil = performance.now() + RESTART_MS;
+        dbg('net', 'server restarting');
+        return;
       case 'kick':
         kicked = true; net.kickReason = m.reason;
         dbg('net', 'kick', { reason: m.reason });
@@ -265,7 +302,13 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   function onWelcome(m) {
     if (m.cap) net.cap = m.cap;
     if (m.b) net.serverBuild = m.b;
-    if (m.b && net.build && m.b !== net.build && net.onStale) net.onStale(m.b);
+    if (typeof m.r === 'string') net.serverRules = m.r;
+    // Versions (SPEC §18). The first welcome on every socket (the connection welcome) is checked, so
+    // this runs before our resume's welcome can put us back in the game.
+    const v = compareVersion({ rules: net.rules, build: net.build }, m);
+    if (restarting) { restarting = false; resumeAfterRestart = !!want; }
+    if (v === 'outdated') return outdated(m);
+    if (v === 'ui' && net.uiStale !== m.b) { net.uiStale = m.b; dbg('net', 'ui older than the server', { page: net.build, server: m.b }); }
     if (isWordId(m.w) && m.w !== net.word) {             // the server's word id for this browser (SPEC §13.5)
       net.word = m.w;
       try { localStorage.setItem(LS_WORD, m.w); } catch { /* private mode: a new id each visit */ }
@@ -277,6 +320,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
       dropped = false; attempts = 0; live = false; seq = 0; pending = []; unsent = [];
       net.kickReason = 'expired';
+      net.lostToRestart = resumeAfterRestart; resumeAfterRestart = false;
       status('expired');
       status('open');
       return;
@@ -287,7 +331,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
       return;
     }
     const wasDrop = dropped;
-    dropped = false; attempts = 0;
+    dropped = false; attempts = 0; resumeAfterRestart = false; net.lostToRestart = false;
     if (sentToken && !m.resumed) { dbg('net', 'resume refused'); sendReport('auto', 'resume refused'); }
     if (sentToken && m.resumed) dbg('net', 'resume accepted', { id: m.id });
     net.id = m.id; net.token = m.token; net.mode = m.state; net.queuePos = m.queuePos;
@@ -302,6 +346,23 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (wasDrop) sendReport('auto', 'reconnected after drop');
     status('open');
   }
+
+  // This page can't play with the server any more (SPEC §18): its rules differ. Stop for good: the slot
+  // we may hold (a resume hello may already be on its way) is given up with `leave`, nothing more is
+  // sent or handled, and net.onOutdated({playing}) lets the game show why and reload. `playing`:
+  // there was a game to lose (we were in a room's arena or queue); a viewer has nothing to lose.
+  function outdated(m) {
+    const playing = net.id != null || !!want;
+    dbg('net', 'outdated: the server runs other rules', { page: net.rules, server: m.r ?? null, build: m.b ?? null, playing });
+    if (net.token || net.id != null) send({ t: 'leave' });
+    halted = true;
+    clearTimeout(retryTimer); clearInterval(pingTimer);
+    want = null; net.token = null; net.id = null; net.mode = 'viewer'; live = false; pending = []; unsent = [];
+    status('outdated');
+    if (net.onOutdated) net.onOutdated({ playing, server: m.r ?? m.b ?? null });
+  }
+  net.halted = () => halted;
+  net.restarting = () => restarting;              // the server said it is restarting and no welcome has come since
 
   function onLobbyMsg(m) {
     // bots / botMax (SPEC §15) come with every lobby message; a welcome's roster leaves them as they were

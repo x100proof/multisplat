@@ -2,17 +2,21 @@
 // player debug-report intake on POST /debug/report, and an optional loopback admin listener.
 //
 // All site-specific values come from the environment (SPEC §10): HOST, PORT, ALLOWED_ORIGINS,
-// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, NET_SIM, ITEM_SECS, STAR_SECS and ITEM_POINTS (the last four
-// for tests only, refused when NODE_ENV=production).
+// TRUST_PROXY, MAX_PER_IP, MAX_CONN, DEBUG_DIR, DEBUG_PORT, STATE_FILE, NET_SIM, ITEM_SECS, STAR_SECS,
+// ITEM_POINTS and RULES_HASH (the last five for tests only, refused when NODE_ENV=production).
+//
+// Restarts without losing games (SPEC §18): on SIGTERM or SIGINT every room is saved to STATE_FILE
+// (server/persist.js), every page is told the server is restarting (close code NET.restartClose),
+// and the process exits; the next server loads the file if its rules hash and shape hash match.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, sep, extname, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { Arena } from './arena.js';
 import { DEFAULTS, TICK_HZ } from '../shared/constants.js';
+import { readTree, buildId, rulesHash } from './version.js';
+import { computeShapeHash, loadState, saveState } from './persist.js';
 import { LEVEL } from '../shared/level.js';
 import { createDebug, createEventRing } from './debug.js';
 
@@ -35,6 +39,9 @@ export function loadConfig(vars = process.env) {
     maxConn: +vars.MAX_CONN || 40,
     debugDir: resolve(vars.DEBUG_DIR || join(ROOT, 'debug-reports')),
     debugPort: vars.DEBUG_PORT ? +vars.DEBUG_PORT : null,
+    // where the rooms are saved on a restart (SPEC §18); 'off' saves nothing
+    stateFile: vars.STATE_FILE === 'off' ? null : resolve(vars.STATE_FILE || join(ROOT, 'state', 'rooms.json')),
+    rulesHash: null,
     netSim: null,
     itemSecs: null,
     starSecs: null,
@@ -68,6 +75,13 @@ export function loadConfig(vars = process.env) {
     if (!idx.every(i => Number.isInteger(i) && i >= 0 && i < LEVEL.items.length)) throw new Error('ITEM_POINTS must be item point indexes');
     cfg.itemPoints = [...new Set(idx)];
   }
+  // RULES_HASH=x replaces the computed rules hash (SPEC §18), so a test can restart the server as if
+  // its shared code had changed.
+  if (vars.RULES_HASH) {
+    if (vars.NODE_ENV === 'production') throw new Error('RULES_HASH is for testing and is refused when NODE_ENV=production');
+    if (!/^[0-9a-z]{1,64}$/.test(vars.RULES_HASH)) throw new Error('RULES_HASH must be 1-64 of [0-9a-z]');
+    cfg.rulesHash = vars.RULES_HASH;
+  }
   return cfg;
 }
 
@@ -90,49 +104,44 @@ export function resolvePath(urlPath) {
   return full;
 }
 
-// Build id (SPEC §10): a short hash of everything under public/ and shared/, taken at start. It is
-// stamped into the served index.html and sent in every welcome, so a page left open across a deploy
-// can tell it is stale and reload itself.
-function hashTree(dirs) {
-  const h = createHash('sha256');
-  const walk = d => {
-    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const f = join(d, e.name);
-      if (e.isDirectory()) walk(f); else if (e.isFile()) { h.update(e.name); h.update(readFileSync(f)); }
-    }
-  };
-  for (const d of dirs) walk(d);
-  return h.digest('hex').slice(0, 10);
-}
-export const BUILD = hashTree([PUBLIC, SHARED]);
+// The static files are read once, at start, and served from memory (server/version.js): the build id
+// (SPEC §10) and the rules hash (SPEC §18) are taken of exactly these bytes, and a deploy rewriting
+// the working tree under a running server can't make it serve a page that mixes versions.
+const FILES = readTree(ROOT, ['public', 'shared']);
+export const BUILD = buildId(FILES);
+export const RULES = rulesHash(FILES);
 const INDEX = join(PUBLIC, 'index.html');
-const stampIndex = buf => Buffer.from(buf.toString('utf8')
-  .replace('<head>', `<head>\n<meta name="build" content="${BUILD}">`)
+// index.html carries both ids: <meta name="build">, <meta name="rules"> and game.js?v=<build>.
+const stampIndex = (buf, rules) => Buffer.from(buf.toString('utf8')
+  .replace('<head>', `<head>\n<meta name="build" content="${BUILD}">\n<meta name="rules" content="${rules}">`)
   .replace('src="game.js"', `src="game.js?v=${BUILD}"`));
 
 const HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-cache' };
 
-// Static GET/HEAD for public/ and shared/.
-export function handler(req, res) {
-  const send = (code, body, extra = {}) => {
-    res.writeHead(code, { ...HEADERS, 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...extra });
-    res.end(req.method === 'HEAD' ? undefined : body);
+// Static GET/HEAD for public/ and shared/, from memory. `rules`: the rules hash stamped into index.html.
+export function makeHandler({ rules = RULES } = {}) {
+  const files = new Map();
+  for (const f of FILES) {
+    const buf = f.full === INDEX ? stampIndex(f.buf, rules) : f.buf;
+    // no-cache + ETag: the browser asks every time and gets the new file or a 304
+    const etag = '"' + createHash('sha1').update(buf).digest('base64url').slice(0, 20) + '"';
+    files.set(f.full, { buf, etag, type: MIME[extname(f.full).toLowerCase()] || 'application/octet-stream' });
+  }
+  return function handler(req, res) {
+    const send = (code, body, extra = {}) => {
+      res.writeHead(code, { ...HEADERS, 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...extra });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    };
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, 'method not allowed\n', { Allow: 'GET, HEAD' });
+    const path = resolvePath(req.url || '/');
+    const f = path && files.get(path);
+    if (!f) return send(404, 'not found\n');
+    if (req.headers['if-none-match'] === f.etag) { res.writeHead(304, { ...HEADERS, ETag: f.etag }); return res.end(); }
+    res.writeHead(200, { ...HEADERS, ETag: f.etag, 'Content-Type': f.type, 'Content-Length': f.buf.length });
+    res.end(req.method === 'HEAD' ? undefined : f.buf);
   };
-  if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, 'method not allowed\n', { Allow: 'GET, HEAD' });
-  const file = resolvePath(req.url || '/');
-  if (!file) return send(404, 'not found\n');
-  stat(file)
-    .then(s => { if (!s.isFile()) throw new Error('not a file'); return readFile(file); })
-    .then(buf => {
-      if (file === INDEX) buf = stampIndex(buf);
-      // no-cache + ETag: the browser asks every time and gets the new file or a 304
-      const etag = '"' + createHash('sha1').update(buf).digest('base64url').slice(0, 20) + '"';
-      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ...HEADERS, ETag: etag }); return res.end(); }
-      res.writeHead(200, { ...HEADERS, ETag: etag, 'Content-Type': MIME[extname(file).toLowerCase()] || 'application/octet-stream', 'Content-Length': buf.length });
-      res.end(req.method === 'HEAD' ? undefined : buf);
-    })
-    .catch(() => send(404, 'not found\n'));
 }
+export const handler = makeHandler();
 
 // Client IP: the socket address, or X-Real-IP (set by your proxy) when TRUST_PROXY is set.
 export function clientIpOf(req, trustProxy) {
@@ -163,13 +172,25 @@ export async function startServer(cfg = loadConfig(), { log = console.log } = {}
     ...(cfg.starSecs ? { starMinTicks: Math.round(cfg.starSecs.min * TICK_HZ), starMaxTicks: Math.round(cfg.starSecs.max * TICK_HZ) } : {}),
   } : DEFAULTS;
   const level = cfg.itemPoints ? { ...LEVEL, items: cfg.itemPoints.map(i => LEVEL.items[i]) } : LEVEL;
-  const arena = new Arena({ build: BUILD, log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
+  const rules = cfg.rulesHash || RULES;
+  const arena = new Arena({ build: BUILD, rules, log, event: events.push, maxPerIp: cfg.maxPerIp, cfg: simCfg, level });
+  // Restarts (SPEC §18): the shape hash of what a save holds, then the rooms of the previous server
+  // if it saved any this server can run. A sample that can't be serialized turns persistence off.
+  let shapeHash = null;
+  try { shapeHash = computeShapeHash(); } catch (e) { log(`persist: off, the sample room does not serialize: ${e.message}`); }
+  log(`version build=${BUILD} rules=${rules}${rules !== RULES ? ' (RULES_HASH)' : ''} shape=${shapeHash || '-'}`);
+  if (cfg.stateFile && shapeHash) {
+    const r = loadState(arena, cfg.stateFile, { rulesHash: rules, shapeHash });
+    log(r.why ? `restore: none (${r.why})` : `restore: ${r.loaded} room(s)` + r.dropped.map(d => ` dropped room=${d.room} (${d.why})`).join(''));
+    for (const d of r.dropped) events.push('room-restore-dropped', null, d);
+  }
+  const serve = rules === RULES ? handler : makeHandler({ rules });
   const clientIp = req => clientIpOf(req, cfg.trustProxy);
   const debug = createDebug({ dir: cfg.debugDir, allowedOrigins: cfg.allowedOrigins, clientIp, arena, events, log });
 
   const http = createServer((req, res) => {
     if ((req.url || '/').split('?')[0] === '/debug/report') return debug.handleReport(req, res);
-    handler(req, res);
+    serve(req, res);
   });
   http.on('clientError', (err, socket) => socket.destroy());
 
@@ -270,6 +291,23 @@ export async function startServer(cfg = loadConfig(), { log = console.log } = {}
       for (const c of wss.clients) c.terminate();
       await Promise.all([new Promise(r => http.close(r)), admin ? new Promise(r => admin.close(r)) : null]);
     },
+    // A restart (SPEC §18): save every room, tell every page (close code NET.restartClose: reconnect
+    // and resume), stop listening, and resolve once the sockets have closed (at most waitMs).
+    async restart({ waitMs = 500 } = {}) {
+      // (synchronous from the save to the close: no tick runs in between)
+      if (cfg.stateFile && shapeHash) {
+        const t0 = performance.now();
+        try {
+          const r = saveState(arena, cfg.stateFile, { rulesHash: rules, shapeHash });
+          log(`save: ${r.rooms} room(s) in ${Math.round(performance.now() - t0)} ms` + r.failed.map(f => ` failed room=${f.room} (${f.err})`).join(''));
+        } catch (e) { log(`save failed: ${e.message}`); }
+      } else log('save: off');
+      arena.stop({ restart: true });
+      http.close(); if (admin) admin.close();
+      const t0 = performance.now();
+      while (wss.clients.size && performance.now() - t0 < waitMs) await new Promise(r => setTimeout(r, 20));
+      for (const c of wss.clients) c.terminate();
+    },
   };
 }
 
@@ -281,7 +319,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
       (cfg.netSim ? ` NET_SIM=${cfg.netSim.delayMs},${cfg.netSim.jitterPct}` : '') +
       (cfg.itemSecs ? ` ITEM_SECS=${cfg.itemSecs.min},${cfg.itemSecs.max}` : '') +
       (cfg.itemPoints ? ` ITEM_POINTS=${cfg.itemPoints.join(',')}` : ''));
-    const bye = sig => { console.log(`${sig}: shutting down`); s.close().then(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); };
+    // SIGTERM (systemctl stop/restart) or SIGINT: save the rooms and exit, well inside a second or two
+    let going = false;
+    const bye = sig => {
+      if (going) return; going = true;
+      console.log(`${sig}: saving and shutting down`);
+      setTimeout(() => process.exit(0), 1500).unref();
+      s.restart().catch(e => console.error(`multisplat: ${e.message}`)).finally(() => process.exit(0));
+    };
     process.on('SIGINT', bye); process.on('SIGTERM', bye);
   }, e => { console.error(`multisplat: ${e.message}`); process.exit(1); });
 }

@@ -340,6 +340,15 @@
     color: #d1f7ff; font: inherit; font-weight: 800; cursor: pointer; touch-action: manipulation; }
   #adm #admYes { border-color: #f9f871; color: #f9f871; }
   #adm button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
+  /* the game was updated and this page can't play on (SPEC §18): above everything, one OK */
+  #upd { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 11; background: rgba(5,3,14,.75); touch-action: none; }
+  #upd.hidden { display: none; }
+  #upd .box { width: min(400px, calc(100vw - 32px)); box-sizing: border-box; padding: 18px 20px; border: 2px solid #05d9e8; border-radius: 10px; background: rgba(13,8,32,.97);
+    box-shadow: 0 0 24px rgba(5,217,232,.35); text-align: center; color: #d1f7ff; font: 15px ui-monospace, Menlo, Consolas, monospace; }
+  #upd p { margin: 0 0 14px; } #upd b { color: #f9f871; }
+  #upd button { min-height: 44px; min-width: 110px; padding: 8px 16px; border-radius: 6px; border: 2px solid #f9f871; background: transparent;
+    color: #f9f871; font: inherit; font-weight: 800; cursor: pointer; touch-action: manipulation; }
+  #upd button:focus { outline: none; box-shadow: 0 0 12px currentColor; }
   /* a short screen (a phone on its side): tighter, and the room screen drops the big title so
      FIGHT is in view without scrolling */
   @media (max-height: 460px) {
@@ -434,6 +443,12 @@
   <div class="box">
     <p id="admText">Make <b id="admWho"></b> the admin of <b id="admRoom"></b>? You will lose admin.</p>
     <button id="admNo" type="button">Cancel</button><button id="admYes" type="button">Confirm</button>
+  </div>
+</div>
+<div id="upd" class="hidden" role="alertdialog" aria-modal="true" aria-labelledby="updText">
+  <div class="box">
+    <p id="updText"><b>The game was updated</b> and this match can't continue on your version. Press OK to load the new version.</p>
+    <button id="updOk" type="button">OK</button>
   </div>
 </div>
 <div id="lobby">

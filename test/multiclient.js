@@ -4,7 +4,8 @@
 // pickup (ITEM_SECS / ITEM_POINTS shorten the spawn timer and keep pickups on the floor) that
 // every page sees, that lengthens the holder's reach in a scripted check and is lost on death.
 // Also AI players, and spectator mode (watchTest, SPEC §16), and rooms (SPEC §17: create, join, admin
-// transfer, leaving as admin, renames, the 10-room limit). Every section runs in a room: its first
+// transfer, leaving as admin, renames, the 10-room limit), and restarts (restartTest, SPEC §18: a saved
+// game resumed in place across a server restart, and the update message under other rules). Every section runs in a room: its first
 // player creates one (openPlayer opts.create), later ones tap it in the list (opts.room). The lobby has
 // two screens: the room list (Create a room under it) and one room's screen (name, colour, FIGHT).
 //
@@ -858,7 +859,8 @@ async function staleBuildTest() {
   await page.goto(srv.url); await ready();
   const b = await page.evaluate(() => ({ page: __mp.net.build, server: __mp.net.serverBuild, meta: document.querySelector('meta[name="build"]').content }));
   assert.match(b.server, /^[0-9a-f]{10}$/); assert.equal(b.page, b.server); assert.equal(b.meta, b.server);
-  // pretend this page came from an older build, then reconnect as after a deploy: it reloads itself
+  // pretend this page came from an older build with the same rules (SPEC §18: only the UI changed),
+  // then reconnect as after a deploy: it is on the room list, so it reloads itself quietly
   await page.evaluate(() => { window.__marker = 1; __mp.net.build = 'deadbeef00'; __mp.net.drop(); });
   await page.waitForFunction(() => !window.__marker && window.__mp && __mp.net && __mp.net.state === 'open', null, { timeout: 10000 });
   await ready();
@@ -869,6 +871,63 @@ async function staleBuildTest() {
   assert.equal(await page.evaluate(() => window.__marker), 2, 'no second reload for the same build');
   log('stale build: the page reloaded itself once and does not loop');
   await ctx.close(); await srv.stop();
+}
+
+// Restarts without losing games (SPEC §18): two pages fight in a room; the server process is stopped
+// (SIGTERM: it saves the rooms to STATE_FILE) and started again on the same port and file. Same rules:
+// both pages show "SERVER UPDATING…" meanwhile, then resume in place (no reload) with the same ids and
+// scores and play on. Then a restart under other rules (RULES_HASH, tests only): the new server starts
+// empty, both games stop with the update message, and OK reloads into the lobby of the new version.
+async function restartTest() {
+  const dir = tempDir(); dirs.push(dir);
+  const file = join(dir, 'state', 'rooms.json');
+  let srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file }); servers.push(srv);
+  const A = await openPlayer(srv, 'Rex', 0, { create: 'Restart' }), B = await openPlayer(srv, 'Ria', 1, { room: A.room });
+  const both = [A, B];
+  for (const p of both) await p.page.evaluate(() => { window.__marker = 1; });
+  await installBot(A.page, { mode: 'fight', target: B.id });
+  await installBot(B.page, { mode: 'fight', target: A.id });
+  await waitFor(() => A.page.evaluate(() => __mp.events.some(e => e.type === 'kill')), { timeout: 30000, what: 'a kill before the restart' });
+  await stopBot(A.page); await stopBot(B.page);
+  const scores = p => p.page.evaluate(ids => ids.map(id => { const m = __mp.net.meta.get(id) || {}; return [m.score, m.deaths]; }), [A.id, B.id]);
+  await sleep(500);
+  const before = await scores(A);
+  assert.deepEqual(await scores(B), before);
+  assert.ok(before.some(([s]) => s > 0), 'somebody scored');
+  await srv.stop();
+  for (const p of both) await waitFor(() => p.page.evaluate(() => __mp.net.restarting() && /SERVER UPDATING/.test(document.getElementById('msg').textContent)), { what: `${p.name}: "server updating"` });
+  srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file, PORT: srv.port, DEBUG_PORT: srv.adminPort }); servers.push(srv);
+  assert.ok(srv.logs.some(l => /^restore: 1 room/.test(l)), 'the room was restored: ' + srv.logs.join(' | '));
+  for (const p of both) await waitFor(() => p.page.evaluate(id => __mp.net.state === 'open' && __mp.net.mode === 'play' && __mp.net.id === id && !!__mp.net.me && !__mp.lobbyOpen, p.id), { timeout: 15000, what: `${p.name} resumed` });
+  for (const p of both) {
+    assert.equal(await p.page.evaluate(() => window.__marker), 1, `${p.name} did not reload`);
+    assert.deepEqual(await scores(p), before, `${p.name}: the same scores`);
+  }
+  // they play on: the server's ticks come in, and a fight goes on to another kill
+  const k0 = await A.page.evaluate(() => __mp.events.filter(e => e.type === 'kill').length);
+  await installBot(A.page, { mode: 'fight', target: B.id });
+  await installBot(B.page, { mode: 'fight', target: A.id });
+  await waitFor(() => A.page.evaluate(k0 => __mp.events.filter(e => e.type === 'kill').length > k0, k0), { timeout: 30000, what: 'a kill after the restart' });
+  await stopBot(A.page); await stopBot(B.page);
+  log('restart, same rules: both pages resumed in place with their scores and fought on');
+
+  await srv.stop();
+  srv = await startServer({ DEBUG_DIR: dir, STATE_FILE: file, PORT: srv.port, DEBUG_PORT: srv.adminPort, RULES_HASH: 'otherrules' }); servers.push(srv);
+  assert.ok(srv.logs.some(l => /^restore: none \(rules hash/.test(l)), srv.logs.join(' | '));
+  for (const p of both) await waitFor(() => p.page.evaluate(() => !document.getElementById('upd').classList.contains('hidden')), { timeout: 15000, what: `${p.name}: the update message` });
+  for (const p of both) {
+    assert.match(await p.page.textContent('#updText'), /updated.*can't continue on your version/);
+    assert.equal(await p.page.evaluate(() => __mp.net.state), 'outdated');
+    assert.equal(await p.page.evaluate(() => window.__marker), 1, `${p.name} waits for OK`);
+  }
+  await A.page.click('#updOk');
+  await A.page.waitForFunction(() => !window.__marker && window.__mp && __mp.net && __mp.net.state === 'open' && __mp.lobbyOpen, null, { timeout: 10000 });
+  assert.equal(await A.page.evaluate(() => document.querySelector('meta[name="rules"]').content), 'otherrules');
+  await B.page.keyboard.press('Enter');                // Enter is OK too
+  await B.page.waitForFunction(() => !window.__marker && window.__mp && __mp.net && __mp.net.state === 'open', null, { timeout: 10000 });
+  log('restart, other rules: both games stopped with the update message; OK reloaded into the new version');
+  for (const p of both) await p.page.context().close();
+  await srv.stop();
 }
 
 // AI players (SPEC §15, §17): the admin's − / + change the count live for everyone looking at the room;
@@ -1317,6 +1376,7 @@ async function main() {
     await fullscreenTest();
     await phoneTest();
     await staleBuildTest();
+    await restartTest();
     await botTest();
     await watchTest();
     await roomsTest();

@@ -26,6 +26,8 @@ Environment=TRUST_PROXY=1
 Environment=MAX_PER_IP=4
 Environment=MAX_CONN=40
 Environment=DEBUG_DIR=/path/to/multisplat/debug-reports
+# Where the running games are saved on a restart (stop: SIGTERM to node, saved in milliseconds).
+Environment=STATE_FILE=/path/to/multisplat/state/rooms.json
 # Read-only admin listener for tools/debug.js. Always bound to 127.0.0.1. Never proxy it.
 Environment=DEBUG_PORT=3009
 # NET_SIM is a test-only latency simulator and is refused when NODE_ENV=production.
@@ -35,7 +37,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/path/to/multisplat/debug-reports
+ReadWritePaths=/path/to/multisplat/debug-reports /path/to/multisplat/state
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

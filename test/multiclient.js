@@ -605,7 +605,8 @@ async function heartbeatTest() {
   await A.page.evaluate(() => __mp.net.freeze(7000));
   await waitFor(async () => (await timeouts()).some(e => e.player === A.id), { timeout: 7000, what: 'heartbeat timeout' });
   await waitFor(() => B.page.evaluate(id => (__mp.net.meta.get(id) || {}).away === true, A.id), { timeout: 3000, what: 'Afk away for Bee' });
-  await waitFor(async () => { const v = await net(A.page); return v.state === 'open' && v.mode === 'play' && v.reconnects === 1; },
+  // (reconnects counts the socket opening; the welcome that confirms the resume comes a moment later)
+  await waitFor(async () => { const v = await net(A.page); return v.state === 'open' && v.mode === 'play' && v.reconnects === 1 && v.msgs.includes('resume accepted'); },
     { timeout: 6000, what: 'resume after the timeout' });
   a = await net(A.page);
   assert.equal(a.id, A.id, 'same id after the heartbeat resume');

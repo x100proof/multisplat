@@ -311,7 +311,7 @@
   #lCreateNote { font-size: 12px; color: #ff6ec7; margin-top: 4px; }
   #lCreateNote:empty { display: none; }
   #lRoomHead { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
-  #lRoomTitle { flex: 1; font-size: clamp(26px, 5vw, 36px); line-height: 1.15; font-weight: 800; color: #f9f871; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  #lRoomTitle { flex: 1; font-size: clamp(26px, 5vw, 36px); line-height: 1.15; font-weight: 800; color: #f9f871; overflow-wrap: anywhere;   /* names are at most 20 characters: wrap, never cut */
                  text-shadow: 0 0 10px rgba(249,248,113,.55), 2px 2px 0 #000; }   /* the room's name: the screen's heading */
   #lBack { min-height: 40px; font: inherit; font-size: 13px; font-weight: 700; color: #9ad8ff; background: transparent; border: 1px solid rgba(154,216,255,.45); border-radius: 6px; cursor: pointer; padding: 0 12px; touch-action: manipulation; white-space: nowrap; }
   #lBack:hover { background: rgba(154,216,255,.12); }

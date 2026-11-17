@@ -61,6 +61,9 @@ export class Arena {
     this.conns = new Set();
     this.recs = new Map();        // player id -> record, every room (ids are global and never reused)
     this.tokens = new Map();      // resume token -> record (never logged or stored)
+    // record -> the browser word id it joined from: a page reloaded without its token takes its own
+    // dropped record back (takeOver). Kept beside the records, so saves (SPEC §18) don't include it.
+    this.recWord = new WeakMap();
     this.botBucket = { tokens: BOT.globalBurst, at: now() };   // server-wide bot add/remove budget (all rooms)
     navOf(level, cfg);            // build the bots' route table now, not on the first + press
     this.nextId = 1; this.nextConn = 1;
@@ -370,19 +373,7 @@ export class Arena {
 
     // resume: the token is valid while the record exists (connected or within the grace period)
     const old = m.token && this.tokens.get(m.token);
-    if (old) {
-      if (old.conn) { const prev = old.conn; prev.rec = null; this.kick(prev, 'replaced'); }
-      old.conn = conn; old.ip = conn.ip; old.discAt = null; old.lastActive = this.now(); old.inputs.length = 0; this.resetInputs(old);
-      conn.rec = old;
-      this.setView(conn, old.room);
-      old.room.log(`resume conn=${conn.id} id=${old.id}`);
-      old.room.event('resume', conn.id, { player: old.id });
-      // A queued player who was away while a slot freed up was skipped by promote(): retry now.
-      if (old.state === 'queue') old.room.promote();
-      this.welcome(conn, old, true);
-      this.lobbyDirty = true;
-      return;
-    }
+    if (old) return this.resumeRec(conn, old, 'token');
     if (m.token) this.event('resume-refused', conn.id, {});
     // An automatic reconnect asks to resume only: with the token gone (the grace period ran out),
     // it is told so and stays a lobby viewer instead of silently joining as a new player.
@@ -393,7 +384,39 @@ export class Arena {
     if (!Number.isInteger(m.room) || m.room < 1) return this.kick(conn, 'bad hello');
     const room = this.rooms.get(m.room);
     if (!room) { this.refuse(conn, 'join', 'gone'); return this.send(conn, this.lobbyMsg(conn)); }
+    // A reloaded page that lost its token: the same browser (word id), address and name as a record
+    // of this room whose connection has dropped (it is within its grace) takes that record back,
+    // rather than joining beside it as "Name#2". A connected record is never taken.
+    const mine = this.takeOver(conn, room, f.name);
+    if (mine) return this.resumeRec(conn, mine, 'reload');
     this.join(conn, room, f.name, f.color);
+  }
+
+  takeOver(conn, room, name) {
+    if (!conn.word) return null;
+    const base = n => String(n).replace(/#\d+$/, '').toLowerCase();
+    for (const r of room.humans ? room.humans() : []) {
+      if (!r.conn && r.discAt != null && r.ip === conn.ip && this.recWord.get(r) === conn.word && base(r.name) === base(name)) return r;
+    }
+    return null;
+  }
+
+  // Attach `conn` to the existing record `old` (a token resume, or a reloaded page taking its own
+  // dropped record back): same id, name, score and slot.
+  resumeRec(conn, old, how) {
+    {
+      if (old.conn) { const prev = old.conn; prev.rec = null; this.kick(prev, 'replaced'); }
+      old.conn = conn; old.ip = conn.ip; old.discAt = null; old.lastActive = this.now(); old.inputs.length = 0; this.resetInputs(old);
+      conn.rec = old;
+      this.setView(conn, old.room);
+      if (conn.word) this.recWord.set(old, conn.word);
+      old.room.log(`resume conn=${conn.id} id=${old.id}${how === 'reload' ? ' (reload, no token)' : ''}`);
+      old.room.event('resume', conn.id, { player: old.id, how });
+      // A queued player who was away while a slot freed up was skipped by promote(): retry now.
+      if (old.state === 'queue') old.room.promote();
+      this.welcome(conn, old, true);
+      this.lobbyDirty = true;
+    }
   }
 
   // {t:'create', room, name?}: create a room named `room` ('' or absent: "<name>'s room", or "Room
@@ -442,6 +465,7 @@ export class Arena {
       lastActive: now, discAt: null, fx: 0, joinedAt: now,
     };
     conn.rec = rec;
+    if (conn.word) this.recWord.set(rec, conn.word);
     this.setView(conn, room);
     // The pending admin joining its room is bound to its record; a room without any admin (only
     // made by tests) takes its first human.

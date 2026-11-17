@@ -79,6 +79,20 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
   if (net.word) setWordId(net.word);
   let ws = null, want = null, attempts = 0, retryTimer = 0, pingTimer = 0, pingId = 0;
   let dropped = false, sentToken = null, kicked = false;
+  // The resume token survives a reload of this tab (sessionStorage: per tab, gone when it closes), so
+  // a reloaded page resumes its own player instead of joining beside it as "Name#2" (SPEC §6.2).
+  const SS = 'multisplat-session';
+  const ssGet = () => { try { return JSON.parse(sessionStorage.getItem(SS) || 'null'); } catch { return null; } };
+  const ssSet = v => { try { sessionStorage.setItem(SS, JSON.stringify(v)); } catch { /* private mode */ } };
+  function ssDel() { try { sessionStorage.removeItem(SS); } catch { /* ignore */ } }
+  // Called once at start, before connect: true when this tab was playing (it then asks to resume).
+  net.resumeSaved = function resumeSaved() {
+    const v = ssGet();
+    if (!v || typeof v.token !== 'string' || !Number.isInteger(v.room)) return false;
+    net.token = v.token; want = { name: v.name || '', color: v.color | 0, room: v.room }; dropped = true;
+    dbg('life', 'resume after reload', { room: v.room });
+    return true;
+  };
   // Restarts (SPEC §18): `restarting` from the server's {t:'restart'} or its NET.restartClose until the
   // next welcome (the game stays frozen on its last frame meanwhile; reconnects are paced for
   // RESTART_MS); `halted` once a welcome said this page's rules differ from the server's: nothing is
@@ -155,7 +169,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (code === NET.timeoutClose) dbg('net', 'server closed a silent connection (heartbeat)');
     if (kicked || (code >= 4000 && code < 5000 && code !== NET.timeoutClose)) {
       // a kick ends the session: back to the lobby as a viewer, no resume
-      net.token = null; want = null; net.id = null; net.mode = 'viewer';
+      net.token = null, ssDel(); want = null; net.id = null; net.mode = 'viewer';
       status('kicked');
       retryTimer = setTimeout(net.connect, 1000);
       return;
@@ -268,7 +282,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     dbg('life', 'leave');
     send({ t: 'leave' });
     viewWant = net.lobby.room || 0;                    // the server keeps us looking at the room we left
-    net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
+    net.token = null, ssDel(); want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
     live = false; dropped = false; seq = 0; pending = []; unsent = [];
   };
   // Send a chat line (SPEC §9). Only its length is logged, never the text.
@@ -332,7 +346,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (m.expired) {                                    // our resume came too late: the slot is gone
       dbg('net', 'resume refused: grace period over');
       sendReport('auto', 'resume expired');
-      net.token = null; want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
+      net.token = null, ssDel(); want = null; net.id = null; net.mode = 'viewer'; net.me = null; net.queuePos = 0;
       dropped = false; attempts = 0; live = false; seq = 0; pending = []; unsent = [];
       net.kickReason = 'expired';
       net.lostToRestart = resumeAfterRestart; resumeAfterRestart = false;
@@ -350,6 +364,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (sentToken && !m.resumed) { dbg('net', 'resume refused'); sendReport('auto', 'resume refused'); }
     if (sentToken && m.resumed) dbg('net', 'resume accepted', { id: m.id });
     net.id = m.id; net.token = m.token; net.mode = m.state; net.queuePos = m.queuePos;
+    ssSet({ token: m.token, room: m.room, name: (m.name || '').replace(/#\d+$/, ''), color: m.color });
     net.kickReason = null;
     want.name = m.name.replace(/#\d+$/, '');
     seq = 0; pending = []; unsent = []; localThrows = []; net.me = null; live = true;
@@ -372,7 +387,7 @@ export function createNet({ onEvent = () => {}, onLobby = () => {}, onStatus = (
     if (net.token || net.id != null) send({ t: 'leave' });
     halted = true;
     clearTimeout(retryTimer); clearInterval(pingTimer);
-    want = null; net.token = null; net.id = null; net.mode = 'viewer'; live = false; pending = []; unsent = [];
+    want = null; net.token = null, ssDel(); net.id = null; net.mode = 'viewer'; live = false; pending = []; unsent = [];
     status('outdated');
     if (net.onOutdated) net.onOutdated({ playing, server: m.r ?? m.b ?? null });
   }

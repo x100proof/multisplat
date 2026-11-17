@@ -2322,6 +2322,7 @@ if (ONLINE) {
   syncPanel();
   document.body.classList.add('inlobby');
   document.getElementById('help').classList.add('gone');
+  if (net.resumeSaved()) { goLandscape(); closeLobby(); }   // this tab was playing before a reload: straight back in
   net.connect();
 } else {
   lobbyEl.classList.add('hidden');

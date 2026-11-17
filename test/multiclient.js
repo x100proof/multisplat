@@ -324,7 +324,8 @@ async function longSwordTest() {
     const h = await waitFor(async () => { const d = await drawn(p, H.id); return d && d.long ? d : null; }, { timeout: 3000, what: `holder flag on ${p.name}` });
     assert.ok(Math.abs(h.reach - 18 * 1.6) < 1e-9, `${p.name} draws the holder's reach x1.6`);
     const o = await drawn(p, O.id);
-    assert.equal(o.long, false); assert.equal(o.reach, 18);
+    // (the opponent may pick up the second sword these fast pickups put down: its reach must match its own flag)
+    assert.ok(Math.abs(o.reach - 18 * (o.long ? 1.6 : 1)) < 1e-9, `${p.name} draws Opp's reach for long=${o.long} (${o.reach})`);
   }
   assert.equal(await H.page.evaluate(() => __mp.net.me.long), true, 'the holder\'s own (predicted) player has the flag from `me`');
   assert.ok((await H.page.evaluate(() => __mp.debug.entries())).some(e => e.cat === 'life' && e.msg === 'long sword taken'));
@@ -1145,7 +1146,8 @@ async function adminTest() {
   await B.page.keyboard.press('Escape');
   const menu = p => p.page.evaluate(() => ({ open: __mp.leaveOpen, yes: document.getElementById('lvYes').disabled, yesText: document.getElementById('lvYes').textContent,
     note: document.getElementById('lvNote').textContent, mk: document.querySelectorAll('#lvPlayers button.mkadm').length }));
-  await waitFor(async () => (await menu(B)).open, { what: 'Esc menu' });
+  // (Bob's page hears of Ann fighting with the next lobby broadcast, up to 0.5 s later: the open menu re-renders then)
+  await waitFor(async () => { const x = await menu(B); return x.open && x.yes && x.mk === 1; }, { what: 'Esc menu with Leave blocked and a Make admin' });
   let m = await menu(B);
   assert.ok(m.yes, 'Leave is disabled for an admin with another human in the room');
   assert.match(m.note, /Make someone admin first/); assert.equal(m.mk, 1);
